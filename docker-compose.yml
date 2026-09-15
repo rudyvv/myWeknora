@@ -600,7 +600,7 @@ services:
       - full
 
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: WeKnora-minio
     ports:
       - "${MINIO_PORT:-9000}:9000"
@@ -765,7 +765,8 @@ services:
       - doris
 
   dex:
-    image: dexidp/dex:latest
+    # ghcr.io 直连可用；docker.m.daocloud.io 白名单不含 dexidp/dex
+    image: ghcr.io/dexidp/dex:latest
     container_name: dex
     ports:
       - "5556:5556"
@@ -854,7 +855,7 @@ services:
       - full
 
   langfuse-minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: WeKnora-langfuse-minio
     restart: unless-stopped
     entrypoint: sh
