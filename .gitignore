@@ -49,6 +49,8 @@ frontend/.vite
 frontend/chrome-extension/
 frontend/public/downloads/*.exe
 agents/wedrive-sync/*.spec
+agents/wedrive-sync/build/
+agents/wedrive-sync/dist/
 WeKnora-Chrome-Extension
 packages/protoc-3.19.4-linux-x86_64.zip
 

@@ -178,6 +178,12 @@ const (
 	AuditActionDataSourcePaused        AuditAction = "datasource.paused"
 	AuditActionDataSourceResumed       AuditAction = "datasource.resumed"
 
+	AuditActionWeDriveSourceSubmitted   AuditAction = "wedrive.source_submitted"
+	AuditActionWeDriveSourceApproved    AuditAction = "wedrive.source_approved"
+	AuditActionWeDriveSourceRebound     AuditAction = "wedrive.source_rebound"
+	AuditActionWeDriveSourceDeleted     AuditAction = "wedrive.source_deleted"
+	AuditActionWeDriveSnapshotCommitted AuditAction = "wedrive.snapshot_committed"
+
 	AuditActionKBShareAdded             AuditAction = "kb.share_added"
 	AuditActionKBSharePermissionChanged AuditAction = "kb.share_permission_changed"
 	AuditActionKBShareRemoved           AuditAction = "kb.share_removed"

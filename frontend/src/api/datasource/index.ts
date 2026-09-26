@@ -44,6 +44,11 @@ export interface SyncResultDetail {
   deleted?: number
   skipped?: number
   failed?: number
+	/** Inventory-backed connectors report these even when no file reached ingestion. */
+	inventory_total?: number
+	source_unchanged?: number
+	source_failed?: number
+	source_deferred?: number
   /** Per-item failure samples (capped); localised in the sync-log drawer. */
   errors?: SyncItemError[]
 }
@@ -135,7 +140,7 @@ export function resolveResourceAncestors(id: string, resourceIds: string[]) {
 }
 
 export function triggerSync(id: string) {
-  return post(`/api/v1/datasource/${id}/sync`, {})
+	return post(`/api/v1/datasource/${id}/sync`, {})
 }
 
 export function pauseDataSource(id: string) {

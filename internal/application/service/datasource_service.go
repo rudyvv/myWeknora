@@ -69,6 +69,9 @@ func (s *DataSourceService) CreateDataSource(ctx context.Context, ds *types.Data
 	if ds == nil {
 		return nil, datasource.ErrDataSourceInvalid
 	}
+	if ds.Type == types.ConnectorTypeWeComDrive && ctx.Value(weDriveProvisioningKey{}) != true {
+		return nil, datasource.ErrDataSourceInvalid
+	}
 
 	// Validate knowledge base exists
 	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, ds.KnowledgeBaseID)
@@ -154,6 +157,9 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 	existing, err := s.dsRepo.FindByID(ctx, ds.ID)
 	if err != nil {
 		return nil, err
+	}
+	if existing.Type == types.ConnectorTypeWeComDrive || ds.Type == types.ConnectorTypeWeComDrive {
+		return nil, datasource.ErrDataSourceInvalid
 	}
 
 	if ds.KnowledgeBaseID == "" {
@@ -375,6 +381,14 @@ func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string)
 		_ = s.dsRepo.Update(ctx, ds)
 		return err
 	}
+	if validator, ok := connector.(datasource.DataSourceBindingValidator); ok {
+		if err := validator.ValidateDataSourceBinding(ctx, config, ds); err != nil {
+			ds.Status = types.DataSourceStatusError
+			ds.ErrorMessage = "Data source binding is invalid"
+			_ = s.dsRepo.Update(ctx, ds)
+			return err
+		}
+	}
 
 	// Clear error if it was previously in error state
 	if ds.Status == types.DataSourceStatusError {
@@ -407,6 +421,11 @@ func (s *DataSourceService) ListAvailableResources(
 	config, err := ds.ParseConfig()
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
+	}
+	if validator, ok := connector.(datasource.DataSourceBindingValidator); ok {
+		if err := validator.ValidateDataSourceBinding(ctx, config, ds); err != nil {
+			return nil, err
+		}
 	}
 
 	// List resources
@@ -441,6 +460,11 @@ func (s *DataSourceService) ResolveResourceAncestors(
 	config, err := ds.ParseConfig()
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
+	}
+	if validator, ok := connector.(datasource.DataSourceBindingValidator); ok {
+		if err := validator.ValidateDataSourceBinding(ctx, config, ds); err != nil {
+			return nil, err
+		}
 	}
 
 	ancestors, err := connector.ResolveResourceAncestors(ctx, config, resourceIDs)
@@ -483,7 +507,6 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		DataSourceID: dsID,
 		TenantID:     ds.TenantID,
 		SyncLogID:    syncLog.ID,
-		ForceFull:    false,
 		Initiator:    types.TaskInitiatorFromContext(ctx),
 		Trigger:      "manual",
 	}
@@ -667,6 +690,13 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		_ = s.dsRepo.Update(ctx, ds)
 		return err
 	}
+	if validator, ok := connector.(datasource.DataSourceBindingValidator); ok {
+		if err := validator.ValidateDataSourceBinding(ctx, config, ds); err != nil {
+			s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
+				types.SyncLogStatusFailed, "Data source binding is invalid", wasPaused)
+			return err
+		}
+	}
 	// Surface the KB's multimodal/VLM state to the connector so it only extracts
 	// embedded images for OCR when the KB can actually ingest them (never persisted).
 	config.MultimodalEnabled = kb.IsMultimodalEnabled()
@@ -755,6 +785,14 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 
 	// Auto-tag: find or create a tag for this data source so synced items are easily identifiable
 	autoTagIDs := s.resolveAutoTagIDs(ctx, ds)
+	// A connector may expose source folders independently of content fetching.
+	// Reconcile existing documents first so a hierarchy change never triggers
+	// re-download, re-embedding, or Wiki regeneration for unchanged files.
+	if resolver, ok := connector.(datasource.KnowledgeFolderPathResolver); ok {
+		if err := s.reconcileSourceFolderPaths(ctx, ds, resolver, config); err != nil {
+			logger.Warnf(ctx, "failed to reconcile source folder paths for datasource %s: %v", ds.ID, err)
+		}
+	}
 
 	for _, item := range items {
 		item := item
@@ -804,6 +842,42 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	logger.Infof(ctx, "data source sync completed: ds=%s created=%d updated=%d deleted=%d",
 		payload.DataSourceID, syncLog.ItemsCreated, syncLog.ItemsUpdated, syncLog.ItemsDeleted)
 
+	return nil
+}
+
+func (s *DataSourceService) reconcileSourceFolderPaths(
+	ctx context.Context, ds *types.DataSource, resolver datasource.KnowledgeFolderPathResolver,
+	config *types.DataSourceConfig,
+) error {
+	paths, err := resolver.ResolveKnowledgeFolderPaths(ctx, config)
+	if err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	repo := s.knowledgeService.GetRepository()
+	knowledges, err := repo.ListKnowledgeByKnowledgeBaseID(ctx, ds.TenantID, ds.KnowledgeBaseID)
+	if err != nil {
+		return err
+	}
+	byFolder := map[string][]string{}
+	for _, knowledge := range knowledges {
+		metadata := knowledge.GetMetadata()
+		if metadata == nil || metadata["datasource_id"] != ds.ID {
+			continue
+		}
+		desired, found := paths[metadata["external_id"]]
+		if !found || knowledge.FolderPath == desired {
+			continue
+		}
+		byFolder[desired] = append(byFolder[desired], knowledge.ID)
+	}
+	for folder, ids := range byFolder {
+		if _, err := repo.UpdateKnowledgeFolderPath(ctx, ds.TenantID, ds.KnowledgeBaseID, ids, folder); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -900,9 +974,8 @@ func (s *DataSourceService) applyFetchedItem(
 			return
 		}
 		if deleteErr := s.knowledgeService.DeleteKnowledge(ctx, existing.ID); deleteErr != nil {
-			// The cursor is already past this item, so a failed deletion normally
-			// retries only on a later full sync. Counted separately so the
-			// sync-log message can warn the operator about this gap.
+			// Connectors that observe item outcomes keep this entry in their
+			// incremental cursor. Other connectors may require a later full sync.
 			result.Failed++
 			result.DeletionFailed++
 			logger.Errorf(ctx, "failed to delete knowledge %s for external_id=%s (ds=%s): %v",
@@ -1000,17 +1073,35 @@ type streamSyncHandler struct {
 	syncLog *types.SyncLog
 }
 
+// ReportSourceSyncStats receives inventory-level accounting from connectors
+// that can skip or reject an entry before it becomes a FetchedItem.
+func (h *streamSyncHandler) ReportSourceSyncStats(stats datasource.SourceSyncStats) {
+	h.result.InventoryTotal = stats.Total
+	h.result.SourceUnchanged = stats.Unchanged
+	h.result.SourceFailed = stats.Failed
+	h.result.SourceDeferred = stats.Deferred
+}
+
 // Emit ingests one streamed item. A canceled context aborts the stream so the
 // connector stops fetching; per-item ingest failures are recorded in result and
 // do NOT abort (matching the batch loop, which never fails the whole sync for
 // one bad document).
 func (h *streamSyncHandler) Emit(ctx context.Context, item types.FetchedItem) error {
+	_, err := h.EmitWithOutcome(ctx, item)
+	return err
+}
+
+func (h *streamSyncHandler) EmitWithOutcome(ctx context.Context, item types.FetchedItem) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
+	failedBefore := h.result.Failed
 	h.result.Total++
 	h.svc.applyFetchedItem(withKBActivitySuppressed(ctx), h.ds, &item, h.tagIDs, h.result)
-	return nil
+	if item.IsDeleted && !h.ds.SyncDeletions {
+		return false, nil
+	}
+	return h.result.Failed == failedBefore, nil
 }
 
 // Checkpoint persists the connector cursor onto the data source and mirrors the
@@ -1030,12 +1121,7 @@ func (h *streamSyncHandler) Checkpoint(ctx context.Context, cursor *types.SyncCu
 	}
 
 	// Best-effort live progress; a failure here must not abort the sync.
-	h.syncLog.ItemsTotal = h.result.Total
-	h.syncLog.ItemsCreated = h.result.Created
-	h.syncLog.ItemsUpdated = h.result.Updated
-	h.syncLog.ItemsDeleted = h.result.Deleted
-	h.syncLog.ItemsSkipped = h.result.Skipped
-	h.syncLog.ItemsFailed = h.result.Failed
+	applySyncResultMetrics(h.syncLog, h.result)
 	if err := h.svc.syncLogRepo.UpdateResult(ctx, h.syncLog); err != nil {
 		logger.Warnf(ctx, "failed to persist sync log progress at checkpoint: %v", err)
 	}
@@ -1063,6 +1149,13 @@ func (s *DataSourceService) processSyncStreaming(
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
 
 	autoTagIDs := s.resolveAutoTagIDs(ctx, ds)
+	// Preserve a connector-provided folder hierarchy for unchanged documents as
+	// well, before this streaming run decides which content needs fetching.
+	if resolver, ok := sc.(datasource.KnowledgeFolderPathResolver); ok {
+		if err := s.reconcileSourceFolderPaths(ctx, ds, resolver, config); err != nil {
+			logger.Warnf(ctx, "failed to reconcile source folder paths for datasource %s: %v", ds.ID, err)
+		}
+	}
 
 	forceFull := payload.ForceFull || ds.SyncMode == types.SyncModeFull
 	attempt, _ := asynq.GetRetryCount(ctx)
@@ -1078,6 +1171,7 @@ func (s *DataSourceService) processSyncStreaming(
 	handler := &streamSyncHandler{svc: s, ds: ds, tagIDs: autoTagIDs, result: result, syncLog: syncLog}
 
 	nextCursor, fetchErr := sc.FetchStream(ctx, config, startCursor, handler)
+	partialFetchWarnings, fetchErr := streamingPartialFetchWarnings(fetchErr)
 	if fetchErr != nil {
 		// Progress so far is already checkpointed onto ds.LastSyncCursor; leave
 		// it in place so the Asynq retry resumes from there. Persist counts.
@@ -1091,7 +1185,11 @@ func (s *DataSourceService) processSyncStreaming(
 	resultJSON, _ := result.ToJSON()
 	if err := allFetchedItemsFailedError(result); err != nil {
 		logger.Errorf(ctx, "streaming sync failed while processing fetched items: %v", err)
-		s.updateSyncRunResult(ctx, ds, syncLog, result, resultJSON, types.SyncLogStatusFailed, err.Error(), wasPaused)
+		failureMessage := err.Error()
+		if len(partialFetchWarnings) > 0 {
+			failureMessage += "; " + strings.Join(partialFetchWarnings, "; ")
+		}
+		s.updateSyncRunResult(ctx, ds, syncLog, result, resultJSON, types.SyncLogStatusFailed, failureMessage, wasPaused)
 		return err
 	}
 
@@ -1107,22 +1205,49 @@ func (s *DataSourceService) processSyncStreaming(
 	// the sync-log drawer's failure detail explains which docs didn't make it —
 	// the visibility gap behind "status normal but not everything syncs"
 	// (Tencent/WeKnora#2136). Fetch failures abort the stream before the failed
-	// page is checkpointed, so the next run retries them; deletion failures are
-	// past the cursor and only retry on a full sync in the normal case (see
-	// applyFetchedItem).
+	// page is checkpointed, so the next run retries them. Connectors that
+	// observe item outcomes also retain failed deletions in their cursor.
 	status := types.SyncLogStatusSuccess
 	errMsg := ""
+	if len(partialFetchWarnings) > 0 {
+		// A connector can finish its stream and checkpoint successfully while
+		// some individual resources are unavailable. This is a partial result,
+		// not an infrastructure failure: marking it failed would leave the data
+		// source in error even when other documents were ingested.
+		status = types.SyncLogStatusPartial
+		errMsg = strings.Join(partialFetchWarnings, "; ")
+	}
 	if result.Failed > 0 {
 		status = types.SyncLogStatusPartial
-		errMsg = fmt.Sprintf("%d document(s) failed to sync", result.Failed)
+		processingMessage := fmt.Sprintf("%d document(s) failed to sync", result.Failed)
+		if errMsg != "" {
+			errMsg += "; " + processingMessage
+		} else {
+			errMsg = processingMessage
+		}
 		if result.DeletionFailed > 0 {
-			errMsg += fmt.Sprintf("; %d deletion failure(s) will only retry on the next full sync", result.DeletionFailed)
+			if ds.Type == types.ConnectorTypeWeComDrive {
+				errMsg += fmt.Sprintf("; %d deletion failure(s) will retry on the next sync", result.DeletionFailed)
+			} else {
+				errMsg += fmt.Sprintf("; %d deletion failure(s) will only retry on the next full sync", result.DeletionFailed)
+			}
 		}
 	}
 	s.updateSyncRunResult(ctx, ds, syncLog, result, resultJSON, status, errMsg, wasPaused)
 	logger.Infof(ctx, "streaming sync completed: ds=%s created=%d updated=%d deleted=%d skipped=%d failed=%d",
 		payload.DataSourceID, result.Created, result.Updated, result.Deleted, result.Skipped, result.Failed)
 	return nil
+}
+
+// streamingPartialFetchWarnings converts a connector's completed-but-partial
+// response into a normal result path. A non-partial error still aborts the run
+// so the task queue can retry its cursor from the last checkpoint.
+func streamingPartialFetchWarnings(fetchErr error) ([]string, error) {
+	var partial *datasource.PartialFetchError
+	if errors.As(fetchErr, &partial) {
+		return partial.Details, nil
+	}
+	return nil, fetchErr
 }
 
 func (s *DataSourceService) updateSyncRunResult(
@@ -1135,12 +1260,7 @@ func (s *DataSourceService) updateSyncRunResult(
 	errorMessage string,
 	wasPaused bool,
 ) {
-	syncLog.ItemsTotal = result.Total
-	syncLog.ItemsCreated = result.Created
-	syncLog.ItemsUpdated = result.Updated
-	syncLog.ItemsDeleted = result.Deleted
-	syncLog.ItemsSkipped = result.Skipped
-	syncLog.ItemsFailed = result.Failed
+	applySyncResultMetrics(syncLog, result)
 	syncLog.Status = status
 	syncLog.FinishedAt = timePtr(time.Now().UTC())
 	syncLog.ErrorMessage = errorMessage
@@ -1180,12 +1300,38 @@ func (s *DataSourceService) updateSyncRunResult(
 		})
 }
 
+// applySyncResultMetrics stores a log-friendly accounting. For normal
+// connectors the existing emitted-item counters are retained. An inventory
+// connector may additionally report total/unchanged/pre-fetch-failure values;
+// those make the log describe the real source scan rather than only the small
+// subset that reached the knowledge-base writer.
+func applySyncResultMetrics(syncLog *types.SyncLog, result *types.SyncResult) {
+	if syncLog == nil || result == nil {
+		return
+	}
+	total := result.Total
+	if result.InventoryTotal > 0 {
+		total = result.InventoryTotal
+	}
+	syncLog.ItemsTotal = total
+	syncLog.ItemsCreated = result.Created
+	syncLog.ItemsUpdated = result.Updated
+	syncLog.ItemsDeleted = result.Deleted
+	syncLog.ItemsSkipped = result.Skipped + result.SourceUnchanged
+	syncLog.ItemsFailed = result.Failed + result.SourceFailed
+}
+
 func allFetchedItemsFailedError(result *types.SyncResult) error {
-	if result == nil || result.Total == 0 {
+	if result == nil {
 		return nil
 	}
-	if result.Failed != result.Total || result.Created != 0 || result.Updated != 0 ||
-		result.Deleted != 0 || result.Skipped != 0 {
+	total := result.Total
+	if result.InventoryTotal > 0 {
+		total = result.InventoryTotal
+	}
+	failed := result.Failed + result.SourceFailed
+	if total == 0 || failed < total || result.Created != 0 || result.Updated != 0 ||
+		result.Deleted != 0 || result.Skipped != 0 || result.SourceUnchanged != 0 || result.SourceDeferred != 0 {
 		return nil
 	}
 
@@ -1198,9 +1344,9 @@ func allFetchedItemsFailedError(result *types.SyncResult) error {
 		}
 	}
 	if detail == "" {
-		return fmt.Errorf("all fetched items failed during sync (%d/%d)", result.Failed, result.Total)
+		return fmt.Errorf("all fetched items failed during sync (%d/%d)", failed, total)
 	}
-	return fmt.Errorf("all fetched items failed during sync (%d/%d): %s", result.Failed, result.Total, detail)
+	return fmt.Errorf("all fetched items failed during sync (%d/%d): %s", failed, total, detail)
 }
 
 // ValidateCredentials tests connectivity using raw credentials without persisting anything.
@@ -1233,7 +1379,13 @@ func (s *DataSourceService) validateDataSourceConfig(ctx context.Context, ds *ty
 		return datasource.ErrInvalidConfig
 	}
 
-	return connector.Validate(ctx, config)
+	if err := connector.Validate(ctx, config); err != nil {
+		return err
+	}
+	if validator, ok := connector.(datasource.DataSourceBindingValidator); ok {
+		return validator.ValidateDataSourceBinding(ctx, config, ds)
+	}
+	return nil
 }
 
 // ingestItem writes a single FetchedItem into the knowledge base.

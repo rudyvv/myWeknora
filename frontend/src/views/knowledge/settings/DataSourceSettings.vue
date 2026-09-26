@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import {
@@ -13,12 +14,14 @@ import {
 import { humanizeCron, relativeTime } from '@/utils/cronHumanize'
 import DataSourceEditorDialog from './DataSourceEditorDialog.vue'
 import DataSourceSyncLogs from './DataSourceSyncLogs.vue'
+import { syncLogDisplayStatus } from './syncLogDisplay'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ kbId: string }>()
 const emit = defineEmits<{ (e: 'count', value: number): void }>()
 const { t } = useI18n()
+const router = useRouter()
 const authStore = useAuthStore()
 
 // 后端 /datasource 的 list/logs 是 Viewer+，但所有写操作（POST/PUT/DELETE
@@ -33,6 +36,7 @@ const editingDs = ref<DataSource | null>(null)
 const logsVisible = ref(false)
 const logsDsId = ref('')
 const logsDsName = ref('')
+const logsDsType = ref('')
 const pollTimer = ref<number | null>(null)
 
 function stopPolling() {
@@ -75,13 +79,26 @@ function openCreate() {
 }
 
 function openEdit(ds: DataSource) {
+  if (isWeDriveDataSource(ds)) {
+    openWeDriveSync()
+    return
+  }
   editingDs.value = ds
   editorVisible.value = true
+}
+
+function isWeDriveDataSource(ds: DataSource) {
+  return ds.type === 'wecom_drive_rpa'
+}
+
+function openWeDriveSync() {
+  void router.push({ path: '/platform/wedrive-sync', query: { kb_id: props.kbId } })
 }
 
 function openLogs(ds: DataSource) {
   logsDsId.value = ds.id
   logsDsName.value = ds.name
+  logsDsType.value = ds.type
   logsVisible.value = true
 }
 
@@ -150,6 +167,73 @@ function lastSyncFullTime(ds: DataSource) {
   return new Date(ds.last_sync_at).toLocaleString()
 }
 
+// Older server records may still contain raw WeCom CLI diagnostics from before
+// the connector started redacting them. Never render local paths, inventory
+// IDs, or share-link material in the normal knowledge-base settings page.
+function displayDataSourceError(ds: DataSource) {
+  const raw = ds.error_message || ''
+  if (ds.type !== 'wecom_drive_rpa') return raw
+  const lower = raw.toLowerCase()
+  const messages: string[] = []
+  const count = (pattern: RegExp) => {
+    const match = raw.match(pattern)
+    return match ? `（${match[1]} 项）` : ''
+  }
+  if (lower.includes('offline file has no valid share link') || lower.includes('offline files do not have a usable share link')) {
+    messages.push(`离线文件没有可用的分享链接${count(/offline files do not have a usable share link\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('agent could not create some share links because the wecom drive sharing ui was unavailable')) {
+    messages.push(`Agent 无法操作文件的微盘分享界面${count(/agent could not create some share links because the wecom drive sharing ui was unavailable\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes("agent could not create some share links; check the source user's share permission and tenant sharing policy")) {
+    messages.push(`文件无法创建分享链接，请检查扫描账号的分享权限和企业分享策略${count(/agent could not create some share links; check the source user's share permission and tenant sharing policy\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('agent could not create some share links because the wecom drive sharing operation failed')) {
+    messages.push(`文件创建微盘分享链接失败${count(/agent could not create some share links because the wecom drive sharing operation failed\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('online documents are not accessible to the configured wecom cli identity')) {
+    messages.push(`在线文档未对当前企业微信 CLI 身份开放${count(/online documents are not accessible to the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('offline file share links cannot be downloaded by the configured wecom cli identity')) {
+    messages.push(`离线文件分享链接无法由当前企业微信 CLI 身份下载${count(/offline file share links cannot be downloaded by the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('online documents could not be exported by the configured wecom cli identity')) {
+    messages.push(`在线文档无法由当前企业微信 CLI 身份导出，请检查成员权限或 CLI 授权${count(/online documents could not be exported by the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('offline files with a share link could not be downloaded by the configured wecom cli identity')) {
+    messages.push(`离线文件虽有分享链接，仍无法由当前企业微信 CLI 身份下载${count(/offline files with a share link could not be downloaded by the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('wecom cli bot daily file-content retrieval quota has been reached')) {
+    messages.push('机器人每日文件内容读取配额已耗尽，请在配额恢复后重试')
+  }
+  if (lower.includes('wecom cli rate limit was reached')) {
+    messages.push(`企业微信 CLI 请求触发限流，请稍后重试${count(/wecom cli rate limit was reached; retry later\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('create wecom cli profile') || lower.includes('credential initialization') || lower.includes('access is denied')) {
+    messages.push('企业微信 CLI 凭据存储不可用')
+  }
+  if (lower.includes('wecom-cli timed out')) {
+    messages.push('企业微信 CLI 请求超时')
+  }
+  const unsupported = raw.match(/unsupported file formats are not supported\s*\(([^)]*)\)/i)
+  if (unsupported) {
+    const formats = unsupported[1]
+      .split(';')
+      .map(entry => entry.trim().replace(/:\s*(\d+) items?$/i, '（$1 项）'))
+      .filter(Boolean)
+      .join('、')
+    messages.push(`不支持的文件格式：${formats}`)
+  }
+  if (lower.includes('some files could not be fetched from wecom drive')) {
+    messages.push(`企业微信微盘文件暂时无法同步${count(/some files could not be fetched from wecom drive\s*\((\d+) items\)/i)}`)
+  }
+  if (messages.length > 0) return messages.join('；')
+  if (lower.includes('fetch failed') || lower.includes('partial fetch')) {
+    return '企业微信微盘文件暂时无法同步，请重试或查看同步日志'
+  }
+  return '企业微信微盘同步失败，请查看服务端日志'
+}
+
 function syncResultPills(ds: DataSource) {
   const log = ds.latest_sync_log
   if (!log) return []
@@ -165,7 +249,7 @@ function syncResultPills(ds: DataSource) {
 function lastSyncStatusLabel(ds: DataSource) {
   const log = ds.latest_sync_log
   if (!log) return '--'
-  return t(`datasource.logStatus.${log.status}`)
+  return t(`datasource.logStatus.${syncLogDisplayStatus(log)}`)
 }
 
 function isSyncRunning(ds: DataSource) {
@@ -198,12 +282,12 @@ onBeforeUnmount(stopPolling)
 
       <div v-else-if="!loading" class="ds-grid">
         <component
-          :is="canManageDataSource ? 'button' : 'div'"
+          :is="canManageDataSource && !isWeDriveDataSource(ds) ? 'button' : 'div'"
           v-for="ds in dataSources"
           :key="ds.id"
-          :type="canManageDataSource ? 'button' : undefined"
-          :class="['ds-card', `ds-card--${ds.type}`, { 'ds-card--clickable': canManageDataSource }]"
-          @click="canManageDataSource ? openEdit(ds) : undefined"
+          :type="canManageDataSource && !isWeDriveDataSource(ds) ? 'button' : undefined"
+          :class="['ds-card', `ds-card--${ds.type}`, { 'ds-card--clickable': canManageDataSource && !isWeDriveDataSource(ds) }]"
+          @click="canManageDataSource && !isWeDriveDataSource(ds) ? openEdit(ds) : undefined"
         >
           <div class="ds-card__badge">
             <DataSourceTypeIcon :type="ds.type" variant="badge" />
@@ -224,8 +308,11 @@ onBeforeUnmount(stopPolling)
                   </t-button>
                   <template #dropdown>
                     <t-dropdown-menu>
-                      <t-dropdown-item v-if="canManageDataSource" @click="openEdit(ds)">
+                      <t-dropdown-item v-if="canManageDataSource && !isWeDriveDataSource(ds)" @click="openEdit(ds)">
                         <t-icon name="edit" /> {{ t('datasource.edit') }}
+                      </t-dropdown-item>
+                      <t-dropdown-item v-else-if="canManageDataSource" @click="openWeDriveSync">
+                        <t-icon name="setting" /> 在企业微信微盘同步中管理
                       </t-dropdown-item>
                       <t-dropdown-item
                         v-if="canManageDataSource"
@@ -239,19 +326,19 @@ onBeforeUnmount(stopPolling)
                         <t-icon name="root-list" /> {{ t('datasource.logs') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource && ds.status === 'active'"
+                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && ds.status === 'active'"
                         @click="handlePause(ds)"
                       >
                         <t-icon name="pause-circle" /> {{ t('datasource.pause') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-else-if="canManageDataSource && ds.status === 'paused'"
+                        v-else-if="canManageDataSource && !isWeDriveDataSource(ds) && ds.status === 'paused'"
                         @click="handleResume(ds)"
                       >
                         <t-icon name="play-circle" /> {{ t('datasource.resume') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource"
+                        v-if="canManageDataSource && !isWeDriveDataSource(ds)"
                         theme="error"
                         class="ds-dropdown-delete-item"
                       >
@@ -292,7 +379,7 @@ onBeforeUnmount(stopPolling)
                 <span class="ds-card__sep">·</span>
                 <span
                   class="ds-card__sync-result"
-                  :class="`ds-card__sync-result--${ds.latest_sync_log.status}`"
+                  :class="`ds-card__sync-result--${syncLogDisplayStatus(ds.latest_sync_log)}`"
                 >
                   {{ lastSyncStatusLabel(ds) }}
                 </span>
@@ -303,9 +390,13 @@ onBeforeUnmount(stopPolling)
                 >{{ pill.text }}</span>
               </template>
             </p>
+            <p v-if="isWeDriveDataSource(ds)" class="ds-card__managed-note">
+              目录与扫描设置请在企业微信微盘同步中管理。
+              <t-button variant="text" size="small" @click.stop="openWeDriveSync">打开企业微信微盘同步</t-button>
+            </p>
             <div v-if="ds.error_message" class="ds-card__error">
               <t-icon name="error-circle-filled" size="14px" />
-              <span>{{ ds.error_message }}</span>
+              <span>{{ displayDataSourceError(ds) }}</span>
             </div>
           </div>
         </component>
@@ -335,6 +426,7 @@ onBeforeUnmount(stopPolling)
       v-model:visible="logsVisible"
       :data-source-id="logsDsId"
       :data-source-name="logsDsName"
+      :data-source-type="logsDsType"
     />
   </div>
 </template>
@@ -535,6 +627,23 @@ onBeforeUnmount(stopPolling)
     line-height: 1.45;
     color: var(--td-text-color-placeholder);
     min-width: 0;
+  }
+
+  &__managed-note {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px;
+    margin: 6px 0 0;
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+
+    :deep(.t-button) {
+      height: auto;
+      padding: 0 2px;
+      font-size: 12px;
+    }
   }
 
   &__sync-result {

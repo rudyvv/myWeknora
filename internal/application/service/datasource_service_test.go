@@ -190,6 +190,24 @@ func TestAllFetchedItemsFailedErrorIgnoresPartialFailure(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAllFetchedItemsFailedErrorIncludesInventoryFetchFailures(t *testing.T) {
+	err := allFetchedItemsFailedError(&types.SyncResult{
+		InventoryTotal: 11,
+		SourceFailed:   11,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "11/11")
+}
+
+func TestAllFetchedItemsFailedErrorKeepsMixedInventoryPartial(t *testing.T) {
+	err := allFetchedItemsFailedError(&types.SyncResult{
+		InventoryTotal: 11,
+		SourceFailed:   10,
+		SourceUnchanged: 1,
+	})
+	require.NoError(t, err)
+}
+
 func TestAllFetchedItemsFailedErrorIgnoresSkippedItems(t *testing.T) {
 	err := allFetchedItemsFailedError(&types.SyncResult{
 		Total:   3,

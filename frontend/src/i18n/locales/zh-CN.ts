@@ -856,6 +856,7 @@ export default {
       authHeadersHint: '用于访问私有订阅源，每行一个，格式为「名称: 值」，例如 Authorization: Bearer xxxx'
     },
     connectorDesc: {
+	  wecom_drive_rpa: '本机同步工具读取企业微信微盘目录，服务端通过企业微信 CLI 获取内容并入库',
       feishu: '同步飞书知识库中的文档、表格、文件',
       lark: '同步 Lark 知识库中的文档、表格、文件（飞书国际版）',
       feishu_drive: "同步飞书云盘文件夹中的文档、表格、文件",
@@ -868,6 +869,7 @@ export default {
       gitlab: '同步 GitLab 项目中的文件'
     },
     connector: {
+	  wecom_drive_rpa: '企业微信微盘',
       feishu: '飞书',
       lark: 'Lark（飞书国际版）',
       feishu_drive: "飞书云盘",
@@ -7131,6 +7133,7 @@ export default {
     knowledgeBase: '知识库',
     agents: '智能体',
     organizations: '共享空间',
+    wedriveSync: '企业微信微盘同步',
     newChat: '新对话',
     settings: '系统设置',
     logout: '退出登录',

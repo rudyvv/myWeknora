@@ -110,3 +110,26 @@ func TestDataSourceResponse_NoConfig(t *testing.T) {
 	// No config jsonb stored → no config object in the response.
 	assert.NotContains(t, string(body), `"config":`)
 }
+
+func TestWeDriveResponseRedactsHistoricalRawErrors(t *testing.T) {
+	secretURL := "https://drive.example.com/share/private-token"
+	result := types.JSON(`{"failed":1,"source_deferred":2,"errors":[{"message":"` + secretURL + `"}]}`)
+	log := &types.SyncLog{ErrorMessage: "fetch failed: " + secretURL, Result: result}
+	ds := &types.DataSource{
+		Type: types.ConnectorTypeWeComDrive, ErrorMessage: "fetch failed: " + secretURL,
+		LastSyncResult: result, LatestSyncLog: log,
+	}
+	response := NewDataSourceResponse(ds)
+	body, err := json.Marshal(response)
+	assert.NoError(t, err)
+	assert.NotContains(t, string(body), secretURL)
+	assert.Contains(t, string(body), `"source_deferred":2`)
+	assert.Equal(t, "fetch failed: "+secretURL, ds.ErrorMessage)
+	assert.Equal(t, "fetch failed: "+secretURL, log.ErrorMessage)
+
+	safeLog := SafeWeDriveSyncLog(log)
+	logBody, err := json.Marshal(safeLog)
+	assert.NoError(t, err)
+	assert.NotContains(t, string(logBody), secretURL)
+	assert.Equal(t, "fetch failed: "+secretURL, log.ErrorMessage)
+}

@@ -69,7 +69,7 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
 		enrichRSSFeedURLsInSettings(ds.Type, parsed, cfgDTO)
 		configured = parsed.HasConfiguredCredentials(ds.Type)
 	}
-	return &DataSourceResponse{
+	response := &DataSourceResponse{
 		ID:                   ds.ID,
 		TenantID:             ds.TenantID,
 		KnowledgeBaseID:      ds.KnowledgeBaseID,
@@ -94,6 +94,50 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
 			"credentials": {Configured: configured},
 		},
 	}
+	if ds.Type == types.ConnectorTypeWeComDrive {
+		response.ErrorMessage = safeWeDriveError(ds.ErrorMessage)
+		response.LastSyncResult = safeWeDriveResult(ds.LastSyncResult)
+		response.LatestSyncLog = SafeWeDriveSyncLog(ds.LatestSyncLog)
+	}
+	return response
+}
+
+// Historical WeDrive failures can contain share URLs or local paths. Keep the
+// stored diagnostics for operators while returning only safe summaries through
+// the ordinary data-source API.
+func safeWeDriveError(message string) string {
+	if message == "" {
+		return ""
+	}
+	return "WeCom Drive sync failed; see server logs"
+}
+
+func safeWeDriveResult(raw types.JSON) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil
+	}
+	// Older per-item samples may contain raw connector errors. The aggregate
+	// counts remain available; individual diagnostics stay server-side.
+	delete(result, "errors")
+	safe, err := json.Marshal(result)
+	if err != nil {
+		return nil
+	}
+	return safe
+}
+
+func SafeWeDriveSyncLog(log *types.SyncLog) *types.SyncLog {
+	if log == nil {
+		return nil
+	}
+	safe := *log
+	safe.ErrorMessage = safeWeDriveError(log.ErrorMessage)
+	safe.Result = types.JSON(safeWeDriveResult(log.Result))
+	return &safe
 }
 
 // enrichRSSFeedURLsInSettings copies feed_urls from credentials into settings

@@ -120,6 +120,7 @@ export default {
     knowledgeBase: 'ナレッジベース',
     agents: 'エージェント',
     organizations: '共有スペース',
+    wedriveSync: 'WeCom ドライブ同期',
     newChat: '新しいチャット',
     settings: 'システム設定',
     logout: 'ログアウト',
@@ -6435,6 +6436,7 @@ export default {
       docsFailedSummary: '{n}件のドキュメントの同期に失敗しました'
     },
     connector: {
+      wecom_drive_rpa: 'WeCom WeDrive',
       feishu: 'Feishu',
       lark: 'Lark',
       feishu_drive: 'Feishu Drive',
@@ -6447,6 +6449,7 @@ export default {
       gitlab: 'GitLab'
     },
     connectorDesc: {
+      wecom_drive_rpa: 'ローカル同期ツールでフォルダーを検出し、サーバー側の WeCom CLI でコンテンツを取得します',
       feishu: 'Feishu Wikiからドキュメント、スプレッドシート、ファイルを同期します',
       lark: 'Lark Wiki（Feishu国際版）からドキュメント、スプレッドシート、ファイルを同期します',
       feishu_drive: 'Feishu Driveのフォルダからドキュメント、スプレッドシート、ファイルを同期します',

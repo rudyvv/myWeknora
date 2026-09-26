@@ -2,10 +2,12 @@
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getSyncLogs, type SyncLog, type SyncItemError } from '@/api/datasource'
+import { syncLogDisplayStatus } from './syncLogDisplay'
 
 const props = defineProps<{
   dataSourceId: string
   dataSourceName?: string
+  dataSourceType?: string
 }>()
 const visible = defineModel<boolean>('visible', { default: false })
 const { t } = useI18n()
@@ -59,8 +61,8 @@ function loadMore() {
 // --- Stats ---
 const stats = computed(() => {
   const total = logs.value.length
-  const success = logs.value.filter(l => l.status === 'success').length
-  const failed = logs.value.filter(l => l.status === 'failed').length
+  const success = logs.value.filter(l => syncLogDisplayStatus(l) === 'success').length
+  const failed = logs.value.filter(l => syncLogDisplayStatus(l) === 'failed').length
   const totalItems = logs.value.reduce((acc, l) => acc + (l.items_created || 0) + (l.items_updated || 0), 0)
   return { total, success, failed, totalItems }
 })
@@ -127,8 +129,88 @@ function duration(log: SyncLog) {
   return `${Math.floor(sec / 60)}m${sec % 60}s`
 }
 
+// Protect viewers of historical logs created before the WeCom connector began
+// persisting public-only failures. Detailed diagnostics remain server-side.
+function displaySyncLogError(raw: string) {
+  const lower = raw.toLowerCase()
+  const messages: string[] = []
+  const count = (pattern: RegExp) => {
+    const match = raw.match(pattern)
+    return match ? `（${match[1]} 项）` : ''
+  }
+  if (lower.includes('offline file has no valid share link') || lower.includes('offline files do not have a usable share link')) {
+    messages.push(`离线文件没有可用的分享链接${count(/offline files do not have a usable share link\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('agent could not create some share links because the wecom drive sharing ui was unavailable')) {
+    messages.push(`Agent 无法操作文件的微盘分享界面${count(/agent could not create some share links because the wecom drive sharing ui was unavailable\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes("agent could not create some share links; check the source user's share permission and tenant sharing policy")) {
+    messages.push(`文件无法创建分享链接，请检查扫描账号的分享权限和企业分享策略${count(/agent could not create some share links; check the source user's share permission and tenant sharing policy\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('agent could not create some share links because the wecom drive sharing operation failed')) {
+    messages.push(`文件创建微盘分享链接失败${count(/agent could not create some share links because the wecom drive sharing operation failed\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('online documents are not accessible to the configured wecom cli identity')) {
+    messages.push(`在线文档未对当前企业微信 CLI 身份开放${count(/online documents are not accessible to the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('offline file share links cannot be downloaded by the configured wecom cli identity')) {
+    messages.push(`离线文件分享链接无法由当前企业微信 CLI 身份下载${count(/offline file share links cannot be downloaded by the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('online documents could not be exported by the configured wecom cli identity')) {
+    messages.push(`在线文档无法由当前企业微信 CLI 身份导出，请检查成员权限或 CLI 授权${count(/online documents could not be exported by the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('offline files with a share link could not be downloaded by the configured wecom cli identity')) {
+    messages.push(`离线文件虽有分享链接，仍无法由当前企业微信 CLI 身份下载${count(/offline files with a share link could not be downloaded by the configured wecom cli identity\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('wecom cli bot daily file-content retrieval quota has been reached')) {
+    messages.push('机器人每日文件内容读取配额已耗尽，请在配额恢复后重试')
+  }
+  if (lower.includes('wecom cli rate limit was reached')) {
+    messages.push(`企业微信 CLI 请求触发限流，请稍后重试${count(/wecom cli rate limit was reached; retry later\s*\((\d+) items\)/i)}`)
+  }
+  if (lower.includes('create wecom cli profile') || lower.includes('credential initialization') || lower.includes('access is denied')) {
+    messages.push('企业微信 CLI 凭据存储不可用')
+  }
+  if (lower.includes('wecom-cli timed out')) {
+    messages.push('企业微信 CLI 请求超时')
+  }
+  const unsupported = raw.match(/unsupported file formats are not supported\s*\(([^)]*)\)/i)
+  if (unsupported) {
+    const formats = unsupported[1]
+      .split(';')
+      .map(entry => entry.trim().replace(/:\s*(\d+) items?$/i, '（$1 项）'))
+      .filter(Boolean)
+      .join('、')
+    messages.push(`不支持的文件格式：${formats}`)
+  }
+  if (lower.includes('some files could not be fetched from wecom drive')) {
+    messages.push(`企业微信微盘文件暂时无法同步${count(/some files could not be fetched from wecom drive\s*\((\d+) items\)/i)}`)
+  }
+  if (messages.length > 0) return messages.join('；')
+  if (lower.includes('fetch failed') || lower.includes('partial fetch')) {
+    return '企业微信微盘文件暂时无法同步，请重试'
+  }
+  return props.dataSourceType === 'wecom_drive_rpa' ? '企业微信微盘同步失败，请查看服务端日志' : raw
+}
+
 function hasPills(log: SyncLog) {
   return log.items_created > 0 || log.items_updated > 0 || log.items_deleted > 0 || log.items_skipped > 0 || log.items_failed > 0
+}
+
+// Keep the expanded log explicit even for a zero-result run: an inventory
+// connector may be blocked before any document reaches the ingestion layer.
+function accountingRows(log: SyncLog) {
+  const rows = [
+    { label: '目录文件总数', value: log.items_total },
+    { label: '新增文件', value: log.items_created },
+    { label: '更新文件', value: log.items_updated },
+    { label: '跳过未变化/重复文件', value: log.items_skipped },
+    { label: '失败文件', value: log.items_failed },
+  ]
+  const deferred = log.result?.source_deferred || 0
+  if (deferred > 0) rows.push({ label: '本轮未尝试（等待恢复后继续）', value: deferred })
+  if (log.items_deleted > 0) rows.push({ label: '删除文件', value: log.items_deleted })
+  return rows
 }
 
 // Cap the per-item failure list so a sync that failed thousands of documents
@@ -238,7 +320,7 @@ const groupedLogs = computed(() => {
           >
             <!-- Dot -->
             <div class="tl-dot-col">
-              <span class="tl-dot" :style="{ background: statusColor(log.status) }">
+              <span class="tl-dot" :style="{ background: statusColor(syncLogDisplayStatus(log)) }">
                 <t-icon v-if="log.status === 'running'" name="loading" size="10px" class="tl-spin" />
               </span>
               <span class="tl-line"></span>
@@ -247,8 +329,8 @@ const groupedLogs = computed(() => {
             <!-- Content -->
             <div class="tl-content">
               <div class="tl-header">
-                <span class="tl-status" :style="{ color: statusColor(log.status) }">
-                  {{ t(`datasource.logStatus.${log.status}`) }}
+                <span class="tl-status" :style="{ color: statusColor(syncLogDisplayStatus(log)) }">
+                  {{ t(`datasource.logStatus.${syncLogDisplayStatus(log)}`) }}
                 </span>
                 <span class="tl-time">{{ formatHourMin(log.started_at) }}</span>
                 <span v-if="log.finished_at" class="tl-duration">{{ duration(log) }}</span>
@@ -273,17 +355,17 @@ const groupedLogs = computed(() => {
                   <span class="detail-label">{{ t('datasource.logDetail.endTime') }}</span>
                   <span>{{ formatTime(log.finished_at) }}</span>
                 </div>
-                <div v-if="log.items_total > 0" class="detail-row">
-                  <span class="detail-label">{{ t('datasource.logMetric.total') }}</span>
-                  <span>{{ log.items_total }}</span>
+                <div v-for="row in accountingRows(log)" :key="row.label" class="detail-row">
+                  <span class="detail-label">{{ row.label }}</span>
+                  <span>{{ row.value }}</span>
                 </div>
-                <!-- Localised failure summary; raw error_message only for a
-                     pure infra failure with no per-document detail. -->
+                <!-- A numeric total and reason breakdown answer different
+                     questions, so show both rather than hiding the latter. -->
                 <div v-if="log.items_failed > 0" class="tl-error">
-                  {{ t('datasource.logDetail.docsFailedSummary', { n: log.items_failed }) }}
+                  文件处理失败合计：{{ log.items_failed }} 项
                 </div>
-                <div v-else-if="log.error_message" class="tl-error">
-                  {{ log.error_message }}
+                <div v-if="log.error_message" class="tl-error">
+                  {{ displaySyncLogError(log.error_message) }}
                 </div>
 
                 <!-- Per-item failures: which documents failed and why.
