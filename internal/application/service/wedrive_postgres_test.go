@@ -44,7 +44,10 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 	defer sqlDB.Close()
 
 	require.NoError(t, db.Exec("CREATE TABLE data_sources (id varchar(36) PRIMARY KEY, type varchar(50), sync_schedule varchar(100))").Error)
-	for _, version := range []string{"000096_wecom_wedrive_sync.up.sql", "000097_wedrive_scan_cadence.up.sql", "000098_wedrive_manual_content_sync.up.sql"} {
+	for _, version := range []string{"000096_wecom_wedrive_sync.up.sql", "000097_wedrive_scan_cadence.up.sql", "000098_wedrive_manual_content_sync.up.sql", "000099_wedrive_scan_attempt.up.sql"} {
+		if version == "000099_wedrive_scan_attempt.up.sql" {
+			seedLegacyWeDriveScanAttempts(t, db)
+		}
 		if version == "000097_wedrive_scan_cadence.up.sql" {
 			require.NoError(t, db.Exec("INSERT INTO data_sources (id, type, sync_schedule) VALUES ('legacy-ds', 'wecom_drive_rpa', '*/30 * * * *')").Error)
 			require.NoError(t, db.Exec("INSERT INTO wedrive_sources (id, tenant_id, knowledge_base_id, device_id, created_by, name, root_url, status, sync_schedule) VALUES ('legacy-source', 7, 'kb', 'legacy-device', 'owner', 'legacy', 'https://drive.weixin.qq.com/root', 'active', '*/30 * * * *')").Error)
@@ -53,6 +56,7 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 		require.NoError(t, readErr)
 		require.NoErrorf(t, db.Exec(string(contents)).Error, "migration %s", version)
 	}
+	assertMigratedWeDriveScanAttempts(t, db)
 	var legacy struct{ SyncSchedule string }
 	require.NoError(t, db.Raw("SELECT sync_schedule FROM wedrive_sources WHERE id = 'legacy-source'").Scan(&legacy).Error)
 	require.Empty(t, legacy.SyncSchedule)
@@ -67,7 +71,7 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 	svc.now = func() time.Time { return now }
 	device := &types.WeDriveDevice{ID: "race-device", TenantID: 7}
 	for trial := 0; trial < 30; trial++ {
-		require.NoError(t, db.Exec("UPDATE wedrive_sources SET scan_state = 'idle', scan_lease_expires_at = NULL WHERE id IN ('race-a', 'race-b')").Error)
+		require.NoError(t, db.Exec("UPDATE wedrive_sources SET scan_state = 'idle', scan_lease_expires_at = NULL, scan_attempt_id = '' WHERE id IN ('race-a', 'race-b')").Error)
 		start := make(chan struct{})
 		results := make(chan error, 2)
 		var wg sync.WaitGroup
@@ -99,6 +103,10 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 		var running int64
 		require.NoError(t, db.Model(&types.WeDriveSource{}).Where("id IN ? AND scan_state = ?", []string{"race-a", "race-b"}, types.WeDriveScanStateRunning).Count(&running).Error)
 		require.Equal(t, int64(1), running)
+		var current types.WeDriveSource
+		require.NoError(t, db.Where("device_id = ? AND scan_state = ?", device.ID, types.WeDriveScanStateRunning).First(&current).Error)
+		require.NotEmpty(t, current.ScanAttemptID)
+		require.NotNil(t, current.ScanLeaseExpiresAt)
 	}
 
 	expired := now.Add(-time.Minute)
@@ -112,6 +120,22 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 	require.Equal(t, types.WeDriveScanStateRetryWait, saved.ScanState)
 	require.True(t, saved.NextScanAt.Equal(now.Add(weDriveScanRetryDelay)), "retry must be delayed by 10 minutes")
 	now = now.Add(weDriveScanRetryDelay)
-	_, err = svc.ClaimScan(context.Background(), expiredDevice, "expired", ClaimWeDriveScanInput{Trigger: "scheduled"})
+	first, err := svc.ClaimScan(context.Background(), expiredDevice, "expired", ClaimWeDriveScanInput{Trigger: "scheduled"})
 	require.NoError(t, err)
+	require.NotEmpty(t, first.ScanAttemptID)
+	now = now.Add(30 * time.Minute)
+	second, err := svc.ClaimScan(context.Background(), expiredDevice, "expired", ClaimWeDriveScanInput{Trigger: "manual"})
+	require.NoError(t, err)
+	require.NotEqual(t, first.ScanAttemptID, second.ScanAttemptID)
+	_, err = svc.ReportScanFailure(context.Background(), expiredDevice, "expired", ReportWeDriveScanFailureInput{ScanAttemptID: first.ScanAttemptID, Code: "old_failure"})
+	require.ErrorIs(t, err, ErrWeDriveScanAttemptConflict)
+	unchanged, err := svc.GetSource(context.Background(), 7, "expired")
+	require.NoError(t, err)
+	require.Equal(t, second.ScanAttemptID, unchanged.ScanAttemptID)
+	require.Equal(t, types.WeDriveScanStateRunning, unchanged.ScanState)
+	require.True(t, unchanged.ScanLeaseExpiresAt.Equal(*second.ScanLeaseExpiresAt))
+	finished, err := svc.ReportScanFailure(context.Background(), expiredDevice, "expired", ReportWeDriveScanFailureInput{ScanAttemptID: second.ScanAttemptID, Code: "current_failure"})
+	require.NoError(t, err)
+	require.Empty(t, finished.ScanAttemptID)
+	require.Nil(t, finished.ScanLeaseExpiresAt)
 }

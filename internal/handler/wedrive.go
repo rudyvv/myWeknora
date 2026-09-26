@@ -57,6 +57,7 @@ func (h *WeDriveHandler) AgentEvents(c *gin.Context) {
 	if !ok {
 		return
 	}
+	h.service.RecordAgentVersion(c.Request.Context(), device, c.GetHeader("X-WeDrive-Agent-Version"))
 	if err := h.service.RecoverInterruptedScans(c.Request.Context(), device); err != nil {
 		writeWeDriveError(c, err)
 		return
@@ -70,7 +71,7 @@ func (h *WeDriveHandler) ListAgentSources(c *gin.Context) {
 		return
 	}
 	h.service.RecordAgentVersion(c.Request.Context(), device, c.GetHeader("X-WeDrive-Agent-Version"))
-	rows, err := h.service.ListDeviceSources(c.Request.Context(), device, service.SupportsWeDriveScanCadence(device.AgentVersion))
+	rows, err := h.service.ListDeviceSources(c.Request.Context(), device, service.SupportsWeDriveScanAttempts(c.GetHeader("X-WeDrive-Agent-Version")))
 	if err != nil {
 		writeWeDriveError(c, err)
 		return
@@ -100,6 +101,8 @@ func writeWeDriveError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, service.ErrWeDriveScanNotDue), errors.Is(err, service.ErrWeDriveScanBusy):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, service.ErrWeDriveScanAttemptConflict), errors.Is(err, service.ErrWeDriveScanAttemptExpired):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "scan_attempt_conflict"})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	}
@@ -355,7 +358,7 @@ func (h *WeDriveHandler) signedAgentBody(c *gin.Context) (*types.WeDriveDevice, 
 }
 
 func (h *WeDriveHandler) BeginSnapshot(c *gin.Context) {
-	device, body, ok := h.signedAgentBody(c)
+	device, body, ok := h.signedScanBody(c)
 	if !ok {
 		return
 	}
@@ -373,7 +376,7 @@ func (h *WeDriveHandler) BeginSnapshot(c *gin.Context) {
 }
 
 func (h *WeDriveHandler) UploadSnapshotItems(c *gin.Context) {
-	device, body, ok := h.signedAgentBody(c)
+	device, body, ok := h.signedScanBody(c)
 	if !ok {
 		return
 	}
@@ -392,7 +395,7 @@ func (h *WeDriveHandler) UploadSnapshotItems(c *gin.Context) {
 }
 
 func (h *WeDriveHandler) CommitSnapshot(c *gin.Context) {
-	device, body, ok := h.signedAgentBody(c)
+	device, body, ok := h.signedScanBody(c)
 	if !ok {
 		return
 	}
@@ -410,7 +413,7 @@ func (h *WeDriveHandler) CommitSnapshot(c *gin.Context) {
 }
 
 func (h *WeDriveHandler) ClaimScan(c *gin.Context) {
-	device, body, ok := h.signedAgentBody(c)
+	device, body, ok := h.signedScanBody(c)
 	if !ok {
 		return
 	}
@@ -428,7 +431,7 @@ func (h *WeDriveHandler) ClaimScan(c *gin.Context) {
 }
 
 func (h *WeDriveHandler) ReportScanFailure(c *gin.Context) {
-	device, body, ok := h.signedAgentBody(c)
+	device, body, ok := h.signedScanBody(c)
 	if !ok {
 		return
 	}
@@ -443,4 +446,22 @@ func (h *WeDriveHandler) ReportScanFailure(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, row)
+}
+
+// Check the version on this signed request, never the stored device version.
+// Discovery filtering is only a convenience; every scan write enforces this.
+func (h *WeDriveHandler) signedScanBody(c *gin.Context) (*types.WeDriveDevice, []byte, bool) {
+	device, body, ok := h.signedAgentBody(c)
+	if !ok {
+		return nil, nil, false
+	}
+	h.service.RecordAgentVersion(c.Request.Context(), device, c.GetHeader("X-WeDrive-Agent-Version"))
+	if !service.SupportsWeDriveScanAttempts(c.GetHeader("X-WeDrive-Agent-Version")) {
+		c.JSON(http.StatusUpgradeRequired, gin.H{
+			"error": "upgrade WeDrive sync tool to " + service.MinimumWeDriveAgentVersion + " or later",
+			"code":  "agent_upgrade_required", "minimum_agent_version": service.MinimumWeDriveAgentVersion,
+		})
+		return nil, nil, false
+	}
+	return device, body, true
 }

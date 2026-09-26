@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -9,6 +11,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from . import __version__
 from .security import Identity
+
+
+@dataclass(frozen=True)
+class ScanClaim:
+    scan_attempt_id: str
+    lease_expires_at: datetime
+
+
+class AgentUpgradeRequired(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("请将本机同步工具升级至 0.4.0 或更高版本。")
 
 
 class APIClient:
@@ -37,6 +50,8 @@ class APIClient:
             "Content-Type": "application/json",
         }
         response = self.http.request(method, path, content=body, headers=headers)
+        if response.status_code == 426:
+            raise AgentUpgradeRequired()
         if response.status_code not in allow_statuses:
             response.raise_for_status()
         return response
@@ -44,15 +59,25 @@ class APIClient:
     def list_sources(self) -> list[dict]:
         return self._request("GET", "/api/v1/wedrive/agent/sources").json()
 
-    def claim_scan(self, source_id: str, trigger: str) -> bool:
+    def claim_scan(self, source_id: str, trigger: str) -> ScanClaim | None:
         response = self._request(
             "POST", f"/api/v1/wedrive/agent/sources/{source_id}/claim-scan", {"trigger": trigger},
             allow_statuses=(409,),
         )
-        return response.status_code != 409
+        if response.status_code == 409:
+            return None
+        result = response.json()
+        attempt_id = result.get("scan_attempt_id")
+        expires_at = result.get("scan_lease_expires_at")
+        if not isinstance(attempt_id, str) or not attempt_id.strip() or not isinstance(expires_at, str):
+            raise ValueError("scan claim response is missing attempt identity or lease")
+        lease = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        if lease.tzinfo is None:
+            raise ValueError("scan claim lease must include a timezone")
+        return ScanClaim(attempt_id, lease)
 
-    def report_scan_failure(self, source_id: str, code: str) -> None:
-        self._request("POST", f"/api/v1/wedrive/agent/sources/{source_id}/scan-failure", {"code": code})
+    def report_scan_failure(self, source_id: str, scan_attempt_id: str, code: str) -> None:
+        self._request("POST", f"/api/v1/wedrive/agent/sources/{source_id}/scan-failure", {"code": code, "scan_attempt_id": scan_attempt_id})
 
     def begin_snapshot(self, source: dict, root_id: str, count: int) -> str:
         result = self._request("POST", "/api/v1/wedrive/agent/snapshots", {

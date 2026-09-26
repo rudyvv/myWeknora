@@ -58,16 +58,18 @@ let refreshVersion = 0
 const agentDownloadURL = String(import.meta.env.VITE_WEDRIVE_AGENT_DOWNLOAD_URL || `${String(import.meta.env.BASE_URL || '/').replace(/\/?$/, '/')}downloads/WeKnora-WeDrive-Tool.exe`)
 const agentServerURL = window.location.origin
 
-function supportsScanCadence(version?: string): boolean {
-  const match = String(version || '').replace(/^v/, '').match(/^(\d+)\.(\d+)/)
+function supportsScanAttempts(version?: string): boolean {
+  const raw = String(version || '').trim()
+  if (raw.length > 32) return false
+  const match = raw.replace(/^v/, '').match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/)
   if (!match) return false
   const major = Number(match[1])
   const minor = Number(match[2])
-  return major > 0 || (major === 0 && minor >= 3)
+  return major > 0 || (major === 0 && minor >= 4)
 }
 
-function sourceAgentSupportsCadence(source: WeDriveSource): boolean {
-  return supportsScanCadence(devices.value.find(device => device.id === source.device_id)?.agent_version)
+function sourceAgentSupportsAttempts(source: WeDriveSource): boolean {
+  return supportsScanAttempts(devices.value.find(device => device.id === source.device_id)?.agent_version)
 }
 
 function payload<T>(value: any): T { return (value?.data ?? value) as T }
@@ -202,8 +204,8 @@ async function submitSource() {
     return
   }
   const device = devices.value.find(item => item.id === sourceForm.device_id)
-  if (!supportsScanCadence(device?.agent_version)) {
-    MessagePlugin.warning('此同步工具版本不支持目录扫描频率。请下载并启动最新 Windows 同步工具后再创建同步源。')
+  if (!supportsScanAttempts(device?.agent_version)) {
+    MessagePlugin.warning('此同步工具版本不支持扫描尝试协议。请升级至 0.4.0 或更高版本后再创建同步源。')
     return
   }
   if (isAdmin.value && !connections.value.length) {
@@ -519,7 +521,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="row switches"><t-switch v-model="sourceForm.auto_share" /><span>允许自动创建缺失的分享链接（默认开启）</span><t-switch v-model="sourceForm.sync_deletions" /><span>同步删除（两次完整清单且超过 24 小时后生效）</span></div>
-	  <p v-if="sourceForm.device_id && !supportsScanCadence(devices.find(device => device.id === sourceForm.device_id)?.agent_version)" class="cadence-warning">该同步工具版本过旧；请升级到 0.3.0 或更高版本，才可按此频率扫描。</p>
+	  <p v-if="sourceForm.device_id && !supportsScanAttempts(devices.find(device => device.id === sourceForm.device_id)?.agent_version)" class="cadence-warning">该同步工具版本过旧；请升级到 0.4.0 或更高版本后扫描。</p>
       <t-button theme="primary" @click="submitSource">创建同步源</t-button>
     </section>
 
@@ -539,11 +541,11 @@ onBeforeUnmount(() => {
             <span class="source-action-label">更换 CLI 凭据</span>
             <div class="source-action-controls"><t-select v-model="rebinding[source.id]" size="small" class="source-connection" aria-label="选择 CLI 凭据"><t-option v-for="connection in connections" :key="connection.id" :value="connection.id" :label="connection.name" :disabled="!connection.configured" /></t-select><t-button size="small" variant="outline" :disabled="!rebinding[source.id] || rebinding[source.id] === source.connection_id" @click="rebindSource(source)">更换凭据</t-button></div>
           </div>
-          <div v-if="sourceAgentSupportsCadence(source) && (source.status === 'awaiting_inventory' || source.status === 'active')" class="source-action-group">
+          <div v-if="sourceAgentSupportsAttempts(source) && (source.status === 'awaiting_inventory' || source.status === 'active')" class="source-action-group">
             <span class="source-action-label">目录扫描</span>
             <div class="source-action-controls"><t-select v-model="scanIntervalEdits[source.id]" size="small" class="scan-interval"><t-option v-for="option in scanIntervalOptions" :key="option.value" :value="option.value" :label="option.label" /></t-select><t-button size="small" variant="outline" :disabled="isScanRunning(source.scan_state, source.scan_lease_expires_at)" @click="sendCommand('scan', { source_id: source.id })">立即扫描</t-button></div>
           </div>
-          <span v-else-if="source.status === 'awaiting_inventory' || source.status === 'active'" class="agent-upgrade-hint">需升级同步工具至 0.3.0+</span>
+          <span v-else-if="source.status === 'awaiting_inventory' || source.status === 'active'" class="agent-upgrade-hint">需升级同步工具至 0.4.0+</span>
           <div class="source-action-group source-danger"><span class="source-action-label">同步源</span><t-button size="small" theme="danger" variant="outline" @click="removeSource(source)">删除</t-button></div>
         </div>
       </div>

@@ -18,7 +18,7 @@ from pathlib import Path
 from playwright._impl._errors import TargetClosedError
 from websockets.sync.client import connect
 
-from .client import APIClient
+from .client import APIClient, ScanClaim, AgentUpgradeRequired
 from .collector import Collector, FolderSelectionError, ScanFailure
 from .security import Identity
 
@@ -320,16 +320,18 @@ class Agent:
 
     def scan(self, source: dict, ws=None, trigger: str = "manual") -> None:
         source_id = str(source["id"])
+        claim: ScanClaim | None = None
         try:
             with self.scan_lock:
                 pending = self.pending_scans.get(source_id)
                 if pending is not None and pending != trigger:
                     return
-            if not self.api.claim_scan(source_id, trigger):
+            claim = self.api.claim_scan(source_id, trigger)
+            if claim is None:
                 logging.info("WeDrive scan not claimed source_id=%s trigger=%s", source_id, trigger)
                 return
             if not self.ensure_collector():
-                self.api.report_scan_failure(source_id, "browser_unavailable")
+                self.api.report_scan_failure(source_id, claim.scan_attempt_id, "browser_unavailable")
                 if ws:
                     self.send_scan_status(ws, "error", {"reason": "browser_unavailable", "message": "无法启动 Agent 微盘浏览器，请检查 Microsoft Edge 或 Google Chrome"})
                 return
@@ -351,6 +353,10 @@ class Agent:
                         if self.ensure_collector():
                             continue
                     raise
+        except AgentUpgradeRequired as exc:
+            logging.warning("WeDrive sync tool upgrade required source_id=%s", source_id)
+            if ws:
+                self.send_scan_status(ws, "error", {"reason": "agent_upgrade_required", "message": str(exc)})
         except ScanFailure as exc:
             # The details contain only response counters, never URLs, item
             # names, IDs, cookies, or share links. They make a failed live
@@ -360,7 +366,8 @@ class Agent:
                 source_id, exc.code, exc.diagnostics,
             )
             try:
-                self.api.report_scan_failure(source_id, exc.code)
+                if claim is not None:
+                    self.api.report_scan_failure(source_id, claim.scan_attempt_id, exc.code)
             except Exception:
                 logging.exception("Unable to report WeDrive scan failure source_id=%s", source_id)
             if ws:
@@ -373,7 +380,8 @@ class Agent:
             # Keep that out of WebSocket frames and log only the exception type.
             logging.error("WeDrive scan failed source_id=%s error_type=%s", source_id, type(exc).__name__)
             try:
-                self.api.report_scan_failure(source_id, "scan_failed")
+                if claim is not None:
+                    self.api.report_scan_failure(source_id, claim.scan_attempt_id, "scan_failed")
             except Exception:
                 logging.exception("Unable to report WeDrive scan failure source_id=%s", source_id)
             if ws:

@@ -23,12 +23,14 @@ import (
 )
 
 var (
-	ErrWeDriveNotFound        = errors.New("wedrive resource not found")
-	ErrWeDriveForbidden       = errors.New("wedrive access denied")
-	ErrWeDriveInvalidState    = errors.New("wedrive resource is in an invalid state")
-	ErrWeDriveInvalidSnapshot = errors.New("invalid wedrive inventory snapshot")
-	ErrWeDriveScanNotDue      = errors.New("wedrive scan is not due")
-	ErrWeDriveScanBusy        = errors.New("wedrive scan is already running")
+	ErrWeDriveNotFound            = errors.New("wedrive resource not found")
+	ErrWeDriveForbidden           = errors.New("wedrive access denied")
+	ErrWeDriveInvalidState        = errors.New("wedrive resource is in an invalid state")
+	ErrWeDriveInvalidSnapshot     = errors.New("invalid wedrive inventory snapshot")
+	ErrWeDriveScanNotDue          = errors.New("wedrive scan is not due")
+	ErrWeDriveScanBusy            = errors.New("wedrive scan is already running")
+	ErrWeDriveScanAttemptConflict = errors.New("wedrive scan attempt is no longer current")
+	ErrWeDriveScanAttemptExpired  = errors.New("wedrive scan attempt has expired")
 )
 
 type WeDriveService struct {
@@ -222,7 +224,10 @@ func (s *WeDriveService) ListDevices(ctx context.Context, tenantID uint64, userI
 
 func (s *WeDriveService) RecordAgentVersion(ctx context.Context, device *types.WeDriveDevice, version string) {
 	version = strings.TrimSpace(version)
-	if device == nil || version == "" || version == device.AgentVersion || len(version) > 32 {
+	if len(version) > 32 {
+		version = ""
+	}
+	if device == nil || version == device.AgentVersion {
 		return
 	}
 	if s.db.WithContext(ctx).Model(&types.WeDriveDevice{}).Where("id = ?", device.ID).Update("agent_version", version).Error == nil {
@@ -230,22 +235,32 @@ func (s *WeDriveService) RecordAgentVersion(ctx context.Context, device *types.W
 	}
 }
 
-// SupportsWeDriveScanCadence is deliberately conservative: older Agents have
-// their own fixed thirty-minute timer and must never receive sources whose
-// cadence they cannot honour.  A malformed or missing version is treated as
-// an old Agent.
-func SupportsWeDriveScanCadence(version string) bool {
+const MinimumWeDriveAgentVersion = "0.4.0"
 
+// SupportsWeDriveScanAttempts rejects missing, malformed and prerelease
+// versions. Only released tools implementing attempt identities may scan.
+func SupportsWeDriveScanAttempts(version string) bool {
 	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(version), "v"), ".")
-	if len(parts) < 2 {
+	if len(parts) != 3 || len(version) > 32 {
 		return false
 	}
-	major, majorErr := strconv.Atoi(parts[0])
-	minor, minorErr := strconv.Atoi(parts[1])
-	if majorErr != nil || minorErr != nil {
-		return false
+	values := [3]int{}
+	for i, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return false
+		}
+		for _, digit := range part {
+			if digit < '0' || digit > '9' {
+				return false
+			}
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil {
+			return false
+		}
+		values[i] = value
 	}
-	return major > 0 || (major == 0 && minor >= 3)
+	return values[0] > 0 || (values[0] == 0 && values[1] >= 4)
 }
 
 func (s *WeDriveService) GetAuthorizedDevice(ctx context.Context, tenantID uint64, userID, id string, admin bool) (*types.WeDriveDevice, error) {
@@ -632,19 +647,17 @@ func (s *WeDriveService) GetSource(ctx context.Context, tenantID uint64, id stri
 	return &source, nil
 }
 
-func (s *WeDriveService) ListDeviceSources(ctx context.Context, device *types.WeDriveDevice, agentSupportsCadence bool) ([]*types.WeDriveSource, error) {
+func (s *WeDriveService) ListDeviceSources(ctx context.Context, device *types.WeDriveDevice, agentSupportsAttempts bool) ([]*types.WeDriveSource, error) {
 	if device == nil {
 		return nil, ErrWeDriveForbidden
+	}
+	if !agentSupportsAttempts {
+		return []*types.WeDriveSource{}, nil
 	}
 	var rows []*types.WeDriveSource
 	q := s.db.WithContext(ctx).
 		Where("tenant_id = ? AND device_id = ? AND status IN ? AND deleted_at IS NULL", device.TenantID, device.ID,
 			[]string{types.WeDriveSourceAwaitingInventory, types.WeDriveSourceActive})
-	// Pre-cadence Agents hard-code a 30 minute scan and cannot honour manual
-	// or longer intervals. Do not hand those sources to an older executable.
-	if !agentSupportsCadence {
-		q = q.Where("scan_interval_minutes = ?", types.DefaultWeDriveScanIntervalMinutes)
-	}
 	err := q.Order("created_at ASC").Find(&rows).Error
 	return rows, err
 }
@@ -710,7 +723,8 @@ func (s *WeDriveService) ClaimScan(ctx context.Context, device *types.WeDriveDev
 }
 
 type ReportWeDriveScanFailureInput struct {
-	Code string `json:"code"`
+	Code          string `json:"code"`
+	ScanAttemptID string `json:"scan_attempt_id"`
 }
 
 // RecoverInterruptedScans runs when an Agent reconnects after a server restart.
@@ -750,17 +764,31 @@ func (s *WeDriveService) ReportScanFailure(ctx context.Context, device *types.We
 		return nil, ErrWeDriveInvalidState
 	}
 	var source types.WeDriveSource
+	var reportErr error
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", sourceID, device.TenantID, device.ID).First(&source).Error; err != nil {
 			return ErrWeDriveForbidden
 		}
-		if err := (weDriveScanLifecycle{&source}).fail(code, s.now()); err != nil {
+		now := s.now()
+		scan := weDriveScanLifecycle{&source}
+		if err := scan.checkAttempt(in.ScanAttemptID, now); err != nil {
+			if !errors.Is(err, ErrWeDriveScanAttemptExpired) {
+				return err
+			}
+			// Persist timeout cleanup even though the expired report is rejected.
+			reportErr = err
+			code = "scan_timeout"
+		}
+		if err := scan.fail(code, now); err != nil {
 			return err
 		}
 		return tx.Save(&source).Error
 	})
 	if err != nil {
 		return nil, err
+	}
+	if reportErr != nil {
+		return nil, reportErr
 	}
 	return &source, nil
 }

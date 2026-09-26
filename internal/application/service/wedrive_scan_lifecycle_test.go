@@ -62,6 +62,7 @@ func TestWeDriveRunningCadenceChangeAppliesAfterOutcome(t *testing.T) {
 			require.Equal(t, claimed.ScanLeaseExpiresAt, changed.ScanLeaseExpiresAt)
 			require.Equal(t, claimed.LastScanStartedAt, changed.LastScanStartedAt)
 			require.Equal(t, claimed.ScanRetryCount, changed.ScanRetryCount)
+			require.Equal(t, claimed.ScanAttemptID, changed.ScanAttemptID)
 			if tc.success {
 				snapshot, err := svc.BeginSnapshot(ctx, device, BeginSnapshotInput{SourceID: "source", Sequence: 1, RootExternalID: "root", ExpectedItemCount: 1})
 				require.NoError(t, err)
@@ -69,13 +70,14 @@ func TestWeDriveRunningCadenceChangeAppliesAfterOutcome(t *testing.T) {
 				_, err = svc.CommitSnapshot(ctx, device, snapshot.ID, CommitSnapshotInput{ItemCount: 1})
 				require.NoError(t, err)
 			} else {
-				_, err = svc.ReportScanFailure(ctx, device, "source", ReportWeDriveScanFailureInput{Code: "listing_timeout"})
+				_, err = svc.ReportScanFailure(ctx, device, "source", ReportWeDriveScanFailureInput{ScanAttemptID: claimed.ScanAttemptID, Code: "listing_timeout"})
 				require.NoError(t, err)
 			}
 			finished, err := svc.GetSource(ctx, 7, "source")
 			require.NoError(t, err)
 			require.Equal(t, tc.state, finished.ScanState)
 			require.Nil(t, finished.ScanLeaseExpiresAt)
+			require.Empty(t, finished.ScanAttemptID)
 			require.Equal(t, "unchanged-content-schedule", finished.SyncSchedule)
 			if tc.wait == 0 {
 				require.Nil(t, finished.NextScanAt)

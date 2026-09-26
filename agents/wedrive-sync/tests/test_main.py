@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime, timezone
+from weknora_wedrive_agent.client import ScanClaim, AgentUpgradeRequired
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 import subprocess
@@ -77,7 +79,7 @@ class AgentStartupTest(TestCase):
         ws = MagicMock()
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = True
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
         agent.collector.open_login.return_value = False
         agent.collector.logged_in.return_value = True
 
@@ -169,24 +171,46 @@ class AgentStartupTest(TestCase):
         ws = MagicMock()
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = True
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
         agent.collector.collect.side_effect = RuntimeError("https://drive.weixin.qq.com/s?k=should-not-leak")
 
         with patch.object(main.logging, "error") as log_error:
             agent.scan({"id": "source-1", "root_url": "https://drive.weixin.qq.com/#/webdisk/folder"}, ws)
 
         sent = "\n".join(call.args[0] for call in ws.send.call_args_list)
+        agent.api.report_scan_failure.assert_called_once_with("source-1", "attempt-1", "scan_failed")
         self.assertIn('"reason": "scan_failed"', sent)
         self.assertNotIn("should-not-leak", sent)
         logged = " ".join(str(value) for value in log_error.call_args.args)
         self.assertNotIn("should-not-leak", logged)
+
+    def test_claim_upgrade_failure_does_not_report_an_unclaimed_attempt(self) -> None:
+        agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
+        agent.api = MagicMock()
+        agent.api.claim_scan.side_effect = AgentUpgradeRequired()
+        ws = MagicMock()
+        with patch.object(agent, "ensure_collector") as ensure:
+            agent.scan({"id": "source-1"}, ws)
+        ensure.assert_not_called()
+        agent.api.report_scan_failure.assert_not_called()
+        self.assertIn('"reason": "agent_upgrade_required"', ws.send.call_args.args[0])
+        self.assertIn("0.4.0", ws.send.call_args.args[0])
+
+    def test_unclaimed_scan_does_not_launch_browser_or_report_failure(self) -> None:
+        agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
+        agent.api = MagicMock()
+        agent.api.claim_scan.return_value = None
+        with patch.object(agent, "ensure_collector") as ensure:
+            agent.scan({"id": "source-1"})
+        ensure.assert_not_called()
+        agent.api.report_scan_failure.assert_not_called()
 
     def test_scan_listing_timeout_reports_a_safe_actionable_reason(self) -> None:
         agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
         ws = MagicMock()
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = True
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
         agent.collector.collect.side_effect = main.ScanFailure(
             "listing_timeout", "https://drive.weixin.qq.com/s?k=must-not-leak", {"candidate_responses": 0},
         )
@@ -195,6 +219,7 @@ class AgentStartupTest(TestCase):
             agent.scan({"id": "source-1", "root_url": "https://drive.weixin.qq.com/#/webdisk/folder"}, ws)
 
         sent = "\n".join(call.args[0] for call in ws.send.call_args_list)
+        agent.api.report_scan_failure.assert_called_once_with("source-1", "attempt-1", "listing_timeout")
         self.assertIn('"reason": "listing_timeout"', sent)
         self.assertNotIn("must-not-leak", sent)
         logged = " ".join(str(value) for value in log_error.call_args.args)
@@ -210,7 +235,7 @@ class AgentStartupTest(TestCase):
         fresh_collector.collect.return_value = ("root-1", [{"path": "."}], {"existing": 0, "created": 0, "failed": 0})
         agent.collector = stale_collector
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = True
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
         agent.api.begin_snapshot.return_value = "snapshot-1"
 
         def relaunch() -> bool:
@@ -237,7 +262,7 @@ class AgentStartupTest(TestCase):
         ws.send.side_effect = OSError("socket closed")
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = True
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
         agent.api.begin_snapshot.return_value = "snapshot-1"
 
         def collect(_root_url, _auto_share, progress):

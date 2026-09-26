@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/google/uuid"
 )
 
 const (
@@ -32,6 +33,7 @@ func (scan weDriveScanLifecycle) changeCadence(interval int, ready bool, now tim
 		return
 	}
 	source.ScanRetryCount, source.ScanLeaseExpiresAt, source.LastScanErrorCode = 0, nil, ""
+	source.ScanAttemptID = ""
 	if !ready {
 		return
 	}
@@ -57,8 +59,19 @@ func (scan weDriveScanLifecycle) claim(trigger string, now time.Time) error {
 	}
 	lease := now.Add(weDriveScanLease)
 	source.ScanState, source.ScanLeaseExpiresAt, source.LastScanStartedAt, source.LastScanErrorCode = types.WeDriveScanStateRunning, &lease, &now, ""
+	source.ScanAttemptID = uuid.NewString()
 	if trigger == "manual" {
 		source.ScanRetryCount = 0
+	}
+	return nil
+}
+
+func (scan weDriveScanLifecycle) checkAttempt(attemptID string, now time.Time) error {
+	if attemptID == "" || scan.source.ScanAttemptID != attemptID || scan.source.ScanState != types.WeDriveScanStateRunning {
+		return ErrWeDriveScanAttemptConflict
+	}
+	if !scan.hasActiveLease(now) {
+		return ErrWeDriveScanAttemptExpired
 	}
 	return nil
 }
@@ -69,6 +82,7 @@ func (scan weDriveScanLifecycle) fail(code string, now time.Time) error {
 		return ErrWeDriveInvalidState
 	}
 	source.ScanLeaseExpiresAt, source.LastScanErrorCode = nil, code
+	source.ScanAttemptID = ""
 	if source.ScanIntervalMinutes > 0 && source.ScanRetryCount == 0 {
 		next := now.Add(weDriveScanRetryDelay)
 		source.NextScanAt, source.ScanRetryCount, source.ScanState = &next, 1, types.WeDriveScanStateRetryWait
@@ -85,6 +99,7 @@ func (scan weDriveScanLifecycle) complete(now time.Time) {
 	source := scan.source
 	source.LastCompleteScanAt = &now
 	source.ScanRetryCount, source.ScanLeaseExpiresAt, source.LastScanErrorCode = 0, nil, ""
+	source.ScanAttemptID = ""
 	scan.initialize(true, now)
 	if source.ScanIntervalMinutes > 0 {
 		next := now.Add(time.Duration(source.ScanIntervalMinutes) * time.Minute)

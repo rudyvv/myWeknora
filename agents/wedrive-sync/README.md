@@ -26,6 +26,8 @@ weknora-wedrive-agent --server http://localhost:8080 --register-code <页面生�
 
 ## Fast Development Mode
 
+扫描尝试协议的最低工具版本为 `0.4.0`。领取响应中的 `scan_attempt_id` 与租约仅保存在当前扫描调用中，失败上报必须携带该身份；旧工具会收到 HTTP 426 和 `agent_upgrade_required`。清单绑定、续租及重启恢复分别由 T3/T4 完成；本次源码版本更新不代表安装包已经发布。服务端新协议、新工具安装包和页面升级提示须在 T5 验收后同批交付。
+
 - `frontend` 页面修改由 Vite 热更新，刷新或重新进入左侧“RPA 同步”即可看到。
 - Go API、路由和迁移只有在后端重新编译后生效。安装 Air 时 `make dev-app` 会自动重启；没有 Air 时需 `Ctrl+C` 后重新执行 `make dev-app`。
 - 新增表依赖 `AUTO_MIGRATE=true`。若本地关闭了自动迁移，需要先手工执行对应迁移。
