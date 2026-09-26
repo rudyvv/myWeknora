@@ -31,11 +31,6 @@ var (
 	ErrWeDriveScanBusy        = errors.New("wedrive scan is already running")
 )
 
-const (
-	weDriveScanRetryDelay = 10 * time.Minute
-	weDriveScanLease      = 30 * time.Minute
-)
-
 type WeDriveService struct {
 	db          *gorm.DB
 	datasources interfaces.DataSourceService
@@ -347,8 +342,6 @@ func (s *WeDriveService) CreateSource(ctx context.Context, tenantID uint64, user
 	}
 	status := types.WeDriveSourcePending
 	var approvedAt *time.Time
-	var nextScanAt *time.Time
-	scanState := types.WeDriveScanStateIdle
 	approvedBy := ""
 	if admin {
 		if in.ConnectionID == "" {
@@ -358,14 +351,16 @@ func (s *WeDriveService) CreateSource(ctx context.Context, tenantID uint64, user
 		now := s.now()
 		approvedAt = &now
 		approvedBy = userID
-		if scanInterval > 0 {
-			nextScanAt, scanState = &now, types.WeDriveScanStateWaiting
-		}
 	}
 	source := &types.WeDriveSource{TenantID: tenantID, KnowledgeBaseID: in.KnowledgeBaseID, ConnectionID: in.ConnectionID,
 		DeviceID: in.DeviceID, CreatedBy: userID, ApprovedBy: approvedBy, Name: in.Name, RootURL: in.RootURL,
 		Status: status, AutoShare: autoShare, SyncDeletions: in.SyncDeletions, SyncSchedule: in.SyncSchedule,
-		ScanIntervalMinutes: scanInterval, NextScanAt: nextScanAt, ScanState: scanState, ApprovedAt: approvedAt}
+		ScanIntervalMinutes: scanInterval, ApprovedAt: approvedAt}
+	scanNow := time.Time{}
+	if approvedAt != nil {
+		scanNow = *approvedAt
+	}
+	(weDriveScanLifecycle{source}).initialize(admin, scanNow)
 	// ScanIntervalMinutes intentionally accepts zero for “manual only”. Include
 	// it explicitly so the schema default used for legacy rows cannot replace
 	// a caller-selected manual cadence during Create.
@@ -393,19 +388,8 @@ func (s *WeDriveService) UpdateSourceScanSettings(ctx context.Context, tenantID 
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", id, tenantID).First(&source).Error; err != nil {
 			return ErrWeDriveNotFound
 		}
-		now := s.now()
-		source.ScanIntervalMinutes = in.ScanIntervalMinutes
-		if source.ScanState != types.WeDriveScanStateRunning {
-			source.ScanRetryCount, source.ScanLeaseExpiresAt, source.LastScanErrorCode = 0, nil, ""
-			if source.Status == types.WeDriveSourceAwaitingInventory || source.Status == types.WeDriveSourceActive {
-				if source.ScanIntervalMinutes == 0 {
-					source.NextScanAt, source.ScanState = nil, types.WeDriveScanStateIdle
-				} else {
-					next := nextWeDriveScanAt(source.LastCompleteScanAt, source.ScanIntervalMinutes, now)
-					source.NextScanAt, source.ScanState = &next, types.WeDriveScanStateWaiting
-				}
-			}
-		}
+		ready := source.Status == types.WeDriveSourceAwaitingInventory || source.Status == types.WeDriveSourceActive
+		(weDriveScanLifecycle{&source}).changeCadence(in.ScanIntervalMinutes, ready, s.now())
 		return tx.Save(&source).Error
 	})
 	if err != nil {
@@ -497,11 +481,7 @@ func (s *WeDriveService) ApproveSource(ctx context.Context, tenantID uint64, use
 		}
 		now := s.now()
 		source.ConnectionID, source.ApprovedBy, source.ApprovedAt, source.Status = connectionID, userID, &now, types.WeDriveSourceAwaitingInventory
-		if source.ScanIntervalMinutes == 0 {
-			source.NextScanAt, source.ScanState = nil, types.WeDriveScanStateIdle
-		} else {
-			source.NextScanAt, source.ScanState = &now, types.WeDriveScanStateWaiting
-		}
+		(weDriveScanLifecycle{&source}).initialize(true, now)
 		return tx.Save(&source).Error
 	})
 	if err == nil {
@@ -691,7 +671,7 @@ func (s *WeDriveService) ClaimScan(ctx context.Context, device *types.WeDriveDev
 		}
 		for i := range deviceSources {
 			row := &deviceSources[i]
-			if row.ScanState == types.WeDriveScanStateRunning && row.ScanLeaseExpiresAt != nil && row.ScanLeaseExpiresAt.After(now) {
+			if (weDriveScanLifecycle{row}).hasActiveLease(now) {
 				claimErr = ErrWeDriveScanBusy
 				return nil
 			}
@@ -701,7 +681,9 @@ func (s *WeDriveService) ClaimScan(ctx context.Context, device *types.WeDriveDev
 			if row.ScanState != types.WeDriveScanStateRunning {
 				continue
 			}
-			failWeDriveScan(row, "scan_timeout", now)
+			if err := (weDriveScanLifecycle{row}).fail("scan_timeout", now); err != nil {
+				return err
+			}
 			if err := tx.Save(row).Error; err != nil {
 				return err
 			}
@@ -712,16 +694,9 @@ func (s *WeDriveService) ClaimScan(ctx context.Context, device *types.WeDriveDev
 		if source.Status != types.WeDriveSourceAwaitingInventory && source.Status != types.WeDriveSourceActive {
 			return ErrWeDriveInvalidState
 		}
-		if in.Trigger == "scheduled" {
-			if source.ScanIntervalMinutes == 0 || source.NextScanAt == nil || source.NextScanAt.After(now) {
-				claimErr = ErrWeDriveScanNotDue
-				return nil
-			}
-		}
-		lease := now.Add(weDriveScanLease)
-		source.ScanState, source.ScanLeaseExpiresAt, source.LastScanStartedAt, source.LastScanErrorCode = types.WeDriveScanStateRunning, &lease, &now, ""
-		if in.Trigger == "manual" {
-			source.ScanRetryCount = 0
+		if err := (weDriveScanLifecycle{&source}).claim(in.Trigger, now); err != nil {
+			claimErr = err
+			return nil
 		}
 		return tx.Save(&source).Error
 	})
@@ -755,26 +730,15 @@ func (s *WeDriveService) RecoverInterruptedScans(ctx context.Context, device *ty
 		}
 		now := s.now()
 		for i := range sources {
-			failWeDriveScan(&sources[i], "scan_interrupted", now)
+			if err := (weDriveScanLifecycle{&sources[i]}).fail("scan_interrupted", now); err != nil {
+				return err
+			}
 			if err := tx.Save(&sources[i]).Error; err != nil {
 				return err
 			}
 		}
 		return nil
 	})
-}
-
-func failWeDriveScan(source *types.WeDriveSource, code string, now time.Time) {
-	source.ScanLeaseExpiresAt, source.LastScanErrorCode = nil, code
-	if source.ScanIntervalMinutes > 0 && source.ScanRetryCount == 0 {
-		next := now.Add(weDriveScanRetryDelay)
-		source.NextScanAt, source.ScanRetryCount, source.ScanState = &next, 1, types.WeDriveScanStateRetryWait
-	} else if source.ScanIntervalMinutes > 0 {
-		next := now.Add(time.Duration(source.ScanIntervalMinutes) * time.Minute)
-		source.NextScanAt, source.ScanRetryCount, source.ScanState = &next, 0, types.WeDriveScanStateFailed
-	} else {
-		source.NextScanAt, source.ScanRetryCount, source.ScanState = nil, 0, types.WeDriveScanStateFailed
-	}
 }
 
 func (s *WeDriveService) ReportScanFailure(ctx context.Context, device *types.WeDriveDevice, sourceID string, in ReportWeDriveScanFailureInput) (*types.WeDriveSource, error) {
@@ -790,27 +754,15 @@ func (s *WeDriveService) ReportScanFailure(ctx context.Context, device *types.We
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", sourceID, device.TenantID, device.ID).First(&source).Error; err != nil {
 			return ErrWeDriveForbidden
 		}
-		if source.ScanState != types.WeDriveScanStateRunning {
-			return ErrWeDriveInvalidState
+		if err := (weDriveScanLifecycle{&source}).fail(code, s.now()); err != nil {
+			return err
 		}
-		failWeDriveScan(&source, code, s.now())
 		return tx.Save(&source).Error
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &source, nil
-}
-
-func nextWeDriveScanAt(lastComplete *time.Time, intervalMinutes int, now time.Time) time.Time {
-	if lastComplete == nil {
-		return now
-	}
-	next := lastComplete.Add(time.Duration(intervalMinutes) * time.Minute)
-	if next.Before(now) {
-		return now
-	}
-	return next
 }
 
 func (s *WeDriveService) VerifyAgentRequest(ctx context.Context, deviceID, timestamp, signature, method, path string, body []byte) (*types.WeDriveDevice, error) {
@@ -988,14 +940,8 @@ func (s *WeDriveService) CommitSnapshot(ctx context.Context, device *types.WeDri
 		if err := tx.Save(&snapshot).Error; err != nil {
 			return err
 		}
-		source.LastSnapshotID, source.LastCompleteScanAt, source.Status = snapshot.ID, &now, types.WeDriveSourceActive
-		source.ScanRetryCount, source.ScanLeaseExpiresAt, source.LastScanErrorCode = 0, nil, ""
-		if source.ScanIntervalMinutes == 0 {
-			source.NextScanAt, source.ScanState = nil, types.WeDriveScanStateIdle
-		} else {
-			next := now.Add(time.Duration(source.ScanIntervalMinutes) * time.Minute)
-			source.NextScanAt, source.ScanState = &next, types.WeDriveScanStateWaiting
-		}
+		source.LastSnapshotID, source.Status = snapshot.ID, types.WeDriveSourceActive
+		(weDriveScanLifecycle{&source}).complete(now)
 		return tx.Save(&source).Error
 	})
 	if err != nil {
