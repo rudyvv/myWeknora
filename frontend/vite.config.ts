@@ -130,6 +130,11 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    // Windows 下 public/downloads 里的 exe 被下载/运行/杀软扫描时会短暂加锁，
+    // chokidar 监视到 EBUSY 会直接让 Vite 崩溃，故排除 watch（文件本身仍可正常访问）
+    watch: {
+      ignored: ['**/public/downloads/**'],
+    },
     // 代理配置，用于开发环境
     proxy: {
       '/api': {
