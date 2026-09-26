@@ -770,16 +770,15 @@ func (s *WeDriveService) ReportScanFailure(ctx context.Context, device *types.We
 			return ErrWeDriveForbidden
 		}
 		now := s.now()
-		scan := weDriveScanLifecycle{&source}
-		if err := scan.checkAttempt(in.ScanAttemptID, now); err != nil {
+		if err := s.checkWeDriveScanAttempt(tx, &source, in.ScanAttemptID, now); err != nil {
 			if !errors.Is(err, ErrWeDriveScanAttemptExpired) {
 				return err
 			}
 			// Persist timeout cleanup even though the expired report is rejected.
 			reportErr = err
-			code = "scan_timeout"
+			return nil
 		}
-		if err := scan.fail(code, now); err != nil {
+		if err := (weDriveScanLifecycle{&source}).fail(code, now); err != nil {
 			return err
 		}
 		return tx.Save(&source).Error
@@ -824,6 +823,7 @@ func (s *WeDriveService) VerifyAgentRequest(ctx context.Context, deviceID, times
 
 type BeginSnapshotInput struct {
 	SourceID          string `json:"source_id"`
+	ScanAttemptID     string `json:"scan_attempt_id"`
 	Sequence          int64  `json:"sequence"`
 	RootExternalID    string `json:"root_external_id"`
 	ExpectedItemCount int    `json:"expected_item_count"`
@@ -834,13 +834,28 @@ func (s *WeDriveService) BeginSnapshot(ctx context.Context, device *types.WeDriv
 		return nil, ErrWeDriveInvalidSnapshot
 	}
 	var result types.WeDriveSnapshot
+	var attemptErr error
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// The Agent may retry after losing the HTTP response. Return the same
-		// upload session instead of manufacturing a conflicting snapshot.
+		var source types.WeDriveSource
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", in.SourceID, device.TenantID, device.ID).First(&source).Error; err != nil {
+			return ErrWeDriveForbidden
+		}
+		if source.Status != types.WeDriveSourceAwaitingInventory && source.Status != types.WeDriveSourceActive {
+			return ErrWeDriveInvalidState
+		}
+		if err := s.checkWeDriveScanAttempt(tx, &source, in.ScanAttemptID, s.now()); err != nil {
+			if errors.Is(err, ErrWeDriveScanAttemptExpired) {
+				attemptErr = err
+				return nil // Commit timeout cleanup before rejecting this request.
+			}
+			return err
+		}
+		// Lock the source before looking up its inventory. Retry identity is the
+		// server-issued attempt, independent of the client's sequence timestamp.
 		var existing types.WeDriveSnapshot
-		lookup := tx.Where("source_id = ? AND sequence = ?", in.SourceID, in.Sequence).First(&existing)
+		lookup := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("source_id = ? AND scan_attempt_id = ?", source.ID, in.ScanAttemptID).First(&existing)
 		if lookup.Error == nil {
-			if existing.DeviceID != device.ID || existing.ExpectedItemCount != in.ExpectedItemCount {
+			if existing.TenantID != device.TenantID || existing.DeviceID != device.ID || existing.RootExternalID != in.RootExternalID || existing.ExpectedItemCount != in.ExpectedItemCount {
 				return ErrWeDriveInvalidSnapshot
 			}
 			result = existing
@@ -848,13 +863,6 @@ func (s *WeDriveService) BeginSnapshot(ctx context.Context, device *types.WeDriv
 		}
 		if !errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
 			return lookup.Error
-		}
-		var source types.WeDriveSource
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", in.SourceID, device.TenantID, device.ID).First(&source).Error; err != nil {
-			return ErrWeDriveForbidden
-		}
-		if source.Status != types.WeDriveSourceAwaitingInventory && source.Status != types.WeDriveSourceActive {
-			return ErrWeDriveInvalidState
 		}
 		approvedRootID := weDriveRootFolderID(source.RootURL)
 		if approvedRootID != "" && approvedRootID != in.RootExternalID {
@@ -870,19 +878,50 @@ func (s *WeDriveService) BeginSnapshot(ctx context.Context, device *types.WeDriv
 				return err
 			}
 		}
-		result = types.WeDriveSnapshot{TenantID: device.TenantID, SourceID: source.ID, DeviceID: device.ID, Sequence: in.Sequence, ExpectedItemCount: in.ExpectedItemCount, Status: types.WeDriveSnapshotUploading}
+		result = types.WeDriveSnapshot{TenantID: device.TenantID, SourceID: source.ID, DeviceID: device.ID, ScanAttemptID: in.ScanAttemptID, RootExternalID: in.RootExternalID, Sequence: in.Sequence, ExpectedItemCount: in.ExpectedItemCount, Status: types.WeDriveSnapshotUploading}
 		return tx.Create(&result).Error
 	})
+	if err == nil && attemptErr != nil {
+		return nil, attemptErr
+	}
 	return &result, err
+}
+
+// The caller holds the source lock. An expired current attempt is cleaned up
+// in this transaction; callers must commit that cleanup before returning the
+// expiry conflict. Stale identities do not mutate the source.
+func (s *WeDriveService) checkWeDriveScanAttempt(tx *gorm.DB, source *types.WeDriveSource, attemptID string, now time.Time) error {
+	scan := weDriveScanLifecycle{source}
+	err := scan.checkAttempt(attemptID, now)
+	if errors.Is(err, ErrWeDriveScanAttemptExpired) {
+		if failErr := scan.fail("scan_timeout", now); failErr != nil {
+			return failErr
+		}
+		if saveErr := tx.Save(source).Error; saveErr != nil {
+			return saveErr
+		}
+	}
+	return err
 }
 
 func (s *WeDriveService) UploadSnapshotItems(ctx context.Context, device *types.WeDriveDevice, snapshotID string, items []types.WeDriveInventoryItem) error {
 	if device == nil || snapshotID == "" || len(items) == 0 || len(items) > 500 {
 		return ErrWeDriveInvalidSnapshot
 	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var snapshot types.WeDriveSnapshot
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ? AND status = ?", snapshotID, device.TenantID, device.ID, types.WeDriveSnapshotUploading).First(&snapshot).Error; err != nil {
+	var attemptErr error
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		source, snapshot, err := lockWeDriveSnapshot(tx, device, snapshotID)
+		if err != nil {
+			return err
+		}
+		if err := s.checkWeDriveScanAttempt(tx, source, snapshot.ScanAttemptID, s.now()); err != nil {
+			if errors.Is(err, ErrWeDriveScanAttemptExpired) {
+				attemptErr = err
+				return nil
+			}
+			return err
+		}
+		if snapshot.Status != types.WeDriveSnapshotUploading {
 			return ErrWeDriveInvalidState
 		}
 		for n := range items {
@@ -905,8 +944,36 @@ func (s *WeDriveService) UploadSnapshotItems(ctx context.Context, device *types.
 		if count > int64(snapshot.ExpectedItemCount) {
 			return ErrWeDriveInvalidSnapshot
 		}
-		return tx.Model(&snapshot).Update("received_item_count", count).Error
+		return tx.Model(snapshot).Update("received_item_count", count).Error
 	})
+	if err == nil && attemptErr != nil {
+		return attemptErr
+	}
+	return err
+}
+
+// SourceID is immutable. Read it without a row lock to locate the source,
+// then lock source -> snapshot and re-check ownership under those locks.
+// Claims also lock sources, so stale uploads/commits cannot race a new claim.
+func lockWeDriveSnapshot(tx *gorm.DB, device *types.WeDriveDevice, snapshotID string) (*types.WeDriveSource, *types.WeDriveSnapshot, error) {
+	var snapshot types.WeDriveSnapshot
+	if err := tx.Select("source_id").Where("id = ? AND tenant_id = ? AND device_id = ?", snapshotID, device.TenantID, device.ID).First(&snapshot).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, ErrWeDriveNotFound
+		}
+		return nil, nil, err
+	}
+	var source types.WeDriveSource
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", snapshot.SourceID, device.TenantID, device.ID).First(&source).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, ErrWeDriveForbidden
+		}
+		return nil, nil, err
+	}
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND source_id = ? AND tenant_id = ? AND device_id = ?", snapshotID, source.ID, device.TenantID, device.ID).First(&snapshot).Error; err != nil {
+		return nil, nil, err
+	}
+	return &source, &snapshot, nil
 }
 
 func hasParentTraversal(value string) bool {
@@ -928,27 +995,37 @@ type CommitSnapshotInput struct {
 }
 
 func (s *WeDriveService) CommitSnapshot(ctx context.Context, device *types.WeDriveDevice, snapshotID string, in CommitSnapshotInput) (*types.WeDriveSnapshot, error) {
-	if device == nil || snapshotID == "" || in.ItemCount < 1 {
+	if device == nil || snapshotID == "" || in.ItemCount < 1 || in.AutoShareExisting < 0 || in.AutoShareCreated < 0 || in.AutoShareFailed < 0 {
 		return nil, ErrWeDriveInvalidSnapshot
 	}
 	var snapshot types.WeDriveSnapshot
 	var source types.WeDriveSource
 	justCommitted := false
+	var attemptErr error
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ?", snapshotID, device.TenantID, device.ID).First(&snapshot).Error; err != nil {
-			return ErrWeDriveNotFound
+		lockedSource, lockedSnapshot, err := lockWeDriveSnapshot(tx, device, snapshotID)
+		if err != nil {
+			return err
 		}
+		source, snapshot = *lockedSource, *lockedSnapshot
 		if snapshot.Status == types.WeDriveSnapshotComplete {
+			if snapshot.ReceivedItemCount != in.ItemCount || snapshot.ExpectedItemCount != in.ItemCount || snapshot.AutoShareExisting != in.AutoShareExisting || snapshot.AutoShareCreated != in.AutoShareCreated || snapshot.AutoShareFailed != in.AutoShareFailed {
+				return ErrWeDriveInvalidSnapshot
+			}
 			if in.Digest != "" && subtle.ConstantTimeCompare([]byte(snapshot.Digest), []byte(strings.ToLower(in.Digest))) != 1 {
 				return ErrWeDriveInvalidSnapshot
 			}
-			return tx.Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", snapshot.SourceID, device.TenantID, device.ID).First(&source).Error
+			return nil
+		}
+		if err := s.checkWeDriveScanAttempt(tx, &source, snapshot.ScanAttemptID, s.now()); err != nil {
+			if errors.Is(err, ErrWeDriveScanAttemptExpired) {
+				attemptErr = err
+				return nil
+			}
+			return err
 		}
 		if snapshot.Status != types.WeDriveSnapshotUploading || snapshot.ReceivedItemCount != in.ItemCount || snapshot.ExpectedItemCount != in.ItemCount {
 			return ErrWeDriveInvalidSnapshot
-		}
-		if err := tx.Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", snapshot.SourceID, device.TenantID, device.ID).First(&source).Error; err != nil {
-			return ErrWeDriveForbidden
 		}
 		var items []types.WeDriveInventoryItem
 		if err := tx.Where("snapshot_id = ?", snapshot.ID).Find(&items).Error; err != nil {
@@ -962,6 +1039,15 @@ func (s *WeDriveService) CommitSnapshot(ctx context.Context, device *types.WeDri
 			return fmt.Errorf("%w: digest mismatch", ErrWeDriveInvalidSnapshot)
 		}
 		now := s.now()
+		// Inventory validation can outlast the lease. Check the final completion
+		// time before writing either the snapshot or the source success state.
+		if err := s.checkWeDriveScanAttempt(tx, &source, snapshot.ScanAttemptID, now); err != nil {
+			if errors.Is(err, ErrWeDriveScanAttemptExpired) {
+				attemptErr = err
+				return nil
+			}
+			return err
+		}
 		snapshot.Status, snapshot.Digest, snapshot.CommittedAt = types.WeDriveSnapshotComplete, digest, &now
 		snapshot.AutoShareExisting, snapshot.AutoShareCreated, snapshot.AutoShareFailed = in.AutoShareExisting, in.AutoShareCreated, in.AutoShareFailed
 		justCommitted = true
@@ -975,12 +1061,16 @@ func (s *WeDriveService) CommitSnapshot(ctx context.Context, device *types.WeDri
 	if err != nil {
 		return nil, err
 	}
-	if justCommitted {
-		recordKBActivity(ctx, s.audit, source.TenantID, source.KnowledgeBaseID, types.AuditActionWeDriveSnapshotCommitted,
-			"wedrive_source", source.ID, types.AuditOutcomeSuccess,
-			map[string]any{"snapshot_id": snapshot.ID, "item_count": snapshot.ReceivedItemCount,
-				"auto_share_existing": snapshot.AutoShareExisting, "auto_share_created": snapshot.AutoShareCreated, "auto_share_failed": snapshot.AutoShareFailed})
+	if attemptErr != nil {
+		return nil, attemptErr
 	}
+	if !justCommitted {
+		return &snapshot, nil // A replay is a read: no scheduling or activation.
+	}
+	recordKBActivity(ctx, s.audit, source.TenantID, source.KnowledgeBaseID, types.AuditActionWeDriveSnapshotCommitted,
+		"wedrive_source", source.ID, types.AuditOutcomeSuccess,
+		map[string]any{"snapshot_id": snapshot.ID, "item_count": snapshot.ReceivedItemCount,
+			"auto_share_existing": snapshot.AutoShareExisting, "auto_share_created": snapshot.AutoShareCreated, "auto_share_failed": snapshot.AutoShareFailed})
 	if source.DataSourceID == "" && s.datasources != nil {
 		cfg := &types.DataSourceConfig{Type: types.ConnectorTypeWeComDrive, ResourceIDs: []string{source.ID}, Settings: map[string]interface{}{"source_id": source.ID, "connection_id": source.ConnectionID}}
 		blob, _ := cfg.ToJSON()

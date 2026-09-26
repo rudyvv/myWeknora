@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from weknora_wedrive_agent import __version__
-from weknora_wedrive_agent.client import APIClient, AgentUpgradeRequired
+from weknora_wedrive_agent.client import APIClient, AgentUpgradeRequired, ScanAttemptConflict
 
 
 class FakeIdentity:
@@ -71,5 +71,37 @@ def test_upgrade_rejection_is_distinct_from_an_unavailable_scan() -> None:
     try:
         with pytest.raises(AgentUpgradeRequired):
             client.claim_scan("source-1", "manual")
+    finally:
+        client.http.close()
+
+
+def test_begin_snapshot_carries_the_claimed_attempt_identity() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert request.url.path == "/api/v1/wedrive/agent/snapshots"
+        assert payload["source_id"] == "source-1"
+        assert payload["scan_attempt_id"] == "attempt-1"
+        assert payload["root_external_id"] == "root"
+        assert payload["expected_item_count"] == 1
+        return httpx.Response(201, json={"id": "snapshot-1"})
+    client = APIClient(FakeIdentity())  # type: ignore[arg-type]
+    client.http = httpx.Client(base_url=FakeIdentity.server, transport=httpx.MockTransport(handler))
+    try:
+        assert client.begin_snapshot("source-1", "attempt-1", "root", 1) == "snapshot-1"
+    finally:
+        client.http.close()
+
+
+def test_upload_stops_after_losing_the_scan_attempt() -> None:
+    requests = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(409, json={"code": "scan_attempt_conflict"})
+    client = APIClient(FakeIdentity())  # type: ignore[arg-type]
+    client.http = httpx.Client(base_url=FakeIdentity.server, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ScanAttemptConflict):
+            client.upload_items("snapshot-1", [{"external_id": str(i)} for i in range(501)])
+        assert len(requests) == 1
     finally:
         client.http.close()

@@ -1,6 +1,6 @@
 from pathlib import Path
 from datetime import datetime, timezone
-from weknora_wedrive_agent.client import ScanClaim, AgentUpgradeRequired
+from weknora_wedrive_agent.client import ScanClaim, AgentUpgradeRequired, ScanAttemptConflict
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 import subprocess
@@ -274,7 +274,23 @@ class AgentStartupTest(TestCase):
             agent.scan({"id": "source-1", "root_url": "https://drive.weixin.qq.com/#/webdisk/folder"}, ws)
 
         agent.api.commit.assert_called_once()
+        agent.api.begin_snapshot.assert_called_once_with("source-1", "attempt-1", "root-1", 1)
         agent.api.report_scan_failure.assert_not_called()
+
+    def test_lost_attempt_stops_before_commit_and_does_not_report_stale_failure(self) -> None:
+        agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
+        agent.api = MagicMock()
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
+        agent.api.begin_snapshot.return_value = "snapshot-1"
+        agent.api.upload_items.side_effect = ScanAttemptConflict()
+        agent.collector = MagicMock()
+        agent.collector.collect.return_value = ("root", [{"path": "."}], {})
+        ws = MagicMock()
+        with patch.object(agent, "ensure_collector", return_value=True):
+            agent.scan({"id": "source-1", "root_url": "root"}, ws)
+        agent.api.commit.assert_not_called()
+        agent.api.report_scan_failure.assert_not_called()
+        self.assertIn('"reason": "scan_attempt_conflict"', ws.send.call_args.args[0])
 
 
 class ConsoleWindowTest(TestCase):

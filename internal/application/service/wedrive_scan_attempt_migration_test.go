@@ -73,7 +73,7 @@ func TestWeDriveSQLiteScanAttemptMigrationPreservesInventory(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	require.NoError(t, db.Exec("CREATE TABLE data_sources (id TEXT PRIMARY KEY, type TEXT, sync_schedule TEXT)").Error)
-	for _, migration := range []string{"000017_wecom_wedrive_sync.up.sql", "000018_wedrive_scan_cadence.up.sql", "000019_wedrive_manual_content_sync.up.sql", "000020_wedrive_scan_attempt.up.sql"} {
+	for _, migration := range []string{"000017_wecom_wedrive_sync.up.sql", "000018_wedrive_scan_cadence.up.sql", "000019_wedrive_manual_content_sync.up.sql", "000020_wedrive_scan_attempt.up.sql", "000021_wedrive_snapshot_attempt.up.sql"} {
 		if migration == "000020_wedrive_scan_attempt.up.sql" {
 			seedLegacyWeDriveScanAttempts(t, db)
 		}
@@ -82,4 +82,21 @@ func TestWeDriveSQLiteScanAttemptMigrationPreservesInventory(t *testing.T) {
 		require.NoError(t, db.Exec(string(contents)).Error)
 	}
 	assertMigratedWeDriveScanAttempts(t, db)
+	assertWeDriveSnapshotAttemptSchema(t, db)
+}
+
+func assertWeDriveSnapshotAttemptSchema(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	var history types.WeDriveSnapshot
+	require.NoError(t, db.First(&history, "id = ?", "legacy-complete").Error)
+	require.Empty(t, history.ScanAttemptID, "historical inventories must stay unbound")
+	require.Empty(t, history.RootExternalID)
+	first := types.WeDriveSnapshot{ID: "schema-first", TenantID: 7, SourceID: "legacy-manual", DeviceID: "legacy-manual", Sequence: 2, ScanAttemptID: "schema-attempt", RootExternalID: "root", ExpectedItemCount: 1}
+	require.NoError(t, db.Create(&first).Error)
+	duplicate := first
+	duplicate.ID, duplicate.Sequence = "schema-duplicate", 3
+	require.Error(t, db.Create(&duplicate).Error, "the database must enforce one inventory per source/attempt")
+	legacy := first
+	legacy.ID, legacy.Sequence, legacy.ScanAttemptID = "schema-legacy", 4, ""
+	require.NoError(t, db.Create(&legacy).Error, "multiple historical empty attempt IDs must remain valid")
 }

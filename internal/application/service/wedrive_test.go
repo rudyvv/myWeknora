@@ -100,14 +100,16 @@ func TestBeginSnapshotRepairsUncommittedRootFromApprovedURL(t *testing.T) {
 	require.NoError(t, db.Create(source).Error)
 	svc := NewWeDriveService(db, nil, nil)
 	device := &types.WeDriveDevice{ID: "device-1", TenantID: 7}
+	claimed, err := svc.ClaimScan(context.Background(), device, source.ID, ClaimWeDriveScanInput{Trigger: "manual"})
+	require.NoError(t, err)
 
 	_, err = svc.BeginSnapshot(context.Background(), device, BeginSnapshotInput{
-		SourceID: source.ID, Sequence: 1, RootExternalID: "another-folder", ExpectedItemCount: 1,
+		SourceID: source.ID, ScanAttemptID: claimed.ScanAttemptID, Sequence: 1, RootExternalID: "another-folder", ExpectedItemCount: 1,
 	})
 	require.ErrorIs(t, err, ErrWeDriveForbidden)
 
 	_, err = svc.BeginSnapshot(context.Background(), device, BeginSnapshotInput{
-		SourceID: source.ID, Sequence: 1, RootExternalID: "approved-root", ExpectedItemCount: 1,
+		SourceID: source.ID, ScanAttemptID: claimed.ScanAttemptID, Sequence: 1, RootExternalID: "approved-root", ExpectedItemCount: 1,
 	})
 	require.NoError(t, err)
 

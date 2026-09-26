@@ -18,7 +18,7 @@ from pathlib import Path
 from playwright._impl._errors import TargetClosedError
 from websockets.sync.client import connect
 
-from .client import APIClient, ScanClaim, AgentUpgradeRequired
+from .client import APIClient, ScanClaim, AgentUpgradeRequired, ScanAttemptConflict
 from .collector import Collector, FolderSelectionError, ScanFailure
 from .security import Identity
 
@@ -341,7 +341,7 @@ class Agent:
                     progress("开始递归扫描微盘目录" if attempt == 0 else "已重新打开 Agent 微盘窗口，正在重试扫描")
                     assert self.collector is not None
                     root_id, items, stats = self.collector.collect(source["root_url"], bool(source.get("auto_share", True)), progress)
-                    snapshot_id = self.api.begin_snapshot(source, root_id, len(items))
+                    snapshot_id = self.api.begin_snapshot(source_id, claim.scan_attempt_id, root_id, len(items))
                     self.api.upload_items(snapshot_id, items)
                     self.api.commit(snapshot_id, len(items), stats)
                     self.send_scan_status(ws, "scan_result", {"source_id": source_id, "item_count": len(items), "complete": True})
@@ -353,6 +353,10 @@ class Agent:
                         if self.ensure_collector():
                             continue
                     raise
+        except ScanAttemptConflict as exc:
+            logging.info("WeDrive scan attempt no longer current source_id=%s", source_id)
+            if ws:
+                self.send_scan_status(ws, "error", {"source_id": source_id, "reason": "scan_attempt_conflict", "message": str(exc)})
         except AgentUpgradeRequired as exc:
             logging.warning("WeDrive sync tool upgrade required source_id=%s", source_id)
             if ws:

@@ -32,7 +32,7 @@ func newWeDriveProtocolTest(t *testing.T, recordedVersion string) (*gin.Engine, 
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	require.NoError(t, db.AutoMigrate(&types.WeDriveDevice{}, &types.WeDriveSource{}))
+	require.NoError(t, db.AutoMigrate(&types.WeDriveDevice{}, &types.WeDriveSource{}, &types.WeDriveSnapshot{}, &types.WeDriveInventoryItem{}))
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	require.NoError(t, db.Create(&types.WeDriveDevice{ID: "device", TenantID: 7, UserID: "owner", Name: "tool", AgentVersion: recordedVersion, PublicKey: base64.RawURLEncoding.EncodeToString(pub)}).Error)
@@ -113,4 +113,75 @@ func TestWeDriveNewToolClaimsAndReportsItsAttempt(t *testing.T) {
 		require.Empty(t, source.ScanAttemptID)
 		require.Nil(t, source.ScanLeaseExpiresAt)
 	}
+}
+
+func TestWeDriveSignedSnapshotProtocolBindsInventoryToClaim(t *testing.T) {
+	router, db, key := newWeDriveProtocolTest(t, "0.4.0")
+	post := func(path string, input any, status int) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(input)
+		require.NoError(t, err)
+		w := signedWeDriveProtocolRequest(router, key, "POST", path, "0.4.0", body)
+		require.Equal(t, status, w.Code, "%s: %s", path, w.Body.String())
+		return w
+	}
+	claim := func() types.WeDriveSource {
+		t.Helper()
+		w := post("/sources/source/claim-scan", service.ClaimWeDriveScanInput{Trigger: "manual"}, http.StatusOK)
+		var source types.WeDriveSource
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &source))
+		return source
+	}
+	first := claim()
+	begin := service.BeginSnapshotInput{SourceID: "source", Sequence: 1, RootExternalID: "root", ExpectedItemCount: 1}
+	w := post("/snapshots", begin, http.StatusConflict)
+	require.Contains(t, w.Body.String(), "scan_attempt_conflict")
+	begin.ScanAttemptID = first.ScanAttemptID
+	w = post("/snapshots", begin, http.StatusCreated)
+	var snapshot types.WeDriveSnapshot
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &snapshot))
+	require.Equal(t, first.ScanAttemptID, snapshot.ScanAttemptID)
+	begin.Sequence = 2
+	w = post("/snapshots", begin, http.StatusCreated)
+	var retry types.WeDriveSnapshot
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &retry))
+	require.Equal(t, snapshot.ID, retry.ID)
+	begin.ExpectedItemCount = 2
+	post("/snapshots", begin, http.StatusConflict)
+	items := map[string]any{"items": []types.WeDriveInventoryItem{{ExternalID: "root", Name: "root", Path: ".", ItemType: "folder"}}}
+	post("/snapshots/"+snapshot.ID+"/items", items, http.StatusNoContent)
+	commit := service.CommitSnapshotInput{ItemCount: 1}
+	w = post("/snapshots/"+snapshot.ID+"/commit", commit, http.StatusOK)
+	var complete types.WeDriveSnapshot
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &complete))
+	second := claim()
+	begin.ScanAttemptID, begin.Sequence, begin.ExpectedItemCount = second.ScanAttemptID, 3, 1
+	w = post("/snapshots", begin, http.StatusCreated)
+	var interrupted types.WeDriveSnapshot
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &interrupted))
+	post("/sources/source/scan-failure", service.ReportWeDriveScanFailureInput{ScanAttemptID: second.ScanAttemptID, Code: "tree_walk_failed"}, http.StatusOK)
+	third := claim()
+	for _, path := range []string{"/snapshots/" + interrupted.ID + "/items", "/snapshots/" + interrupted.ID + "/commit"} {
+		input := any(commit)
+		if path == "/snapshots/"+interrupted.ID+"/items" {
+			input = items
+		}
+		w = post(path, input, http.StatusConflict)
+		require.Contains(t, w.Body.String(), "scan_attempt_conflict")
+	}
+	w = post("/snapshots/"+snapshot.ID+"/commit", commit, http.StatusOK)
+	require.JSONEq(t, string(mustWeDriveProtocolJSON(t, complete)), w.Body.String())
+	post("/snapshots/"+snapshot.ID+"/commit", service.CommitSnapshotInput{ItemCount: 1, AutoShareCreated: 1}, http.StatusConflict)
+	saved, err := service.NewWeDriveService(db, nil, nil).GetSource(t.Context(), 7, "source")
+	require.NoError(t, err)
+	require.Equal(t, third.ScanAttemptID, saved.ScanAttemptID)
+	require.Equal(t, snapshot.ID, saved.LastSnapshotID)
+	require.Equal(t, types.WeDriveScanStateRunning, saved.ScanState)
+}
+
+func mustWeDriveProtocolJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	body, err := json.Marshal(value)
+	require.NoError(t, err)
+	return body
 }

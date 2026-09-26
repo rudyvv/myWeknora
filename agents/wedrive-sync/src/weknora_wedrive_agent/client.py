@@ -24,6 +24,11 @@ class AgentUpgradeRequired(RuntimeError):
         super().__init__("请将本机同步工具升级至 0.4.0 或更高版本。")
 
 
+class ScanAttemptConflict(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("本次目录扫描已失效，请重新扫描。")
+
+
 class APIClient:
     def __init__(self, identity: Identity):
         self.identity = identity
@@ -52,6 +57,13 @@ class APIClient:
         response = self.http.request(method, path, content=body, headers=headers)
         if response.status_code == 426:
             raise AgentUpgradeRequired()
+        if response.status_code == 409:
+            try:
+                error = response.json()
+            except ValueError:
+                error = None
+            if isinstance(error, dict) and error.get("code") == "scan_attempt_conflict":
+                raise ScanAttemptConflict()
         if response.status_code not in allow_statuses:
             response.raise_for_status()
         return response
@@ -79,9 +91,10 @@ class APIClient:
     def report_scan_failure(self, source_id: str, scan_attempt_id: str, code: str) -> None:
         self._request("POST", f"/api/v1/wedrive/agent/sources/{source_id}/scan-failure", {"code": code, "scan_attempt_id": scan_attempt_id})
 
-    def begin_snapshot(self, source: dict, root_id: str, count: int) -> str:
+    def begin_snapshot(self, source_id: str, scan_attempt_id: str, root_id: str, count: int) -> str:
         result = self._request("POST", "/api/v1/wedrive/agent/snapshots", {
-            "source_id": source["id"], "sequence": int(time.time_ns() // 1_000_000),
+            "source_id": source_id, "scan_attempt_id": scan_attempt_id,
+            "sequence": int(time.time_ns() // 1_000_000),
             "root_external_id": root_id, "expected_item_count": count,
         }).json()
         return result["id"]

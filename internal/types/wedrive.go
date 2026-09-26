@@ -209,7 +209,9 @@ func (s *WeDriveSource) BeforeCreate(*gorm.DB) error {
 type WeDriveSnapshot struct {
 	ID                string     `json:"id" gorm:"type:varchar(36);primaryKey"`
 	TenantID          uint64     `json:"tenant_id" gorm:"not null;index"`
-	SourceID          string     `json:"source_id" gorm:"type:varchar(36);not null;index:idx_wedrive_snapshots_source_created"`
+	SourceID          string     `json:"source_id" gorm:"type:varchar(36);not null;index:idx_wedrive_snapshots_source_created;uniqueIndex:idx_wedrive_snapshots_source_attempt,priority:1,where:scan_attempt_id <> ''"`
+	ScanAttemptID     string     `json:"scan_attempt_id,omitempty" gorm:"type:varchar(36);not null;default:'';uniqueIndex:idx_wedrive_snapshots_source_attempt,priority:2,where:scan_attempt_id <> ''"`
+	RootExternalID    string     `json:"root_external_id,omitempty" gorm:"type:varchar(255);not null;default:''"`
 	DeviceID          string     `json:"device_id" gorm:"type:varchar(36);not null;index"`
 	Sequence          int64      `json:"sequence" gorm:"not null"`
 	Status            string     `json:"status" gorm:"type:varchar(32);not null;default:'uploading'"`
