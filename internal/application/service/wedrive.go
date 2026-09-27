@@ -459,7 +459,9 @@ func (s *WeDriveService) DeleteSource(ctx context.Context, tenantID uint64, id s
 		}
 		// Pausing is the safety boundary: even if datasource cleanup fails, this
 		// source immediately disappears from the Agent's scan queue.
-		return tx.Model(&source).Update("status", types.WeDriveSourcePaused).Error
+		source.Status = types.WeDriveSourcePaused
+		(weDriveScanLifecycle{&source}).stop()
+		return tx.Save(&source).Error
 	}); err != nil {
 		return err
 	}
@@ -935,6 +937,9 @@ func (s *WeDriveService) BeginSnapshot(ctx context.Context, device *types.WeDriv
 // in this transaction; callers must commit that cleanup before returning the
 // expiry conflict. Stale identities do not mutate the source.
 func (s *WeDriveService) checkWeDriveScanAttempt(tx *gorm.DB, source *types.WeDriveSource, attemptID string, now time.Time) error {
+	if source.Status != types.WeDriveSourceAwaitingInventory && source.Status != types.WeDriveSourceActive {
+		return ErrWeDriveInvalidState
+	}
 	scan := weDriveScanLifecycle{source}
 	err := scan.checkAttempt(attemptID, now)
 	if errors.Is(err, ErrWeDriveScanAttemptExpired) {

@@ -50,6 +50,15 @@ func (scan weDriveScanLifecycle) changeCadence(interval int, ready bool, now tim
 	}
 }
 
+// stop invalidates any in-flight attempt when a source is disabled. It must
+// not leave a scheduled retry behind if datasource cleanup later fails.
+func (scan weDriveScanLifecycle) stop() {
+	source := scan.source
+	source.ScanState, source.NextScanAt, source.ScanLeaseExpiresAt = types.WeDriveScanStateIdle, nil, nil
+	source.ScanAttemptID, source.ScanRetryCount = "", 0
+	source.ScanProgressSeq, source.ScanLastProgressAt = 0, nil
+}
+
 func (scan weDriveScanLifecycle) hasActiveLease(now time.Time) bool {
 	return scan.source.ScanState == types.WeDriveScanStateRunning && scan.timeoutCode(now) == ""
 }

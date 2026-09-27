@@ -173,9 +173,11 @@ type WeDriveSource struct {
 	RootURL         string `json:"root_url" gorm:"type:text;not null"`
 	RootExternalID  string `json:"root_external_id,omitempty" gorm:"type:varchar(255);not null;default:''"`
 	Status          string `json:"status" gorm:"type:varchar(32);not null;index:idx_wedrive_sources_tenant_status"`
-	AutoShare       bool   `json:"auto_share" gorm:"not null;default:true"`
-	SyncDeletions   bool   `json:"sync_deletions" gorm:"not null;default:false"`
-	SyncSchedule    string `json:"sync_schedule" gorm:"type:varchar(64);not null;default:''"`
+	// CreateSource supplies the default. An ORM default would turn an explicit
+	// false back into true when GORM inserts the zero-value bool.
+	AutoShare     bool   `json:"auto_share" gorm:"not null"`
+	SyncDeletions bool   `json:"sync_deletions" gorm:"not null;default:false"`
+	SyncSchedule  string `json:"sync_schedule" gorm:"type:varchar(64);not null;default:''"`
 	// No ORM default tag: zero is the persisted value for “manual only”. The
 	// database migration retains its default for legacy rows, but GORM must not
 	// replace an explicitly selected zero with 30 during Create.

@@ -384,6 +384,39 @@ func TestCreateSourceKeepsManualScanCadenceForAdmin(t *testing.T) {
 	require.Equal(t, types.WeDriveSourcePending, contributorSource.Status)
 }
 
+func TestCreateSourcePersistsExplicitAutoShareChoice(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "wedrive-auto-share.db")), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	require.NoError(t, db.AutoMigrate(&types.WeDriveSource{}, &types.WeDriveDevice{}, &types.WeComCLIConnection{}))
+	require.NoError(t, db.Create(&types.WeDriveDevice{ID: "device-1", TenantID: 7, UserID: "owner-1", Status: "online"}).Error)
+	require.NoError(t, db.Create(&types.WeComCLIConnection{ID: "connection-1", TenantID: 7, Name: "CLI"}).Error)
+	svc := NewWeDriveService(db, nil, nil)
+	for _, tc := range []struct {
+		name   string
+		choice *bool
+		want   bool
+	}{
+		{name: "default", want: true},
+		{name: "disabled", choice: func() *bool { v := false; return &v }(), want: false},
+		{name: "enabled", choice: func() *bool { v := true; return &v }(), want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, err := svc.CreateSource(context.Background(), 7, "owner-1", types.TenantRoleOwner, CreateWeDriveSourceInput{
+				KnowledgeBaseID: "kb-1", ConnectionID: "connection-1", DeviceID: "device-1", Name: tc.name,
+				RootURL: "https://drive.weixin.qq.com/#/webdisk/folder?id=root", AutoShare: tc.choice,
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, source.AutoShare)
+			var persisted types.WeDriveSource
+			require.NoError(t, db.First(&persisted, "id = ?", source.ID).Error)
+			require.Equal(t, tc.want, persisted.AutoShare)
+		})
+	}
+}
+
 func TestRebindSourceConnectionUpdatesLinkedDataSourceAtomically(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "wedrive-rebind.db")), &gorm.Config{})
 	require.NoError(t, err)

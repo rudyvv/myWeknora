@@ -143,6 +143,47 @@ type failingWeDriveActivation struct {
 	calls int
 }
 
+type failingWeDriveDeletion struct {
+	interfaces.DataSourceService
+}
+
+func (*failingWeDriveDeletion) DeleteDataSource(context.Context, string) error {
+	return errors.New("datasource cleanup unavailable")
+}
+
+func TestWeDriveDeleteFailureKeepsSourcePausedAndRejectsInFlightSnapshot(t *testing.T) {
+	svc, device, now := newWeDriveScanTestService(t)
+	ctx := context.Background()
+	createWeDriveScanTestSource(t, svc, "source", *now)
+	require.NoError(t, svc.db.Model(&types.WeDriveSource{}).Where("id = ?", "source").Update("data_source_id", "datasource").Error)
+	claimed, err := svc.ClaimScan(ctx, device, "source", ClaimWeDriveScanInput{Trigger: "manual"})
+	require.NoError(t, err)
+	snapshot, err := svc.BeginSnapshot(ctx, device, BeginSnapshotInput{
+		SourceID: "source", ScanAttemptID: claimed.ScanAttemptID, Sequence: 1, RootExternalID: "root", ExpectedItemCount: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.UploadSnapshotItems(ctx, device, snapshot.ID, []types.WeDriveInventoryItem{{ExternalID: "root", Name: "root", Path: ".", ItemType: "folder"}}))
+	svc.datasources = &failingWeDriveDeletion{}
+	require.ErrorContains(t, svc.DeleteSource(ctx, 7, "source"), "datasource cleanup unavailable")
+
+	_, err = svc.CommitSnapshot(ctx, device, snapshot.ID, CommitSnapshotInput{ItemCount: 1})
+	require.ErrorIs(t, err, ErrWeDriveInvalidState)
+	source, err := svc.GetSource(ctx, 7, "source")
+	require.NoError(t, err)
+	require.Equal(t, types.WeDriveSourcePaused, source.Status)
+	require.Equal(t, types.WeDriveScanStateIdle, source.ScanState)
+	require.Empty(t, source.ScanAttemptID)
+	require.Nil(t, source.ScanLeaseExpiresAt)
+	require.Nil(t, source.NextScanAt)
+	require.Zero(t, source.ScanRetryCount)
+	require.Zero(t, source.ScanProgressSeq)
+	require.Nil(t, source.ScanLastProgressAt)
+	require.Empty(t, source.LastSnapshotID)
+	var saved types.WeDriveSnapshot
+	require.NoError(t, svc.db.First(&saved, "id = ?", snapshot.ID).Error)
+	require.Equal(t, types.WeDriveSnapshotUploading, saved.Status)
+}
+
 func (f *failingWeDriveActivation) CreateDataSource(context.Context, *types.DataSource) (*types.DataSource, error) {
 	f.calls++
 	return nil, errors.New("activation unavailable")

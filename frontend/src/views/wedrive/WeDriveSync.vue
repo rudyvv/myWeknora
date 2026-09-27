@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import { listKnowledgeBases } from '@/api/knowledge-base'
 import { useAuthStore } from '@/stores/auth'
 import { agentReconnectDelay, displayedDeviceStatus, isScanRunning, shouldApplySocketClose, shouldReconnectAgent } from './agentSocketState'
+import { reconcileScanCadenceDrafts } from './scanCadenceDrafts'
 import {
   approveWeDriveSource,
   createWeComCLIConnection,
@@ -88,6 +89,7 @@ async function refresh() {
   if (disposed || version !== refreshVersion) return
   devices.value = payload<WeDriveDevice[]>(deviceRes) || []
   connections.value = admin ? payload<WeComCLIConnection[]>(connectionRes) || [] : []
+  const previousSources = sources.value
   sources.value = payload<WeDriveSource[]>(sourceRes) || []
   knowledgeBases.value = payload<any[]>(kbRes) || []
   if (!selectedDeviceID.value && devices.value[0]) selectedDeviceID.value = devices.value[0].id
@@ -100,7 +102,7 @@ async function refresh() {
       rebinding[source.id] = source.connection_id || ''
     }
   }
-  for (const source of sources.value) scanIntervalEdits[source.id] = source.scan_interval_minutes
+  reconcileScanCadenceDrafts(scanIntervalEdits, previousSources, sources.value)
 }
 
 async function createRegistration() {
@@ -385,6 +387,7 @@ function scanIntervalLabel(value: number): string {
 }
 
 function scanStateLabel(source: WeDriveSource): string {
+  if (source.status === 'paused') return '已停止扫描'
   if (source.scan_state === 'running') return isScanRunning(source.scan_state, source.scan_lease_expires_at) ? '扫描中' : '上次扫描已超时，可重新扫描'
   if (source.scan_state === 'retry_wait') return '将在 10 分钟后重试'
   if (source.scan_state === 'failed' && source.last_scan_error_code === 'scan_interrupted') return '上次扫描因服务重启中断，可重新扫描'
