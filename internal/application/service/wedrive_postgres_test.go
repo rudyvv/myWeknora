@@ -44,9 +44,12 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 	defer sqlDB.Close()
 
 	require.NoError(t, db.Exec("CREATE TABLE data_sources (id varchar(36) PRIMARY KEY, type varchar(50), sync_schedule varchar(100))").Error)
-	for _, version := range []string{"000096_wecom_wedrive_sync.up.sql", "000097_wedrive_scan_cadence.up.sql", "000098_wedrive_manual_content_sync.up.sql", "000099_wedrive_scan_attempt.up.sql", "000100_wedrive_snapshot_attempt.up.sql"} {
+	for _, version := range []string{"000096_wecom_wedrive_sync.up.sql", "000097_wedrive_scan_cadence.up.sql", "000098_wedrive_manual_content_sync.up.sql", "000099_wedrive_scan_attempt.up.sql", "000100_wedrive_snapshot_attempt.up.sql", "000101_wedrive_scan_progress.up.sql"} {
 		if version == "000099_wedrive_scan_attempt.up.sql" {
 			seedLegacyWeDriveScanAttempts(t, db)
+		}
+		if version == "000101_wedrive_scan_progress.up.sql" {
+			seedWeDriveProgressMigration(t, db)
 		}
 		if version == "000097_wedrive_scan_cadence.up.sql" {
 			require.NoError(t, db.Exec("INSERT INTO data_sources (id, type, sync_schedule) VALUES ('legacy-ds', 'wecom_drive_rpa', '*/30 * * * *')").Error)
@@ -67,6 +70,7 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 	defer runtimeSQL.Close()
 	assertMigratedWeDriveScanAttempts(t, db)
 	assertWeDriveSnapshotAttemptSchema(t, db)
+	assertWeDriveProgressMigration(t, db)
 	var legacy struct{ SyncSchedule string }
 	require.NoError(t, db.Raw("SELECT sync_schedule FROM wedrive_sources WHERE id = 'legacy-source'").Scan(&legacy).Error)
 	require.Empty(t, legacy.SyncSchedule)
@@ -149,4 +153,5 @@ func TestWeDrivePostgresMigrationsAndConcurrentClaims(t *testing.T) {
 	require.Empty(t, finished.ScanAttemptID)
 	require.Nil(t, finished.ScanLeaseExpiresAt)
 	testWeDrivePostgresSnapshotTransactions(t, db)
+	testWeDrivePostgresLeaseTransactions(t, db)
 }

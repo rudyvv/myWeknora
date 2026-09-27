@@ -448,6 +448,27 @@ func (h *WeDriveHandler) ReportScanFailure(c *gin.Context) {
 	c.JSON(http.StatusOK, row)
 }
 
+func (h *WeDriveHandler) RenewScanLease(c *gin.Context) {
+	device, body, ok := h.signedScanBody(c)
+	if !ok {
+		return
+	}
+	var wire struct {
+		ScanAttemptID string `json:"scan_attempt_id"`
+		ProgressSeq   *int64 `json:"progress_seq"`
+	}
+	if json.Unmarshal(body, &wire) != nil || wire.ProgressSeq == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	row, err := h.service.RenewScanLease(c.Request.Context(), device, c.Param("source_id"), service.RenewWeDriveScanLeaseInput{ScanAttemptID: wire.ScanAttemptID, ProgressSeq: *wire.ProgressSeq})
+	if err != nil {
+		writeWeDriveError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
 // Check the version on this signed request, never the stored device version.
 // Discovery filtering is only a convenience; every scan write enforces this.
 func (h *WeDriveHandler) signedScanBody(c *gin.Context) (*types.WeDriveDevice, []byte, bool) {

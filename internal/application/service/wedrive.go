@@ -38,7 +38,6 @@ type WeDriveService struct {
 	datasources interfaces.DataSourceService
 	audit       interfaces.AuditLogService
 	now         func() time.Time
-	startedAt   time.Time
 }
 
 type weDriveProvisioningKey struct{}
@@ -48,10 +47,9 @@ func withWeDriveProvisioning(ctx context.Context) context.Context {
 }
 
 func NewWeDriveService(db *gorm.DB, datasources interfaces.DataSourceService, audit interfaces.AuditLogService) *WeDriveService {
-	startedAt := time.Now().UTC()
 	return &WeDriveService{
 		db: db, datasources: datasources, audit: audit,
-		now: func() time.Time { return time.Now().UTC() }, startedAt: startedAt,
+		now: func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -654,6 +652,9 @@ func (s *WeDriveService) ListDeviceSources(ctx context.Context, device *types.We
 	if !agentSupportsAttempts {
 		return []*types.WeDriveSource{}, nil
 	}
+	if err := s.RecoverInterruptedScans(ctx, device); err != nil {
+		return nil, err
+	}
 	var rows []*types.WeDriveSource
 	q := s.db.WithContext(ctx).
 		Where("tenant_id = ? AND device_id = ? AND status IN ? AND deleted_at IS NULL", device.TenantID, device.ID,
@@ -673,7 +674,6 @@ func (s *WeDriveService) ClaimScan(ctx context.Context, device *types.WeDriveDev
 	var source types.WeDriveSource
 	var claimErr error
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := s.now()
 		// Lock the same ordered set for every claim on this device. Locking only
 		// the target source leaves two different sources free to claim at once.
 		var deviceSources []types.WeDriveSource
@@ -682,6 +682,7 @@ func (s *WeDriveService) ClaimScan(ctx context.Context, device *types.WeDriveDev
 			Order("id ASC").Find(&deviceSources).Error; err != nil {
 			return err
 		}
+		now := s.now()
 		for i := range deviceSources {
 			row := &deviceSources[i]
 			if (weDriveScanLifecycle{row}).hasActiveLease(now) {
@@ -694,7 +695,7 @@ func (s *WeDriveService) ClaimScan(ctx context.Context, device *types.WeDriveDev
 			if row.ScanState != types.WeDriveScanStateRunning {
 				continue
 			}
-			if err := (weDriveScanLifecycle{row}).fail("scan_timeout", now); err != nil {
+			if err := (weDriveScanLifecycle{row}).fail((weDriveScanLifecycle{row}).timeoutCode(now), now); err != nil {
 				return err
 			}
 			if err := tx.Save(row).Error; err != nil {
@@ -727,9 +728,8 @@ type ReportWeDriveScanFailureInput struct {
 	ScanAttemptID string `json:"scan_attempt_id"`
 }
 
-// RecoverInterruptedScans runs when an Agent reconnects after a server restart.
-// Claims made by this server process remain untouched during ordinary socket
-// reconnects, including reconnects while the Agent is actively scanning.
+// RecoverInterruptedScans reconciles persisted attempts on device reconnect.
+// Valid attempts survive server restarts; only expired attempts are failed.
 func (s *WeDriveService) RecoverInterruptedScans(ctx context.Context, device *types.WeDriveDevice) error {
 	if device == nil {
 		return ErrWeDriveForbidden
@@ -737,14 +737,18 @@ func (s *WeDriveService) RecoverInterruptedScans(ctx context.Context, device *ty
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var sources []types.WeDriveSource
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("tenant_id = ? AND device_id = ? AND scan_state = ? AND (last_scan_started_at IS NULL OR last_scan_started_at < ?) AND deleted_at IS NULL",
-				device.TenantID, device.ID, types.WeDriveScanStateRunning, s.startedAt).
-			Find(&sources).Error; err != nil {
+			Where("tenant_id = ? AND device_id = ? AND scan_state = ? AND deleted_at IS NULL",
+				device.TenantID, device.ID, types.WeDriveScanStateRunning).
+			Order("id ASC").Find(&sources).Error; err != nil {
 			return err
 		}
 		now := s.now()
 		for i := range sources {
-			if err := (weDriveScanLifecycle{&sources[i]}).fail("scan_interrupted", now); err != nil {
+			scan := weDriveScanLifecycle{&sources[i]}
+			if scan.hasActiveLease(now) {
+				continue
+			}
+			if err := scan.fail(scan.timeoutCode(now), now); err != nil {
 				return err
 			}
 			if err := tx.Save(&sources[i]).Error; err != nil {
@@ -753,6 +757,46 @@ func (s *WeDriveService) RecoverInterruptedScans(ctx context.Context, device *ty
 		}
 		return nil
 	})
+}
+
+type RenewWeDriveScanLeaseInput struct {
+	ScanAttemptID string `json:"scan_attempt_id"`
+	ProgressSeq   int64  `json:"progress_seq"`
+}
+
+func (s *WeDriveService) RenewScanLease(ctx context.Context, device *types.WeDriveDevice, sourceID string, in RenewWeDriveScanLeaseInput) (*types.WeDriveSource, error) {
+	if device == nil || sourceID == "" || in.ProgressSeq < 0 {
+		return nil, ErrWeDriveInvalidState
+	}
+	var source types.WeDriveSource
+	var attemptErr error
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND tenant_id = ? AND device_id = ? AND deleted_at IS NULL", sourceID, device.TenantID, device.ID).First(&source).Error; err != nil {
+			return ErrWeDriveForbidden
+		}
+		now := s.now()
+		if err := s.checkWeDriveScanAttempt(tx, &source, in.ScanAttemptID, now); err != nil {
+			if errors.Is(err, ErrWeDriveScanAttemptExpired) {
+				attemptErr = err
+				return nil
+			}
+			return err
+		}
+		if in.ProgressSeq == source.ScanProgressSeq {
+			return nil
+		}
+		if err := (weDriveScanLifecycle{&source}).renew(in.ProgressSeq, now); err != nil {
+			return err
+		}
+		return tx.Save(&source).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	if attemptErr != nil {
+		return nil, attemptErr
+	}
+	return &source, nil
 }
 
 func (s *WeDriveService) ReportScanFailure(ctx context.Context, device *types.WeDriveDevice, sourceID string, in ReportWeDriveScanFailureInput) (*types.WeDriveSource, error) {
@@ -894,7 +938,7 @@ func (s *WeDriveService) checkWeDriveScanAttempt(tx *gorm.DB, source *types.WeDr
 	scan := weDriveScanLifecycle{source}
 	err := scan.checkAttempt(attemptID, now)
 	if errors.Is(err, ErrWeDriveScanAttemptExpired) {
-		if failErr := scan.fail("scan_timeout", now); failErr != nil {
+		if failErr := scan.fail(scan.timeoutCode(now), now); failErr != nil {
 			return failErr
 		}
 		if saveErr := tx.Save(source).Error; saveErr != nil {

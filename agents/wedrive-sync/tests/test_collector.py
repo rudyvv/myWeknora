@@ -10,6 +10,7 @@ from weknora_wedrive_agent.collector import (
     _browser_captured_share_url,
     _click_virtualized_text,
 )
+from weknora_wedrive_agent.client import ScanAttemptConflict
 
 
 class FakePage:
@@ -146,13 +147,59 @@ class FakePlaywrightStarter:
 
 
 class FakeResponse:
-    def __init__(self, payload: dict, request_payload: dict | None = None) -> None:
+    def __init__(self, payload: dict, request_payload: dict | None = None, status: int = 200) -> None:
         self.url = "https://drive.weixin.qq.com/webdisk/list"
+        self.status = status
         self._payload = payload
         self.request = type("Request", (), {"post_data_json": request_payload, "post_data": None})()
 
     def json(self) -> dict:
         return self._payload
+
+
+class ListingPage(FakePage):
+    def on(self, event, callback) -> None:
+        if event == "response":
+            self.response_callback = callback
+
+    def evaluate(self, _expression, *_args):
+        return {"moved": False, "at_end": True}
+
+    def wait_for_timeout(self, _milliseconds):
+        pass
+
+    def goto(self, url, **_kwargs):
+        self.url = url
+        # Wrong folder and malformed payload are not confirmed progress.
+        self.response_callback(FakeResponse({"body": {"file_list": []}}, {"father_id": "other"}))
+        self.response_callback(FakeResponse({"errcode": 1}, {"father_id": "folder-1"}))
+        self.response_callback(FakeResponse({"body": {"file_list": [{"name": "error.txt", "file_id": "error-only", "father_id": "folder-1"}]}}, {"father_id": "folder-1"}, status=500))
+        payload = {"body": {"file_list": [{"name": "file.txt", "file_id": "file-1", "father_id": "folder-1"}]}}
+        response = FakeResponse(payload, {"father_id": "folder-1"})
+        self.response_callback(response)
+        self.response_callback(response)  # A duplicate network response.
+
+
+class CancelledParentPage(ListingPage):
+    lost = False
+
+    def __init__(self, url):
+        super().__init__(url)
+        self.navigations = []
+
+    def goto(self, url, **_kwargs):
+        self.url = url
+        self.navigations.append(url)
+        if len(self.navigations) == 3:
+            self.lost = True
+            return
+        parent = "child" if len(self.navigations) == 2 else "folder-1"
+        files = [] if parent == "child" else [{"name": "child", "file_id": "child", "father_id": "folder-1", "file_type": 1}]
+        self.response_callback(FakeResponse({"body": {"file_list": files}}, {"father_id": parent}))
+
+    def wait_for_timeout(self, _milliseconds):
+        if self.lost:
+            raise RuntimeError("navigation interrupted")
 
 
 class SelectedFolderTest(TestCase):
@@ -162,6 +209,25 @@ class SelectedFolderTest(TestCase):
 
     def setUp(self) -> None:
         self._directory = TemporaryDirectory()
+
+    def test_collect_progress_only_counts_validated_unique_facts(self) -> None:
+        page = ListingPage(self.FOLDER_URL)
+        collector = Collector(FakeContext(page), self.profile_root)
+        events = []
+        root, items, _stats = collector.collect(self.FOLDER_URL, False, on_progress=lambda: events.append("progress"))
+        self.assertEqual("folder-1", root)
+        self.assertEqual(2, len(items))
+        self.assertEqual(3, len(events), "one listing, one new file, one validated root")
+
+    def test_lost_lease_during_parent_navigation_stops_fallbacks(self) -> None:
+        page = CancelledParentPage(self.FOLDER_URL)
+        collector = Collector(FakeContext(page), self.profile_root)
+        def checkpoint():
+            if page.lost:
+                raise ScanAttemptConflict()
+        with self.assertRaises(ScanAttemptConflict):
+            collector.collect(self.FOLDER_URL, False, checkpoint=checkpoint)
+        self.assertEqual(3, len(page.navigations), "no fresh navigation after lease loss")
 
     def tearDown(self) -> None:
         self._directory.cleanup()

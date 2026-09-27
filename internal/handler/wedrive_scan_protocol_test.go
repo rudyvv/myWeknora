@@ -41,6 +41,7 @@ func newWeDriveProtocolTest(t *testing.T, recordedVersion string) (*gin.Engine, 
 	router := gin.New()
 	router.GET("/sources", h.ListAgentSources)
 	router.POST("/sources/:source_id/claim-scan", h.ClaimScan)
+	router.POST("/sources/:source_id/scan-lease", h.RenewScanLease)
 	router.POST("/sources/:source_id/scan-failure", h.ReportScanFailure)
 	router.POST("/snapshots", h.BeginSnapshot)
 	router.POST("/snapshots/:snapshot_id/items", h.UploadSnapshotItems)
@@ -65,7 +66,7 @@ func signedWeDriveProtocolRequest(router *gin.Engine, key ed25519.PrivateKey, me
 func TestWeDriveOldToolCannotWriteUsingRecordedNewVersion(t *testing.T) {
 	router, db, key := newWeDriveProtocolTest(t, "1.0.0")
 	for _, version := range []string{"", "0.3.1", "0.3.99", "0.4.invalid", "0.4.0-beta"} {
-		for _, path := range []string{"/sources/source/claim-scan", "/sources/source/scan-failure", "/snapshots", "/snapshots/old/items", "/snapshots/old/commit"} {
+		for _, path := range []string{"/sources/source/claim-scan", "/sources/source/scan-lease", "/sources/source/scan-failure", "/snapshots", "/snapshots/old/items", "/snapshots/old/commit"} {
 			w := signedWeDriveProtocolRequest(router, key, "POST", path, version, []byte(`{"trigger":"manual","code":"old_failure"}`))
 			require.Equal(t, http.StatusUpgradeRequired, w.Code, "version=%q path=%s: %s", version, path, w.Body.String())
 			var response map[string]any
@@ -184,4 +185,39 @@ func mustWeDriveProtocolJSON(t *testing.T, value any) []byte {
 	body, err := json.Marshal(value)
 	require.NoError(t, err)
 	return body
+}
+
+func TestWeDriveSignedLeaseRequiresProgressAndCurrentIdentity(t *testing.T) {
+	router, db, key := newWeDriveProtocolTest(t, "0.4.0")
+	w := signedWeDriveProtocolRequest(router, key, "POST", "/sources/source/claim-scan", "0.4.0", []byte(`{"trigger":"manual"}`))
+	require.Equal(t, http.StatusOK, w.Code)
+	var claimed types.WeDriveSource
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &claimed))
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{"scan_attempt_id":"` + claimed.ScanAttemptID + `"}`, http.StatusBadRequest},
+		{`{"scan_attempt_id":"` + claimed.ScanAttemptID + `","progress_seq":null}`, http.StatusBadRequest},
+		{`{"scan_attempt_id":"old","progress_seq":1}`, http.StatusConflict},
+		{`{"progress_seq":1}`, http.StatusConflict},
+	} {
+		w = signedWeDriveProtocolRequest(router, key, "POST", "/sources/source/scan-lease", "0.4.0", []byte(tc.body))
+		require.Equal(t, tc.status, w.Code, w.Body.String())
+	}
+	body := mustWeDriveProtocolJSON(t, service.RenewWeDriveScanLeaseInput{ScanAttemptID: claimed.ScanAttemptID, ProgressSeq: 1})
+	w = signedWeDriveProtocolRequest(router, key, "POST", "/sources/source/scan-lease", "0.4.0", body)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var renewed types.WeDriveSource
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &renewed))
+	require.Equal(t, claimed.ScanAttemptID, renewed.ScanAttemptID)
+	require.Equal(t, int64(1), renewed.ScanProgressSeq)
+	require.NotNil(t, renewed.ScanLastProgressAt)
+	w = signedWeDriveProtocolRequest(router, key, "POST", "/sources/source/scan-lease", "0.4.0", body)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.JSONEq(t, string(mustWeDriveProtocolJSON(t, renewed)), w.Body.String())
+	saved, err := service.NewWeDriveService(db, nil, nil).GetSource(t.Context(), 7, "source")
+	require.NoError(t, err)
+	require.Equal(t, types.WeDriveScanStateRunning, saved.ScanState)
+	require.Nil(t, saved.LastCompleteScanAt)
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,9 +74,12 @@ func TestWeDriveSQLiteScanAttemptMigrationPreservesInventory(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	require.NoError(t, db.Exec("CREATE TABLE data_sources (id TEXT PRIMARY KEY, type TEXT, sync_schedule TEXT)").Error)
-	for _, migration := range []string{"000017_wecom_wedrive_sync.up.sql", "000018_wedrive_scan_cadence.up.sql", "000019_wedrive_manual_content_sync.up.sql", "000020_wedrive_scan_attempt.up.sql", "000021_wedrive_snapshot_attempt.up.sql"} {
+	for _, migration := range []string{"000017_wecom_wedrive_sync.up.sql", "000018_wedrive_scan_cadence.up.sql", "000019_wedrive_manual_content_sync.up.sql", "000020_wedrive_scan_attempt.up.sql", "000021_wedrive_snapshot_attempt.up.sql", "000022_wedrive_scan_progress.up.sql"} {
 		if migration == "000020_wedrive_scan_attempt.up.sql" {
 			seedLegacyWeDriveScanAttempts(t, db)
+		}
+		if migration == "000022_wedrive_scan_progress.up.sql" {
+			seedWeDriveProgressMigration(t, db)
 		}
 		contents, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "sqlite", migration))
 		require.NoError(t, err)
@@ -83,6 +87,30 @@ func TestWeDriveSQLiteScanAttemptMigrationPreservesInventory(t *testing.T) {
 	}
 	assertMigratedWeDriveScanAttempts(t, db)
 	assertWeDriveSnapshotAttemptSchema(t, db)
+	assertWeDriveProgressMigration(t, db)
+}
+
+func seedWeDriveProgressMigration(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	start := time.Date(2026, 9, 27, 10, 0, 0, 0, time.UTC)
+	for _, interval := range []int{0, 30} {
+		id := fmt.Sprintf("progress-migration-%d", interval)
+		require.NoError(t, db.Exec("INSERT INTO wedrive_sources (id, tenant_id, knowledge_base_id, device_id, created_by, name, root_url, status, scan_interval_minutes, scan_state, scan_attempt_id, scan_lease_expires_at, last_scan_started_at) VALUES (?, 7, 'kb', ?, 'owner', 'root', 'https://drive.weixin.qq.com/root', 'active', ?, 'running', 'migration-attempt', ?, ?)", id, id, interval, start.Add(30*time.Minute), start).Error)
+	}
+}
+
+func assertWeDriveProgressMigration(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for _, interval := range []int{0, 30} {
+		var source types.WeDriveSource
+		require.NoError(t, db.First(&source, "id = ?", fmt.Sprintf("progress-migration-%d", interval)).Error)
+		require.Equal(t, "migration-attempt", source.ScanAttemptID)
+		require.Equal(t, types.WeDriveScanStateRunning, source.ScanState)
+		require.Zero(t, source.ScanProgressSeq)
+		require.NotNil(t, source.ScanLastProgressAt)
+		require.True(t, source.ScanLastProgressAt.Equal(*source.LastScanStartedAt))
+		require.True(t, source.ScanLeaseExpiresAt.Equal(source.LastScanStartedAt.Add(30*time.Minute)))
+	}
 }
 
 func assertWeDriveSnapshotAttemptSchema(t *testing.T, db *gorm.DB) {

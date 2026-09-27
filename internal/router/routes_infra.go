@@ -346,6 +346,7 @@ func RegisterWeDriveAgentRoutes(r *gin.Engine, h *handler.WeDriveHandler) {
 	g.GET("/sources", h.ListAgentSources)
 	r.GET("/api/v1/wedrive/browser/events", h.BrowserEvents)
 	g.POST("/sources/:source_id/claim-scan", h.ClaimScan)
+	g.POST("/sources/:source_id/scan-lease", h.RenewScanLease)
 	g.POST("/sources/:source_id/scan-failure", h.ReportScanFailure)
 	g.POST("/snapshots", h.BeginSnapshot)
 	g.POST("/snapshots/:snapshot_id/items", h.UploadSnapshotItems)

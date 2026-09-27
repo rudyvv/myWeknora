@@ -44,7 +44,7 @@ class APIClient:
         response.raise_for_status()
         return response.json(), key
 
-    def _request(self, method: str, path: str, payload: dict | None = None, *, allow_statuses: tuple[int, ...] = ()) -> httpx.Response:
+    def _request(self, method: str, path: str, payload: dict | None = None, *, allow_statuses: tuple[int, ...] = (), timeout: float = 60) -> httpx.Response:
         body = b"" if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         timestamp = str(int(time.time()))
         headers = {
@@ -54,7 +54,7 @@ class APIClient:
             "X-WeDrive-Agent-Version": __version__,
             "Content-Type": "application/json",
         }
-        response = self.http.request(method, path, content=body, headers=headers)
+        response = self.http.request(method, path, content=body, headers=headers, timeout=timeout)
         if response.status_code == 426:
             raise AgentUpgradeRequired()
         if response.status_code == 409:
@@ -78,7 +78,10 @@ class APIClient:
         )
         if response.status_code == 409:
             return None
-        result = response.json()
+        return self._parse_claim(response.json())
+
+    @staticmethod
+    def _parse_claim(result: dict) -> ScanClaim:
         attempt_id = result.get("scan_attempt_id")
         expires_at = result.get("scan_lease_expires_at")
         if not isinstance(attempt_id, str) or not attempt_id.strip() or not isinstance(expires_at, str):
@@ -87,6 +90,15 @@ class APIClient:
         if lease.tzinfo is None:
             raise ValueError("scan claim lease must include a timezone")
         return ScanClaim(attempt_id, lease)
+
+    def renew_scan_lease(self, source_id: str, scan_attempt_id: str, progress_seq: int) -> ScanClaim:
+        result = self._request("POST", f"/api/v1/wedrive/agent/sources/{source_id}/scan-lease", {
+            "scan_attempt_id": scan_attempt_id, "progress_seq": progress_seq,
+        }, timeout=10).json()
+        claim = self._parse_claim(result)
+        if claim.scan_attempt_id != scan_attempt_id:
+            raise ScanAttemptConflict()
+        return claim
 
     def report_scan_failure(self, source_id: str, scan_attempt_id: str, code: str) -> None:
         self._request("POST", f"/api/v1/wedrive/agent/sources/{source_id}/scan-failure", {"code": code, "scan_attempt_id": scan_attempt_id})
@@ -99,10 +111,12 @@ class APIClient:
         }).json()
         return result["id"]
 
-    def upload_items(self, snapshot_id: str, items: list[dict]) -> None:
+    def upload_items(self, snapshot_id: str, items: list[dict], *, checkpoint=lambda: None, on_progress=lambda: None) -> None:
         path = f"/api/v1/wedrive/agent/snapshots/{snapshot_id}/items"
         for offset in range(0, len(items), 250):
+            checkpoint()
             self._request("POST", path, {"items": items[offset:offset + 250]})
+            on_progress()
 
     def commit(self, snapshot_id: str, count: int, stats: dict) -> None:
         path = f"/api/v1/wedrive/agent/snapshots/{snapshot_id}/commit"

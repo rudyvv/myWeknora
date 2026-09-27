@@ -454,6 +454,11 @@ class Collector:
         self.share_stats = {"existing": 0, "created": 0, "failed": 0}
         self.diagnostics = self._new_diagnostics()
         self._bound_page: Page | None = None
+        self._inventory_progress = lambda: None
+        self._checkpoint = lambda: None
+        self._progress_listings: set[tuple] = set()
+        self._progress_items: set[str] = set()
+        self._progress_shares: set[str] = set()
         self._bind_page(self.page)
 
     @staticmethod
@@ -659,6 +664,8 @@ class Collector:
         if not CAPTURE_PATTERN.search(response.url):
             return
         self.diagnostics["candidate_responses"] += 1
+        if response.status != 200:
+            return
         try:
             payload = response.json()
         except Exception:
@@ -677,6 +684,17 @@ class Collector:
         parent_id = _listing_id(payload, response)
         if self.expected_id and parent_id != self.expected_id:
             return
+        if not isinstance(payload, dict) or payload.get("errcode", 0) not in (0, "0"):
+            return
+        body = payload.get("body")
+        if not isinstance(body, dict) or not isinstance(body.get("file_list"), list):
+            return
+        if any(str(raw.get("father_id") or parent_id) != parent_id for raw in _file_list(payload)):
+            return
+        listing = (parent_id, tuple(sorted(str(_first(raw, "file_id", "fileid", "doc_id", "docid")) for raw in _file_list(payload))))
+        if listing not in self._progress_listings:
+            self._progress_listings.add(listing)
+            self._inventory_progress()
         self.current_parent_id = parent_id
         self.accepted_seq += 1
         self.diagnostics["accepted_listings"] += 1
@@ -709,6 +727,9 @@ class Collector:
                 "consumability": "supported" if (is_dir or doc_id or Path(name).suffix.lower() in SUPPORTED_OFFLINE) else "unsupported",
             }
             self.items[path] = item
+            if external_id not in self._progress_items:
+                self._progress_items.add(external_id)
+                self._inventory_progress()
             if item["share_url"]:
                 self.share_stats["existing"] += 1
             if is_dir and external_id not in child_ids:
@@ -716,7 +737,18 @@ class Collector:
                 child_ids.add(external_id)
         self.children[self.current_path] = children
 
-    def collect(self, root_url: str, auto_share: bool, progress=lambda _: None) -> tuple[str, list[dict], dict]:
+    def collect(self, root_url: str, auto_share: bool, progress=lambda _: None, *, on_progress=lambda: None, checkpoint=lambda: None) -> tuple[str, list[dict], dict]:
+        self._inventory_progress, self._checkpoint = on_progress, checkpoint
+        self._progress_listings.clear()
+        self._progress_items.clear()
+        self._progress_shares.clear()
+        try:
+            return self._collect(root_url, auto_share, progress)
+        finally:
+            self._inventory_progress, self._checkpoint = lambda: None, lambda: None
+
+    def _collect(self, root_url: str, auto_share: bool, progress) -> tuple[str, list[dict], dict]:
+        self._checkpoint()
         if not is_wecom_folder_url(root_url):
             raise ScanFailure("invalid_root", "请在 Agent 浏览器中进入目标微盘文件夹后重新读取")
         self.items.clear(); self.children.clear(); self.errors.clear()
@@ -740,6 +772,7 @@ class Collector:
         # otherwise returns a cached DOM without its list protocol response.
         self.page.goto(_inventory_navigation_url(root_url), wait_until="domcontentloaded")
         if not self._wait_listing(15, marker):
+            self._checkpoint()
             # One controlled retry covers transient application boot failures.
             # Use another nonce rather than ``reload``: an SPA reload can still
             # reuse the page's in-memory directory payload.
@@ -752,17 +785,20 @@ class Collector:
         _load_virtualized_listing(self.page)
         root_name = self.page.title() or "WeDrive Root"
         self.items["."] = {"external_id": root_id, "parent_external_id": "", "name": root_name, "path": ".", "item_type": "folder", "doc_id": "", "share_url": "", "mime_type": "", "size": 0, "content_fingerprint": "", "consumability": "supported"}
+        self._inventory_progress()
         self._walk("", root_id, 0, auto_share, progress)
         if self.errors:
             raise ScanFailure("tree_walk_failed", "目录树遍历未完成", dict(self.diagnostics))
         return root_id, sorted(self.items.values(), key=lambda item: item["path"]), dict(self.share_stats)
 
     def _walk(self, logical_path: str, parent_id: str, depth: int, auto_share: bool, progress) -> None:
+        self._checkpoint()
         if depth > 64:
             raise RuntimeError("目录深度超过安全上限 64")
         if auto_share:
             self._share_current_level(logical_path)
         for name, child_id in list(self.children.get(logical_path, [])):
+            self._checkpoint()
             progress(f"正在扫描 {logical_path}/{name}".strip("/"))
             seq = self.accepted_seq
             self.current_path = f"{logical_path}/{name}".strip("/")
@@ -827,6 +863,7 @@ class Collector:
                 return True
             except Exception:
                 self.diagnostics["direct_navigation_failed"] += 1
+        self._checkpoint()
         return self._click_visible(name)
 
     def _known_listing_visible(self, logical_path: str) -> bool:
@@ -873,6 +910,7 @@ class Collector:
                 (target, 2, "return_direct_attempts"),
                 (_inventory_navigation_url(target), 12, "return_fresh_attempts"),
             ):
+                self._checkpoint()
                 self.diagnostics[counter] += 1
                 marker = self.accepted_seq
                 try:
@@ -887,6 +925,7 @@ class Collector:
 
         # Keep the original UI fallback for older WeCom routes that cannot
         # encode the validated parent ID directly.
+        self._checkpoint()
         marker = self.accepted_seq
         parent_label = logical_path.rsplit("/", 1)[-1] if logical_path else ""
         try:
@@ -906,6 +945,7 @@ class Collector:
 
         # Some layouts collapse a parent breadcrumb. Browser history is a
         # last-resort only and must be validated by the same two safe signals.
+        self._checkpoint()
         marker = self.accepted_seq
         try:
             self.page.go_back(wait_until="networkidle")
@@ -922,6 +962,7 @@ class Collector:
         marker = self.accepted_seq if after is None else after
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
+            self._checkpoint()
             if self.accepted_seq > marker:
                 return True
             self.page.wait_for_timeout(100)
@@ -954,6 +995,7 @@ class Collector:
             if not targets:
                 return
             for path in targets:
+                self._checkpoint()
                 attempted.add(path)
                 self.share_target = path
                 name = self.items[path]["name"]
@@ -1006,6 +1048,9 @@ class Collector:
                     except Exception:
                         pass
                     self.share_target = ""
+                    if path not in self._progress_shares:
+                        self._progress_shares.add(path)
+                        self._inventory_progress()
 
     def _record_share_failure(self, path: str, reason: str) -> None:
         """Keep a safe per-entry reason for the server's aggregate report.

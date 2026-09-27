@@ -213,12 +213,13 @@ func TestWeDriveSnapshotCannotCompleteWhenValidationCrossesLeaseExpiry(t *testin
 	require.NoError(t, err)
 	require.NoError(t, svc.UploadSnapshotItems(ctx, device, snapshot.ID, []types.WeDriveInventoryItem{{ExternalID: "root", Name: "root", Path: ".", ItemType: "folder"}}))
 	reads := 0
+	expiresAt := claimed.ScanLastProgressAt.Add(20 * time.Minute)
 	svc.now = func() time.Time {
 		reads++
 		if reads == 1 {
-			return claimed.ScanLeaseExpiresAt.Add(-time.Second)
+			return expiresAt.Add(-time.Second)
 		}
-		return *claimed.ScanLeaseExpiresAt
+		return expiresAt
 	}
 	_, err = svc.CommitSnapshot(ctx, device, snapshot.ID, CommitSnapshotInput{ItemCount: 1})
 	require.ErrorIs(t, err, ErrWeDriveScanAttemptExpired)
@@ -228,8 +229,8 @@ func TestWeDriveSnapshotCannotCompleteWhenValidationCrossesLeaseExpiry(t *testin
 	require.Empty(t, source.ScanAttemptID)
 	require.Empty(t, source.LastSnapshotID)
 	require.Nil(t, source.LastCompleteScanAt)
-	require.Equal(t, "scan_timeout", source.LastScanErrorCode)
-	require.True(t, source.NextScanAt.Equal(claimed.ScanLeaseExpiresAt.Add(10*time.Minute)))
+	require.Equal(t, "scan_no_progress", source.LastScanErrorCode)
+	require.True(t, source.NextScanAt.Equal(expiresAt.Add(10*time.Minute)))
 	var unchanged types.WeDriveSnapshot
 	require.NoError(t, svc.db.First(&unchanged, "id = ?", snapshot.ID).Error)
 	require.Equal(t, types.WeDriveSnapshotUploading, unchanged.Status)

@@ -184,6 +184,8 @@ type WeDriveSource struct {
 	ScanRetryCount      int            `json:"scan_retry_count" gorm:"not null;default:0"`
 	ScanState           string         `json:"scan_state" gorm:"type:varchar(32);not null;default:'idle'"`
 	ScanAttemptID       string         `json:"scan_attempt_id,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	ScanProgressSeq     int64          `json:"scan_progress_seq" gorm:"not null;default:0"`
+	ScanLastProgressAt  *time.Time     `json:"scan_last_progress_at,omitempty"`
 	ScanLeaseExpiresAt  *time.Time     `json:"scan_lease_expires_at,omitempty"`
 	LastScanStartedAt   *time.Time     `json:"last_scan_started_at,omitempty"`
 	LastScanErrorCode   string         `json:"last_scan_error_code,omitempty" gorm:"type:varchar(64);not null;default:''"`

@@ -273,7 +273,7 @@ func TestExpiredScheduledScanUsesFailureRetryDelay(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestRecoverInterruptedScansOnlyResetsThisDevicesPreRestartClaims(t *testing.T) {
+func TestRecoverInterruptedScansOnlyResetsThisDevicesExpiredClaims(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "wedrive-recovery.db")), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
@@ -283,7 +283,7 @@ func TestRecoverInterruptedScansOnlyResetsThisDevicesPreRestartClaims(t *testing
 
 	startedAt := time.Date(2026, 9, 25, 8, 0, 0, 0, time.UTC)
 	now := startedAt.Add(time.Minute)
-	before := startedAt.Add(-time.Minute)
+	before := startedAt.Add(-35 * time.Minute)
 	after := startedAt.Add(time.Second)
 	lease := now.Add(weDriveScanLease)
 	for _, item := range []struct {
@@ -302,13 +302,12 @@ func TestRecoverInterruptedScansOnlyResetsThisDevicesPreRestartClaims(t *testing
 			ID: item.id, TenantID: item.tenantID, KnowledgeBaseID: "kb-1", DeviceID: item.deviceID,
 			CreatedBy: "owner", Name: item.id, RootURL: "https://drive.weixin.qq.com/root", Status: types.WeDriveSourceActive,
 			ScanIntervalMinutes: item.interval, ScanState: types.WeDriveScanStateRunning,
-			ScanLeaseExpiresAt: &lease, LastScanStartedAt: &item.startedAt,
+			ScanLeaseExpiresAt: &lease, LastScanStartedAt: &item.startedAt, ScanAttemptID: item.id,
 		}
 		require.NoError(t, db.Create(source).Error)
 	}
 
 	svc := NewWeDriveService(db, nil, nil)
-	svc.startedAt = startedAt
 	svc.now = func() time.Time { return now }
 	require.NoError(t, svc.RecoverInterruptedScans(context.Background(), &types.WeDriveDevice{ID: "device-1", TenantID: 7}))
 
@@ -321,7 +320,7 @@ func TestRecoverInterruptedScansOnlyResetsThisDevicesPreRestartClaims(t *testing
 	require.Equal(t, types.WeDriveScanStateFailed, rows["interrupted-manual"].ScanState)
 	require.Nil(t, rows["interrupted-manual"].ScanLeaseExpiresAt)
 	require.Nil(t, rows["interrupted-manual"].NextScanAt)
-	require.Equal(t, "scan_interrupted", rows["interrupted-manual"].LastScanErrorCode)
+	require.Equal(t, "scan_no_progress", rows["interrupted-manual"].LastScanErrorCode)
 	require.Equal(t, types.WeDriveScanStateRetryWait, rows["interrupted-scheduled"].ScanState)
 	require.Equal(t, now.Add(weDriveScanRetryDelay), *rows["interrupted-scheduled"].NextScanAt)
 	require.Equal(t, 1, rows["interrupted-scheduled"].ScanRetryCount)

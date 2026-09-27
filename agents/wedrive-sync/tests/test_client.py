@@ -16,6 +16,39 @@ class FakeIdentity:
         return "signature"
 
 
+def test_renewal_carries_only_attempt_and_progress_and_parses_deadline() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/sources/source-1/scan-lease")
+        assert json.loads(request.content) == {"scan_attempt_id": "attempt-1", "progress_seq": 7}
+        assert request.headers["X-WeDrive-Signature"] == "signature"
+        return httpx.Response(200, json={"scan_attempt_id": "attempt-1", "scan_lease_expires_at": "2026-09-27T10:30:00Z"})
+    client = APIClient(FakeIdentity())  # type: ignore[arg-type]
+    client.http = httpx.Client(base_url=FakeIdentity.server, transport=httpx.MockTransport(handler))
+    try:
+        claim = client.renew_scan_lease("source-1", "attempt-1", 7)
+        assert claim.scan_attempt_id == "attempt-1"
+        assert claim.lease_expires_at == datetime(2026, 9, 27, 10, 30, tzinfo=timezone.utc)
+    finally:
+        client.http.close()
+
+
+def test_lost_lease_between_upload_batches_stops_next_request() -> None:
+    requests = []
+    progress = []
+    client = APIClient(FakeIdentity())  # type: ignore[arg-type]
+    client.http = httpx.Client(base_url=FakeIdentity.server, transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(204)))
+    def checkpoint():
+        if progress:
+            raise ScanAttemptConflict()
+    try:
+        with pytest.raises(ScanAttemptConflict):
+            client.upload_items("snapshot", [{}] * 501, checkpoint=checkpoint, on_progress=lambda: progress.append(1))
+        assert len(requests) == 1
+        assert len(progress) == 1
+    finally:
+        client.http.close()
+
+
 def test_claim_scan_treats_server_conflict_as_not_claimed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["X-WeDrive-Agent-Version"] == __version__

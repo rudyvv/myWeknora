@@ -19,6 +19,7 @@ from playwright._impl._errors import TargetClosedError
 from websockets.sync.client import connect
 
 from .client import APIClient, ScanClaim, AgentUpgradeRequired, ScanAttemptConflict
+from .scan_lease import ScanLease
 from .collector import Collector, FolderSelectionError, ScanFailure
 from .security import Identity
 
@@ -330,29 +331,33 @@ class Agent:
             if claim is None:
                 logging.info("WeDrive scan not claimed source_id=%s trigger=%s", source_id, trigger)
                 return
-            if not self.ensure_collector():
-                self.api.report_scan_failure(source_id, claim.scan_attempt_id, "browser_unavailable")
-                if ws:
-                    self.send_scan_status(ws, "error", {"reason": "browser_unavailable", "message": "无法启动 Agent 微盘浏览器，请检查 Microsoft Edge 或 Google Chrome"})
-                return
-            progress = lambda message: self.send_scan_status(ws, "scan_progress", {"source_id": source_id, "message": message})
-            for attempt in range(2):
-                try:
-                    progress("开始递归扫描微盘目录" if attempt == 0 else "已重新打开 Agent 微盘窗口，正在重试扫描")
-                    assert self.collector is not None
-                    root_id, items, stats = self.collector.collect(source["root_url"], bool(source.get("auto_share", True)), progress)
-                    snapshot_id = self.api.begin_snapshot(source_id, claim.scan_attempt_id, root_id, len(items))
-                    self.api.upload_items(snapshot_id, items)
-                    self.api.commit(snapshot_id, len(items), stats)
-                    self.send_scan_status(ws, "scan_result", {"source_id": source_id, "item_count": len(items), "complete": True})
+            with ScanLease(self.api, source_id, claim) as lease:
+                if not self.ensure_collector():
+                    self.api.report_scan_failure(source_id, claim.scan_attempt_id, "browser_unavailable")
+                    if ws:
+                        self.send_scan_status(ws, "error", {"reason": "browser_unavailable", "message": "无法启动 Agent 微盘浏览器，请检查 Microsoft Edge 或 Google Chrome"})
                     return
-                except TargetClosedError:
-                    if attempt == 0:
-                        logging.info("Agent browser closed during scan; relaunching source_id=%s", source_id)
-                        self.dispose_collector()
-                        if self.ensure_collector():
-                            continue
-                    raise
+                progress = lambda message: self.send_scan_status(ws, "scan_progress", {"source_id": source_id, "message": message})
+                for attempt in range(2):
+                    try:
+                        progress("开始递归扫描微盘目录" if attempt == 0 else "已重新打开 Agent 微盘窗口，正在重试扫描")
+                        assert self.collector is not None
+                        root_id, items, stats = self.collector.collect(source["root_url"], bool(source.get("auto_share", True)), progress, on_progress=lease.progress, checkpoint=lease.check)
+                        lease.check()
+                        snapshot_id = self.api.begin_snapshot(source_id, claim.scan_attempt_id, root_id, len(items))
+                        self.api.upload_items(snapshot_id, items, checkpoint=lease.check, on_progress=lease.progress)
+                        lease.stop()
+                        lease.check()
+                        self.api.commit(snapshot_id, len(items), stats)
+                        self.send_scan_status(ws, "scan_result", {"source_id": source_id, "item_count": len(items), "complete": True})
+                        return
+                    except TargetClosedError:
+                        if attempt == 0:
+                            logging.info("Agent browser closed during scan; relaunching source_id=%s", source_id)
+                            self.dispose_collector()
+                            if self.ensure_collector():
+                                continue
+                        raise
         except ScanAttemptConflict as exc:
             logging.info("WeDrive scan attempt no longer current source_id=%s", source_id)
             if ws:

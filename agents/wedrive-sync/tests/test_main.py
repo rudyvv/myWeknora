@@ -1,10 +1,12 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from weknora_wedrive_agent.client import ScanClaim, AgentUpgradeRequired, ScanAttemptConflict
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 import subprocess
 import threading
+import httpx
+import time
 
 from playwright._impl._errors import TargetClosedError
 
@@ -19,6 +21,132 @@ class FakeIdentity:
 
 
 class AgentStartupTest(TestCase):
+    def test_temporary_lease_network_failure_retries_with_same_progress(self) -> None:
+        agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
+        agent.api = MagicMock()
+        claim = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
+        agent.api.claim_scan.return_value = claim
+        recovered = threading.Event()
+        sequences = []
+
+        def renew(_source, _attempt, seq):
+            sequences.append(seq)
+            if len(sequences) == 1:
+                raise httpx.ConnectError("private network details")
+            recovered.set()
+            return claim
+
+        agent.api.renew_scan_lease.side_effect = renew
+        agent.collector = MagicMock()
+        agent.ensure_collector = MagicMock(return_value=True)
+
+        def collect(_root, _share, _ui, *, on_progress, checkpoint):
+            on_progress()
+            self.assertTrue(recovered.wait(timeout=2))
+            checkpoint()
+            return "root", [{"external_id": "root"}], {}
+
+        agent.collector.collect.side_effect = collect
+        with patch.object(main.ScanLease, "RENEW_INTERVAL", 0.01), patch.object(main.ScanLease, "RETRY_INTERVAL", 0.01):
+            agent.scan({"id": "source-1", "root_url": "root-url"})
+        self.assertEqual([1, 1], sequences[:2])
+        agent.api.commit.assert_called_once()
+
+    def test_repeated_ui_messages_cannot_keep_local_scan_alive(self) -> None:
+        agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
+        agent.api = MagicMock()
+        claim = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
+        agent.api.claim_scan.return_value = claim
+        agent.api.renew_scan_lease.return_value = claim
+        agent.collector = MagicMock()
+        agent.ensure_collector = MagicMock(return_value=True)
+
+        def collect(_root, _share, progress, **_kwargs):
+            progress("waiting")
+            threading.Event().wait(0.06)
+            progress("waiting")
+            return "root", [{"external_id": "root"}], {}
+
+        agent.collector.collect.side_effect = collect
+        with patch.object(main.ScanLease, "RENEW_INTERVAL", 0.005), patch.object(main.ScanLease, "NO_PROGRESS_TIMEOUT", 0.03):
+            agent.scan({"id": "source-1", "root_url": "root-url"}, MagicMock())
+        agent.api.begin_snapshot.assert_not_called()
+        agent.api.upload_items.assert_not_called()
+        agent.api.commit.assert_not_called()
+        self.assertTrue(all(call.args[2] == 0 for call in agent.api.renew_scan_lease.call_args_list))
+
+    def test_lease_renews_during_blocked_collection_and_stops_after_scan(self) -> None:
+        agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
+        agent.api = MagicMock()
+        claim = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
+        agent.api.claim_scan.return_value = claim
+        renewed = threading.Event()
+        calls = []
+
+        def renew(source_id, attempt_id, progress_seq):
+            calls.append((source_id, attempt_id, progress_seq))
+            renewed.set()
+            return claim
+
+        agent.api.renew_scan_lease.side_effect = renew
+        agent.collector = MagicMock()
+        agent.ensure_collector = MagicMock(return_value=True)
+
+        def collect(_root, _share, progress, *, on_progress, checkpoint):
+            progress("重复 UI 文案")
+            progress("重复 UI 文案")
+            on_progress()  # One validated listing, no paths in lease payload.
+            self.assertTrue(renewed.wait(timeout=2))
+            checkpoint()
+            return "root", [{"external_id": "root"}], {}
+
+        agent.collector.collect.side_effect = collect
+        with patch.object(main.ScanLease, "RENEW_INTERVAL", 0.01):
+            agent.scan({"id": "source-1", "root_url": "root-url"})
+        self.assertEqual(("source-1", "attempt-1", 1), calls[0])
+        agent.api.commit.assert_called_once()
+        count = len(calls)
+        threading.Event().wait(0.05)
+        self.assertEqual(count, len(calls), "heartbeats must stop after completion")
+
+    def test_lost_heartbeat_stops_collection_before_snapshot_writes(self) -> None:
+        agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
+        agent.api = MagicMock()
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
+        rejected = threading.Event()
+
+        def renew(*_args):
+            rejected.set()
+            raise ScanAttemptConflict()
+
+        agent.api.renew_scan_lease.side_effect = renew
+        agent.collector = MagicMock()
+        agent.ensure_collector = MagicMock(return_value=True)
+
+        def collect(_root, _share, _progress, *, on_progress, checkpoint):
+            self.assertTrue(rejected.wait(timeout=2))
+            # Event delivery precedes the worker latching the rejection. Wait
+            # until the public checkpoint observes it before testing the
+            # Agent's independent post-collection guard.
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    checkpoint()
+                except ScanAttemptConflict:
+                    break
+                threading.Event().wait(0.005)
+            else:
+                self.fail("heartbeat rejection was not observed")
+            return "root", [{"external_id": "root"}], {}
+
+        agent.collector.collect.side_effect = collect
+        with patch.object(main.ScanLease, "RENEW_INTERVAL", 0.01):
+            agent.scan({"id": "source-1", "root_url": "root-url"}, MagicMock())
+        agent.api.begin_snapshot.assert_not_called()
+        agent.api.upload_items.assert_not_called()
+        agent.api.commit.assert_not_called()
+        agent.api.report_scan_failure.assert_not_called()
+
     def test_browser_is_not_started_when_agent_is_constructed(self) -> None:
         with patch.object(main.Collector, "launch") as launch:
             main.Agent(FakeIdentity())  # type: ignore[arg-type]
@@ -79,7 +207,7 @@ class AgentStartupTest(TestCase):
         ws = MagicMock()
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
         agent.collector.open_login.return_value = False
         agent.collector.logged_in.return_value = True
 
@@ -171,7 +299,7 @@ class AgentStartupTest(TestCase):
         ws = MagicMock()
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
         agent.collector.collect.side_effect = RuntimeError("https://drive.weixin.qq.com/s?k=should-not-leak")
 
         with patch.object(main.logging, "error") as log_error:
@@ -210,7 +338,7 @@ class AgentStartupTest(TestCase):
         ws = MagicMock()
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
         agent.collector.collect.side_effect = main.ScanFailure(
             "listing_timeout", "https://drive.weixin.qq.com/s?k=must-not-leak", {"candidate_responses": 0},
         )
@@ -235,7 +363,7 @@ class AgentStartupTest(TestCase):
         fresh_collector.collect.return_value = ("root-1", [{"path": "."}], {"existing": 0, "created": 0, "failed": 0})
         agent.collector = stale_collector
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
         agent.api.begin_snapshot.return_value = "snapshot-1"
 
         def relaunch() -> bool:
@@ -262,10 +390,10 @@ class AgentStartupTest(TestCase):
         ws.send.side_effect = OSError("socket closed")
         agent.collector = MagicMock()
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
         agent.api.begin_snapshot.return_value = "snapshot-1"
 
-        def collect(_root_url, _auto_share, progress):
+        def collect(_root_url, _auto_share, progress, **_kwargs):
             progress("正在扫描子目录")
             return "root-1", [{"path": "."}], {"existing": 0, "created": 0, "failed": 0}
 
@@ -280,7 +408,7 @@ class AgentStartupTest(TestCase):
     def test_lost_attempt_stops_before_commit_and_does_not_report_stale_failure(self) -> None:
         agent = main.Agent(FakeIdentity())  # type: ignore[arg-type]
         agent.api = MagicMock()
-        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc))
+        agent.api.claim_scan.return_value = ScanClaim("attempt-1", datetime.now(timezone.utc) + timedelta(minutes=30))
         agent.api.begin_snapshot.return_value = "snapshot-1"
         agent.api.upload_items.side_effect = ScanAttemptConflict()
         agent.collector = MagicMock()
