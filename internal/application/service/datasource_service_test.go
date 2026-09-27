@@ -201,8 +201,8 @@ func TestAllFetchedItemsFailedErrorIncludesInventoryFetchFailures(t *testing.T) 
 
 func TestAllFetchedItemsFailedErrorKeepsMixedInventoryPartial(t *testing.T) {
 	err := allFetchedItemsFailedError(&types.SyncResult{
-		InventoryTotal: 11,
-		SourceFailed:   10,
+		InventoryTotal:  11,
+		SourceFailed:    10,
 		SourceUnchanged: 1,
 	})
 	require.NoError(t, err)
