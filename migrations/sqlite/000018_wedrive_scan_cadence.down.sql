@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_wedrive_sources_device_next_scan;

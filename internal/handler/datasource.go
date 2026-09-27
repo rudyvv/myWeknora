@@ -433,7 +433,6 @@ func (h *DataSourceHandler) ManualSync(c *gin.Context) {
 	}
 
 	id := c.Param("id")
-
 	if _, status, msg := h.getOwnedDataSource(ctx, tenantID, id); status != http.StatusOK {
 		c.JSON(status, gin.H{"error": msg})
 		return
@@ -531,7 +530,8 @@ func (h *DataSourceHandler) GetSyncLogs(c *gin.Context) {
 
 	id := c.Param("id")
 
-	if _, status, msg := h.getOwnedDataSource(ctx, tenantID, id); status != http.StatusOK {
+	ds, status, msg := h.getOwnedDataSource(ctx, tenantID, id)
+	if status != http.StatusOK {
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
@@ -563,6 +563,11 @@ func (h *DataSourceHandler) GetSyncLogs(c *gin.Context) {
 	if logs == nil {
 		logs = make([]*types.SyncLog, 0)
 	}
+	if ds.Type == types.ConnectorTypeWeComDrive {
+		for i, log := range logs {
+			logs[i] = dto.SafeWeDriveSyncLog(log)
+		}
+	}
 	c.JSON(http.StatusOK, logs)
 }
 
@@ -591,9 +596,13 @@ func (h *DataSourceHandler) GetSyncLog(c *gin.Context) {
 		return
 	}
 
-	if _, status, msg := h.getOwnedDataSource(ctx, tenantID, log.DataSourceID); status != http.StatusOK {
+	ds, status, msg := h.getOwnedDataSource(ctx, tenantID, log.DataSourceID)
+	if status != http.StatusOK {
 		c.JSON(status, gin.H{"error": msg})
 		return
+	}
+	if ds.Type == types.ConnectorTypeWeComDrive {
+		log = dto.SafeWeDriveSyncLog(log)
 	}
 
 	c.JSON(http.StatusOK, log)

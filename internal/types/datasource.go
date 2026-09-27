@@ -38,6 +38,7 @@ const (
 	ConnectorTypeRSS         = "rss"
 	ConnectorTypeGitLab      = "gitlab"
 	ConnectorTypeIMA         = "ima"
+	ConnectorTypeWeComDrive  = "wecom_drive_rpa"
 
 	// Sync modes
 	SyncModeIncremental = "incremental"
@@ -434,8 +435,18 @@ type SyncResult struct {
 	// Items that failed
 	Failed int `json:"failed"`
 
-	// Deleted items whose KB deletion failed (a subset of Failed). Past the
-	// connector cursor, so normally only a later full sync retries them.
+	// InventoryTotal and the following source-prefixed counts describe work
+	// reported by a streaming connector before an item can reach KB ingestion.
+	// They keep the sync log useful for inventory-backed connectors: unchanged
+	// items are not re-downloaded just to be counted, and deferred entries are
+	// not misrepresented as failures.
+	InventoryTotal  int `json:"inventory_total,omitempty"`
+	SourceUnchanged int `json:"source_unchanged,omitempty"`
+	SourceFailed    int `json:"source_failed,omitempty"`
+	SourceDeferred  int `json:"source_deferred,omitempty"`
+
+	// Deleted items whose KB deletion failed (a subset of Failed). Connectors
+	// with per-item outcome handling can retain these in the incremental cursor.
 	DeletionFailed int `json:"deletion_failed,omitempty"`
 
 	// Per-item failure samples (capped), shown in the sync-log UI.
@@ -508,7 +519,9 @@ type DataSourceSyncPayload struct {
 	// Sync log ID (for tracking)
 	SyncLogID string `json:"sync_log_id"`
 
-	// Force full sync even if incremental mode is configured
+	// Force full sync even if incremental mode is configured. This remains an
+	// internal task option for existing scheduler/test compatibility; the UI and
+	// public manual-sync endpoint never set it.
 	ForceFull bool `json:"force_full"`
 
 	// Maximum number of items to fetch (0 = unlimited)

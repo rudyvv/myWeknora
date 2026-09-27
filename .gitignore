@@ -44,8 +44,13 @@ web/
 **/__pycache__
 /scripts/scale_dev_jobs.sh
 /server
+/server.exe
 frontend/.vite
 frontend/chrome-extension/
+frontend/public/downloads/*.exe
+agents/wedrive-sync/*.spec
+agents/wedrive-sync/build/
+agents/wedrive-sync/dist/
 WeKnora-Chrome-Extension
 packages/protoc-3.19.4-linux-x86_64.zip
 
@@ -65,3 +70,11 @@ miniprogram/project.private.config.json
 /artifacts/browserskill/
 
 references/
+
+# 个人汇报材料（PPT 等），不进 git 历史
+/deliverables/
+
+# 本地 agent 工作文档，不进 git 历史
+docs/agents/handoff-wecom-wedrive-rpa-sync.md
+docs/agents/matt-pocock-skills-codex-compatibility.md
+docs/wiki/source-to-linked-wiki-pipeline.md

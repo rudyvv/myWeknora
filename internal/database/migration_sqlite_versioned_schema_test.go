@@ -12,7 +12,8 @@ import (
 // versionedSQLiteTables is the set of tables that SQLite migrations must
 // create to stay in sync with the versioned (PostgreSQL) migrations:
 // 000041 task queue, 000053 system settings, 000055 processing spans,
-// 000063 knowledge multi-tags, 000093 browser authorization.
+// 000063 knowledge multi-tags, 000093 browser authorization,
+// 000096 WeCom WeDrive RPA synchronization, 000097 per-source scan cadence.
 var versionedSQLiteTables = []string{
 	"memory_extraction_sessions",
 	"task_pending_ops",
@@ -23,24 +24,32 @@ var versionedSQLiteTables = []string{
 	"browser_devices",
 	"browser_pairings",
 	"browser_task_interruptions",
+	"wecom_cli_connections",
+	"wedrive_devices",
+	"wedrive_device_registrations",
+	"wedrive_sources",
+	"wedrive_snapshots",
+	"wedrive_inventory_items",
 }
 
 // versionedSQLiteColumns maps each existing table to the columns that the
 // versioned migrations add and the SQLite baseline was missing.
 var versionedSQLiteColumns = map[string][]string{
-	"memory_subjects":    {"extraction_state"},               // 000094
-	"memory_items":       {"replaces_id"},                    // 000094
-	"tenants":            {"api_principal_config"},           // 000064
-	"users":              {"is_system_admin"},                // 000053
-	"knowledges":         {"pending_subtasks_count"},         // 000056
-	"messages":           {"attachments", "usage"},           // 000034, 000085
-	"tenant_invitations": {"token", "accepted_count"},        // 000054
-	"embed_channels":     {"allow_memory"},                   // 000060
-	"mcp_oauth_tokens":   {"principal_type", "principal_id"}, // 000064
-	"mcp_tool_approvals": {"enabled"},                        // 000091
+	"memory_subjects":    {"extraction_state"},                                                                                                                                                                                                  // 000094
+	"memory_items":       {"replaces_id"},                                                                                                                                                                                                       // 000094
+	"tenants":            {"api_principal_config"},                                                                                                                                                                                              // 000064
+	"users":              {"is_system_admin"},                                                                                                                                                                                                   // 000053
+	"knowledges":         {"pending_subtasks_count"},                                                                                                                                                                                            // 000056
+	"messages":           {"attachments", "usage"},                                                                                                                                                                                              // 000034, 000085
+	"tenant_invitations": {"token", "accepted_count"},                                                                                                                                                                                           // 000054
+	"embed_channels":     {"allow_memory"},                                                                                                                                                                                                      // 000060
+	"mcp_oauth_tokens":   {"principal_type", "principal_id"},                                                                                                                                                                                    // 000064
+	"wedrive_snapshots":  {"scan_attempt_id", "root_external_id"},                                                                                                                                                                               // 000100
+	"mcp_tool_approvals": {"enabled"},                                                                                                                                                                                                           // 000091
+	"wedrive_sources":    {"scan_interval_minutes", "next_scan_at", "scan_retry_count", "scan_state", "scan_lease_expires_at", "last_scan_started_at", "last_scan_error_code", "scan_attempt_id", "scan_progress_seq", "scan_last_progress_at"}, // 000097, 000099
 }
 
-const expectedSQLiteMigrationVersion = 16
+const expectedSQLiteMigrationVersion = 22
 
 func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 	repoRoot := sqliteRepoRoot(t)

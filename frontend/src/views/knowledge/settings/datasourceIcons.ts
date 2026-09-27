@@ -5,6 +5,7 @@ import notionIcon from '@/assets/img/datasource-notion.ico'
 import yuqueIcon from '@/assets/img/datasource-yuque.ico'
 import rssIcon from '@/assets/img/datasource-rss.svg'
 import dingtalkIcon from '@/assets/img/im/dingtalk.svg'
+import wecomIcon from '@/assets/img/im/wecom.svg'
 import imaIcon from '@/assets/img/datasource-ima.png'
 
 export const datasourceIconMap: Record<string, string> = {
@@ -19,6 +20,7 @@ export const datasourceIconMap: Record<string, string> = {
   rss: rssIcon,
   gitlab: gitlabIcon,
   ima: imaIcon,
+  wecom_drive_rpa: wecomIcon,
 }
 
 export function getDatasourceIconUrl(type: string): string | undefined {

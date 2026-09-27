@@ -333,6 +333,52 @@ func RegisterDataSourceRoutes(
 	}
 }
 
+// RegisterWeDriveAgentRoutes exposes only self-authenticated Agent calls. The
+// one-time registration code or Ed25519 request signature is the credential;
+// these routes must be mounted before the global JWT middleware.
+func RegisterWeDriveAgentRoutes(r *gin.Engine, h *handler.WeDriveHandler) {
+	if h == nil {
+		return
+	}
+	g := r.Group("/api/v1/wedrive/agent")
+	g.POST("/register", h.RegisterDevice)
+	g.GET("/events", h.AgentEvents)
+	g.GET("/sources", h.ListAgentSources)
+	r.GET("/api/v1/wedrive/browser/events", h.BrowserEvents)
+	g.POST("/sources/:source_id/claim-scan", h.ClaimScan)
+	g.POST("/sources/:source_id/scan-lease", h.RenewScanLease)
+	g.POST("/sources/:source_id/scan-failure", h.ReportScanFailure)
+	g.POST("/snapshots", h.BeginSnapshot)
+	g.POST("/snapshots/:snapshot_id/items", h.UploadSnapshotItems)
+	g.POST("/snapshots/:snapshot_id/commit", h.CommitSnapshot)
+}
+
+// RegisterWeDriveRoutes contains human-facing management endpoints. Agent
+// upload endpoints use their own registration/signature boundary above.
+func RegisterWeDriveRoutes(r *gin.RouterGroup, h *handler.WeDriveHandler, g *rbacGuards) {
+	if h == nil {
+		return
+	}
+	wd := r.Group("/wedrive") // API keys intentionally remain default-denied.
+	wd.POST("/device-registrations", g.Contributor(), h.CreateRegistration)
+	wd.GET("/devices", g.Contributor(), h.ListDevices)
+	wd.DELETE("/devices/:device_id", g.Contributor(), h.RevokeDevice)
+	wd.POST("/devices/:device_id/event-ticket", g.Contributor(), h.CreateBrowserEventTicket)
+	wd.GET("/sources", g.Contributor(), h.ListSources)
+	wd.POST("/sources/:source_id/approve", g.Admin(), h.ApproveSource)
+	wd.PUT("/sources/:source_id/connection", g.Admin(), h.RebindSourceConnection)
+	wd.PUT("/sources/:source_id/scan-settings", g.Admin(), h.UpdateSourceScanSettings)
+	wd.DELETE("/sources/:source_id", g.Admin(), h.DeleteSource)
+	wd.GET("/connections", g.Admin(), h.ListConnections)
+	wd.POST("/connections", g.Owner(), h.CreateConnection)
+	wd.PUT("/connections/:connection_id", g.Owner(), h.UpdateConnection)
+	wd.DELETE("/connections/:connection_id", g.Owner(), h.DeleteConnection)
+
+	// A Contributor may submit a source only for a KB they own/edit; Admin+
+	// follows the same ownership guard's role bypass.
+	r.POST("/knowledge-bases/:id/wedrive-sources", g.OwnedKBOrAdmin(), g.KBAccessWrite("id"), h.CreateSource)
+}
+
 // RegisterWeKnoraCloudRoutes 注册 WeKnoraCloud 初始化路由
 // RegisterWeKnoraCloudRoutes registers the WeKnoraCloud credential
 // management endpoints. SaveCredentials persists external SaaS keys

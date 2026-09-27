@@ -74,6 +74,34 @@ type StreamHandler interface {
 	Checkpoint(ctx context.Context, cursor *types.SyncCursor) error
 }
 
+// SourceSyncStats describes source-side work that intentionally does not emit
+// a FetchedItem, such as unchanged inventory entries or a file that failed
+// before content could be downloaded. It lets a streaming connector expose an
+// accurate inventory accounting without manufacturing empty documents.
+//
+// All counts are per run. Deferred is reserved for entries that were not
+// attempted because the connector stopped safely after a global condition such
+// as a daily quota; deferred entries are neither failures nor skips.
+type SourceSyncStats struct {
+	Total     int
+	Unchanged int
+	Failed    int
+	Deferred  int
+}
+
+// SourceSyncStatsReporter is an optional StreamHandler capability. The
+// generic sync service implements it; other handlers remain source-compatible.
+type SourceSyncStatsReporter interface {
+	ReportSourceSyncStats(SourceSyncStats)
+}
+
+// StreamItemOutcomeHandler optionally tells a connector whether an emitted
+// item was actually applied. A false result keeps that item in its old cursor
+// state so a later incremental run can retry it.
+type StreamItemOutcomeHandler interface {
+	EmitWithOutcome(context.Context, types.FetchedItem) (bool, error)
+}
+
 // StreamingConnector is an optional interface. Connectors that implement it let
 // the service interleave fetch→ingest→checkpoint so a large sync persists
 // incrementally and resumes after a timeout, rather than holding every item in
@@ -91,6 +119,22 @@ type StreamingConnector interface {
 		ctx context.Context, config *types.DataSourceConfig,
 		cursor *types.SyncCursor, h StreamHandler,
 	) (*types.SyncCursor, error)
+}
+
+// KnowledgeFolderPathResolver is an optional capability for connectors that
+// can map their external item IDs to a stable relative folder path. The sync
+// service uses it to place existing, unchanged documents into the knowledge
+// base's navigation tree without re-downloading or re-parsing their content.
+type KnowledgeFolderPathResolver interface {
+	ResolveKnowledgeFolderPaths(
+		ctx context.Context, config *types.DataSourceConfig,
+	) (map[string]string, error)
+}
+
+// DataSourceBindingValidator checks that a connector's referenced source is
+// owned by the tenant and knowledge base of the DataSource using it.
+type DataSourceBindingValidator interface {
+	ValidateDataSourceBinding(context.Context, *types.DataSourceConfig, *types.DataSource) error
 }
 
 // FullSyncWithCursor is optional. The batch sync path uses it for ForceFull and
@@ -194,6 +238,14 @@ var ConnectorMetadataRegistry = map[string]ConnectorMetadata{
 		Priority:     0,
 		AuthType:     "oauth2",
 		Capabilities: []string{"incremental", "deletion_sync"},
+	},
+	types.ConnectorTypeWeComDrive: {
+		Type:         types.ConnectorTypeWeComDrive,
+		Name:         "WeCom WeDrive (企业微信微盘)",
+		Description:  "Sync approved WeDrive folders discovered by the Windows RPA agent and fetched through wecom-cli",
+		Priority:     1,
+		AuthType:     "tenant_connection",
+		Capabilities: []string{"incremental", "deletion_sync", "hierarchical", "rpa_inventory"},
 	},
 	types.ConnectorTypeNotion: {
 		Type:         types.ConnectorTypeNotion,

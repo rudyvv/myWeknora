@@ -854,6 +854,7 @@ export default {
       authHeadersHint: '비공개 피드 접근용. 한 줄에 하나씩 「이름: 값」 형식으로 입력하세요. 예: Authorization: Bearer xxxx'
     },
     connectorDesc: {
+      wecom_drive_rpa: '로컬 동기화 도구로 폴더를 찾고 서버 측 WeCom CLI로 콘텐츠를 가져옵니다',
       feishu: '페이슈 위키에서 문서, 스프레드시트, 파일 동기화',
       lark: 'Lark 위키에서 문서, 스프레드시트, 파일 동기화',
       feishu_drive: "페이슈 드라이브 폴더에서 문서, 스프레드시트, 파일 동기화",
@@ -866,6 +867,7 @@ export default {
       gitlab: 'GitLab 프로젝트의 파일 동기화'
     },
     connector: {
+      wecom_drive_rpa: 'WeCom WeDrive',
       feishu: '페이슈 (Feishu)',
       lark: 'Lark (Feishu 글로벌)',
       feishu_drive: "페이슈 드라이브",
@@ -7129,6 +7131,7 @@ export default {
     knowledgeBase: '지식베이스',
     agents: '에이전트',
     organizations: '공유 공간',
+    wedriveSync: 'WeCom 드라이브 동기화',
     newChat: '새 대화',
     settings: '시스템 설정',
     logout: '로그아웃',

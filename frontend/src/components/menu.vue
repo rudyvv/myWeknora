@@ -437,20 +437,12 @@ const getIconActiveState = (itemPath: string) => {
     };
 };
 
-// 分离上下两部分菜单（使用 visibleMenuArr 以便 lite 模式过滤 logout）
+// UserMenu owns settings/logout. Every other visible store entry belongs in
+// the primary navigation; using an exclusion list means newly added product
+// areas cannot silently disappear from the sidebar.
+const userMenuPaths = new Set(['settings', 'logout']);
 const topMenuItems = computed<MenuItem[]>(() => {
-    return (visibleMenuArr.value as unknown as MenuItem[]).filter((item: MenuItem) =>
-        item.path === 'knowledge-bases' || item.path === 'agents' || item.path === 'organizations' || item.path === 'creatChat'
-    );
-});
-
-const bottomMenuItems = computed<MenuItem[]>(() => {
-    return (visibleMenuArr.value as unknown as MenuItem[]).filter((item: MenuItem) => {
-        if (item.path === 'knowledge-bases' || item.path === 'agents' || item.path === 'organizations' || item.path === 'creatChat') {
-            return false;
-        }
-        return true;
-    });
+    return (visibleMenuArr.value as unknown as MenuItem[]).filter((item: MenuItem) => !userMenuPaths.has(item.path));
 });
 
 // 当前知识库信息

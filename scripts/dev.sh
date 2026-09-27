@@ -517,6 +517,10 @@ start_app() {
       export CGO_LDFLAGS="-Wl,-no_warn_duplicate_libraries"
     fi
 
+    # Windows/MinGW 缺 sqlite3.h 时为 CGO 注入 shim（Linux 有 libsqlite3-dev 时自动跳过）
+    # shellcheck source=setup_sqlite_cgo.sh
+    source "$SCRIPT_DIR/setup_sqlite_cgo.sh"
+
     enable_anydoc_build_tag
 
     # 检查是否安装了 Air（热重载工具）

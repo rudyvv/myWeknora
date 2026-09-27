@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,6 +61,21 @@ func TestStreamStartCursor_IncrementalKeepsCursor(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cur)
 	assert.NotNil(t, cur.ConnectorCursor["space_node_times"])
+}
+
+// A connector may have delivered and checkpointed useful documents before it
+// reports that a few resources were unavailable. That must finish as a partial
+// sync rather than flip the entire data source to the error state.
+func TestStreamingPartialFetchIsNotFatal(t *testing.T) {
+	warnings, err := streamingPartialFetchWarnings(&datasource.PartialFetchError{
+		Details: []string{"Some offline files do not have a usable share link"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"Some offline files do not have a usable share link"}, warnings)
+
+	_, err = streamingPartialFetchWarnings(errors.New("connection refused"))
+	require.EqualError(t, err, "connection refused")
 }
 
 func newStreamHandler(svc *DataSourceService, ds *types.DataSource, result *types.SyncResult, syncLog *types.SyncLog) *streamSyncHandler {
@@ -121,4 +138,20 @@ func TestStreamHandler_CheckpointPersistsCursor(t *testing.T) {
 
 	require.Len(t, dsRepo.updated, 1)
 	assert.NotEmpty(t, dsRepo.updated[0].LastSyncCursor, "checkpoint must persist the cursor JSON")
+}
+
+func TestApplySyncResultMetricsUsesInventoryAccounting(t *testing.T) {
+	log := &types.SyncLog{}
+	result := &types.SyncResult{
+		Total: 3, Created: 1, Updated: 1, Skipped: 1, Failed: 1,
+		InventoryTotal: 20, SourceUnchanged: 12, SourceFailed: 5, SourceDeferred: 1,
+	}
+
+	applySyncResultMetrics(log, result)
+
+	assert.Equal(t, 20, log.ItemsTotal)
+	assert.Equal(t, 1, log.ItemsCreated)
+	assert.Equal(t, 1, log.ItemsUpdated)
+	assert.Equal(t, 13, log.ItemsSkipped)
+	assert.Equal(t, 6, log.ItemsFailed)
 }

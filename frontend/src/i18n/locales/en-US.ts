@@ -120,6 +120,7 @@ export default {
     knowledgeBase: 'Knowledge Base',
     agents: 'Agents',
     organizations: 'Shared Spaces',
+    wedriveSync: 'WeCom Drive Sync',
     newChat: 'New Chat',
     settings: 'System Settings',
     logout: 'Logout',
@@ -6435,6 +6436,7 @@ export default {
       docsFailedSummary: '{n} document(s) failed to sync'
     },
     connector: {
+	  wecom_drive_rpa: 'WeCom WeDrive',
       feishu: 'Feishu',
       lark: 'Lark',
       feishu_drive: 'Feishu Drive',
@@ -6447,6 +6449,7 @@ export default {
       gitlab: 'GitLab'
     },
     connectorDesc: {
+	  wecom_drive_rpa: 'Discover folders with a local sync tool and retrieve content through the server-side WeCom CLI',
       feishu: 'Sync documents, spreadsheets and files from Feishu Wiki',
       lark: 'Sync documents, spreadsheets and files from Lark Wiki (Feishu international)',
       feishu_drive: 'Sync documents, spreadsheets and files from a Feishu Drive folder',

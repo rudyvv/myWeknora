@@ -43,6 +43,10 @@ func TestAuditAction_DotNamespaceConvention(t *testing.T) {
 		AuditActionSystemQueueTaskRunNow,
 		AuditActionSystemQueueTaskCancelled,
 		AuditActionSystemQueueArchivedPurged,
+		AuditActionWeDriveSourceSubmitted,
+		AuditActionWeDriveSourceApproved,
+		AuditActionWeDriveSourceRebound,
+		AuditActionWeDriveSnapshotCommitted,
 	}
 	for _, a := range all {
 		s := string(a)

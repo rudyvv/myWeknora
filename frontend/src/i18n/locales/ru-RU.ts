@@ -854,6 +854,7 @@ export default {
       authHeadersHint: 'Для приватных лент. По одному в строке в формате «Имя: Значение», например Authorization: Bearer xxxx'
     },
     connectorDesc: {
+      wecom_drive_rpa: 'Локальный инструмент синхронизации находит папки, а серверный WeCom CLI загружает содержимое',
       feishu: 'Синхронизация документов, таблиц и файлов из Feishu Wiki',
       lark: 'Синхронизация документов, таблиц и файлов из Lark Wiki',
       feishu_drive: 'Синхронизация документов, таблиц и файлов из папки Feishu Drive',
@@ -866,6 +867,7 @@ export default {
       gitlab: 'Синхронизация файлов из проектов GitLab'
     },
     connector: {
+      wecom_drive_rpa: 'WeCom WeDrive',
       feishu: 'Feishu (Фэйшу)',
       lark: 'Lark',
       feishu_drive: 'Feishu Drive',
@@ -7129,6 +7131,7 @@ export default {
     knowledgeBase: 'База знаний',
     agents: 'Агенты',
     organizations: 'Общие пространства',
+    wedriveSync: 'Синхронизация WeCom Drive',
     newChat: 'Новый диалог',
     settings: 'Настройки системы',
     logout: 'Выход',
