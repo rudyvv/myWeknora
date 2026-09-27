@@ -472,6 +472,7 @@ class Collector:
             "accepted_listings": 0,
             "enter_click_failed": 0,
             "enter_listing_timeout": 0,
+            "enter_fresh_attempts": 0,
             "return_navigation_failed": 0,
             "return_cache_verified": 0,
             "return_direct_attempts": 0,
@@ -686,8 +687,21 @@ class Collector:
             return
         if not isinstance(payload, dict) or payload.get("errcode", 0) not in (0, "0"):
             return
+        head = payload.get("head")
+        if isinstance(head, dict) and head.get("ret", 0) not in (0, "0"):
+            return
         body = payload.get("body")
-        if not isinstance(body, dict) or not isinstance(body.get("file_list"), list):
+        if not isinstance(body, dict):
+            return
+        if "file_list" not in body:
+            # WeCom omits file_list for an empty folder. Only its successful,
+            # exhausted-page shape is authoritative; a missing list alone
+            # could also mean an error or malformed response.
+            if not (isinstance(head, dict) and type(head.get("ret")) in (int, str)
+                    and head["ret"] in (0, "0") and body.get("has_next") is False
+                    and type(body.get("next_start")) is int and body["next_start"] == 0):
+                return
+        elif not isinstance(body["file_list"], list):
             return
         if any(str(raw.get("father_id") or parent_id) != parent_id for raw in _file_list(payload)):
             return
@@ -807,7 +821,21 @@ class Collector:
                 self.diagnostics["enter_click_failed"] += 1
                 self.errors.append("enter_click_failed")
                 return
-            if not self._wait_listing(12, seq):
+            listed = self._wait_listing(12, seq)
+            if not listed:
+                # A mounted child route may restore a cached DOM without its
+                # authoritative list response. Retry one fresh document boot,
+                # retaining the validated child ID and normal lease checks.
+                target = self._folder_url_for(child_id)
+                if target:
+                    self._checkpoint()
+                    self.diagnostics["enter_fresh_attempts"] += 1
+                    try:
+                        self.page.goto(_inventory_navigation_url(target), wait_until="domcontentloaded")
+                    except Exception:
+                        pass
+                    listed = self._wait_listing(12, seq)
+            if not listed:
                 self.diagnostics["enter_listing_timeout"] += 1
                 self.errors.append("enter_listing_timeout")
                 return

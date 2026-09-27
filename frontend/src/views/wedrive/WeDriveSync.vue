@@ -55,7 +55,9 @@ let reconnectAttempt = 0
 let disposed = false
 let refreshVersion = 0
 
-const agentDownloadURL = String(import.meta.env.VITE_WEDRIVE_AGENT_DOWNLOAD_URL || `${String(import.meta.env.BASE_URL || '/').replace(/\/?$/, '/')}downloads/WeKnora-WeDrive-Tool.exe`)
+const agentReleaseVersion = '0.4.2'
+const agentDownloadName = `WeKnora-WeDrive-Tool-${agentReleaseVersion}.exe`
+const agentDownloadURL = String(import.meta.env.VITE_WEDRIVE_AGENT_DOWNLOAD_URL || `${String(import.meta.env.BASE_URL || '/').replace(/\/?$/, '/')}downloads/WeKnora-WeDrive-Tool.exe?v=${agentReleaseVersion}`)
 const agentServerURL = window.location.origin
 
 function supportsScanAttempts(version?: string): boolean {
@@ -453,8 +455,8 @@ onBeforeUnmount(() => {
       <h2>1. 连接本机同步工具</h2>
       <div class="agent-install">
         <div><strong>首次使用需要下载Windows同步工具</strong></div>
-        <a class="agent-download-link" :href="agentDownloadURL" download="WeKnora-WeDrive-Tool.exe">
-          <t-button variant="outline"><template #icon><t-icon name="download" /></template>下载Windows同步工具</t-button>
+        <a class="agent-download-link" :href="agentDownloadURL" :download="agentDownloadName">
+          <t-button variant="outline"><template #icon><t-icon name="download" /></template>下载Windows同步工具 {{ agentReleaseVersion }}</t-button>
         </a>
       </div>
       <ol class="agent-steps">
@@ -543,7 +545,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="sourceAgentSupportsAttempts(source) && (source.status === 'awaiting_inventory' || source.status === 'active')" class="source-action-group">
             <span class="source-action-label">目录扫描</span>
-            <div class="source-action-controls"><t-select v-model="scanIntervalEdits[source.id]" size="small" class="scan-interval"><t-option v-for="option in scanIntervalOptions" :key="option.value" :value="option.value" :label="option.label" /></t-select><t-button size="small" variant="outline" :disabled="isScanRunning(source.scan_state, source.scan_lease_expires_at)" @click="sendCommand('scan', { source_id: source.id })">立即扫描</t-button></div>
+            <div class="source-action-controls"><t-select v-model="scanIntervalEdits[source.id]" size="small" class="scan-interval"><t-option v-for="option in scanIntervalOptions" :key="option.value" :value="option.value" :label="option.label" /></t-select><t-button size="small" variant="outline" :disabled="!isAdmin || scanIntervalEdits[source.id] === source.scan_interval_minutes" @click="saveScanInterval(source)">保存频率</t-button><t-button size="small" variant="outline" :disabled="isScanRunning(source.scan_state, source.scan_lease_expires_at)" @click="sendCommand('scan', { source_id: source.id })">立即扫描</t-button></div>
           </div>
           <span v-else-if="source.status === 'awaiting_inventory' || source.status === 'active'" class="agent-upgrade-hint">需升级同步工具至 0.4.0+</span>
           <div class="source-action-group source-danger"><span class="source-action-label">同步源</span><t-button size="small" theme="danger" variant="outline" @click="removeSource(source)">删除</t-button></div>

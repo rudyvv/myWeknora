@@ -18,6 +18,7 @@ from pathlib import Path
 from playwright._impl._errors import TargetClosedError
 from websockets.sync.client import connect
 
+from . import __version__
 from .client import APIClient, ScanClaim, AgentUpgradeRequired, ScanAttemptConflict
 from .scan_lease import ScanLease
 from .collector import Collector, FolderSelectionError, ScanFailure
@@ -462,6 +463,7 @@ class Agent:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="WeKnora enterprise WeDrive RPA Sync Agent")
+    parser.add_argument("--version", action="version", version=f"WeKnora WeDrive Sync Tool {__version__}")
     parser.add_argument("--server")
     parser.add_argument("--register-code")
     parser.add_argument("--device-name", default=socket.gethostname())

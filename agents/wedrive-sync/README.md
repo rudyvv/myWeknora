@@ -10,13 +10,19 @@ playwright install chromium
 weknora-wedrive-agent --server http://localhost:8080 --register-code <页面生成的一次性注册码> --install-startup
 ```
 
-构建 Windows 单文件版本：
+构建当前内部使用的 Windows 单文件版本（未签名）：
 
 ```powershell
-.\build-windows.ps1
+.\build-windows.ps1 -AllowUnsigned -PublishUnsigned
 ```
 
-脚本使用 Python 3.11 和 PyInstaller，将产物写入 `frontend/public/downloads/WeKnora-WeDrive-Tool.exe`，开发模式下可直接从“企业微信微盘同步”页面下载。单文件版本首次双击运行会提示输入页面给出的 WeKnora 服务地址和一次性注册码；注册成功后自动添加当前用户开机启动项。同步工具优先复用 Windows 自带的 Microsoft Edge，也支持 Google Chrome，不需要另外下载 Playwright Chromium。
+脚本使用锁定依赖、Python 3.11 和 PyInstaller，校验源码版本、嵌入 Windows 文件版本并运行 `--version` 启动检查。发布后同时提供 `frontend/public/downloads/WeKnora-WeDrive-Tool-0.4.2.exe` 和兼容旧下载配置的 `WeKnora-WeDrive-Tool.exe`；页面显示 0.4.2 并带版本参数避开旧缓存。构建失败不会覆盖下载包，生成的 EXE 不提交到 Git。
+
+2026-09-27 项目负责人决定内部使用暂不要求代码签名。仅传 `-AllowUnsigned` 时包留在 `dist/`，不会发布到下载目录；内部发布必须额外传 `-PublishUnsigned`。需要签名时使用 `-CertificateThumbprint <证书指纹> -TimestampServer <证书提供方时间戳服务地址>`；证书必须在当前用户或本机证书库中有私钥，签名及时间戳校验通过才会发布。
+
+单文件版本首次双击运行会提示输入页面给出的 WeKnora 服务地址和一次性注册码；注册成功后自动添加当前用户开机启动项。升级时先在页面停止旧工具，再运行新包，既有设备注册和浏览器 Profile 会复用。同步工具优先复用 Windows 自带的 Microsoft Edge，也支持 Google Chrome，不需要另外下载 Playwright Chromium。
+
+部署迁移、回滚限制与验收记录见 [0.4.0 发布说明](../../docs/plans/2026-09-27-wedrive-0.4.0-release.md)。
 
 上面的注册命令会安装当前用户的开机启动项，并继续以前台进程运行；首次调试不需要再启动第二个实例。以后若只想手动启动，执行 `weknora-wedrive-agent`。网页运行在 Vite 的 `http://localhost:5173` 时，Agent 仍应连接 Go 后端的 `http://localhost:8080`。
 
@@ -26,7 +32,7 @@ weknora-wedrive-agent --server http://localhost:8080 --register-code <页面生�
 
 ## Fast Development Mode
 
-扫描尝试协议的最低工具版本为 `0.4.0`。领取响应中的 `scan_attempt_id` 与租约仅保存在当前扫描调用中，失败上报必须携带该身份；旧工具会收到 HTTP 426 和 `agent_upgrade_required`。清单绑定、续租及重启恢复分别由 T3/T4 完成；本次源码版本更新不代表安装包已经发布。服务端新协议、新工具安装包和页面升级提示须在 T5 验收后同批交付。
+扫描尝试协议的最低工具版本为 `0.4.0`，当前内部候选包为 `0.4.2`。领取响应中的 `scan_attempt_id` 与租约仅保存在当前扫描调用中，失败上报必须携带该身份；旧工具会收到 HTTP 426 和 `agent_upgrade_required`。清单绑定、续租及重启恢复已实现。服务端新协议、新工具安装包和页面升级提示须同批交付；真实微盘人工验收状态以发布说明为准。
 
 - `frontend` 页面修改由 Vite 热更新，刷新或重新进入左侧“RPA 同步”即可看到。
 - Go API、路由和迁移只有在后端重新编译后生效。安装 Air 时 `make dev-app` 会自动重启；没有 Air 时需 `Ctrl+C` 后重新执行 `make dev-app`。

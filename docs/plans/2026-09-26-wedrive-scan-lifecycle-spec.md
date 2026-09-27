@@ -76,4 +76,4 @@ seam 位于现有 `WeDriveService` 的事务入口与扫描状态转移之间。
 
 ## Ticket 切分与发布门槛
 
-逐项任务见 [tickets](2026-09-26-wedrive-scan-lifecycle-tickets.md)：[#2](https://github.com/rudyvv/myWeknora/issues/2)、[#3](https://github.com/rudyvv/myWeknora/issues/3)、[#4](https://github.com/rudyvv/myWeknora/issues/4)、[#5](https://github.com/rudyvv/myWeknora/issues/5)、[#6](https://github.com/rudyvv/myWeknora/issues/6)。每项都定义可观察验收；服务端强制新协议、新版工具及升级提示须作为同一发布单元验收。Windows 工具需要重新打包并由项目既有发布流程签名；Spec 不把构建产物提交到代码库。
+逐项任务见 [tickets](2026-09-26-wedrive-scan-lifecycle-tickets.md)：[#2](https://github.com/rudyvv/myWeknora/issues/2)、[#3](https://github.com/rudyvv/myWeknora/issues/3)、[#4](https://github.com/rudyvv/myWeknora/issues/4)、[#5](https://github.com/rudyvv/myWeknora/issues/5)、[#6](https://github.com/rudyvv/myWeknora/issues/6)。每项都定义可观察验收；服务端强制新协议、新版工具及升级提示须作为同一发布单元验收。Windows 工具需要重新打包；2026-09-27 项目负责人决定当前公司内部使用暂不要求代码签名，允许显式发布未签名包，并保留签名构建路径。设备请求签名和扫描身份校验仍是协议要求。Spec 不把构建产物提交到代码库。

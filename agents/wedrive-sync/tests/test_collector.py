@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
+import pytest
 
 from weknora_wedrive_agent.collector import (
     Collector,
@@ -119,6 +120,90 @@ class FakeContext:
 
     def add_init_script(self, *_args) -> None:
         pass
+
+
+class CachedChildPage(FakePage):
+    """A mounted child route emits its list only after a fresh document boot."""
+    clock = 0.0
+    emit_child_listing = True
+    child_body = {"file_list": []}
+    child_head = {"ret": 0}
+    child_request_id = "child"
+
+    def on(self, event, callback):
+        if event == "response":
+            self.response_callback = callback
+
+    def evaluate(self, _expression, *_args):
+        return {"moved": False, "at_end": True}
+
+    def wait_for_timeout(self, milliseconds):
+        self.clock += milliseconds / 1000
+
+    def goto(self, url, **_kwargs):
+        self.url = url
+        if "folderid=child" in url:
+            if "weknora_inventory_nonce=" in url and self.emit_child_listing:
+                self.response_callback(FakeResponse({"head": self.child_head, "body": self.child_body}, {"father_id": self.child_request_id}))
+        else:
+            self.response_callback(FakeResponse({"body": {"file_list": [
+                {"name": "child", "file_id": "child", "father_id": "root", "file_type": 1}
+            ]}}))
+
+
+def test_collect_retries_cached_child_with_fresh_validated_listing(tmp_path):
+    root = "https://drive.weixin.qq.com/webdisk/index#/cgi/ssr/space/space-id?folderid=root"
+    page = CachedChildPage(root)
+    collector = Collector(FakeContext(page), tmp_path / "profile")
+    with patch("weknora_wedrive_agent.collector.time.monotonic", side_effect=lambda: page.clock):
+        root_id, items, _stats = collector.collect(root, False)
+    assert root_id == "root"
+    assert [(item["path"], item["external_id"]) for item in items] == [(".", "root"), ("child", "child")]
+
+
+def test_child_retry_cannot_accept_unverified_inventory(tmp_path):
+    root = "https://drive.weixin.qq.com/webdisk/index#/cgi/ssr/space/space-id?folderid=root"
+    page = CachedChildPage(root)
+    page.emit_child_listing = False
+    collector = Collector(FakeContext(page), tmp_path / "profile")
+    with patch("weknora_wedrive_agent.collector.time.monotonic", side_effect=lambda: page.clock):
+        with pytest.raises(ScanFailure) as failure:
+            collector.collect(root, False)
+    assert failure.value.code == "tree_walk_failed"
+
+
+def test_collect_accepts_successful_empty_child_without_file_list(tmp_path):
+    root = "https://drive.weixin.qq.com/webdisk/index#/cgi/ssr/space/space-id?folderid=root"
+    page = CachedChildPage(root)
+    # Observed WeCom empty-folder response: success + exhausted pagination,
+    # with file_list omitted rather than present as an empty array.
+    page.child_body = {"next_start": 0, "has_next": False}
+    collector = Collector(FakeContext(page), tmp_path / "profile")
+    with patch("weknora_wedrive_agent.collector.time.monotonic", side_effect=lambda: page.clock):
+        root_id, items, _stats = collector.collect(root, False)
+    assert root_id == "root"
+    assert [(item["path"], item["item_type"]) for item in items] == [(".", "folder"), ("child", "folder")]
+
+
+@pytest.mark.parametrize("head,body,request_id", [
+    ({"ret": 403}, {"next_start": 0, "has_next": False}, "child"),
+    ({}, {"next_start": 0, "has_next": False}, "child"),
+    ({"ret": False}, {"next_start": 0, "has_next": False}, "child"),
+    ({"ret": 0}, {"next_start": 0, "has_next": True}, "child"),
+    ({"ret": 0}, {"next_start": 1, "has_next": False}, "child"),
+    ({"ret": 0}, {"next_start": False, "has_next": False}, "child"),
+    ({"ret": 0}, {"next_start": 0, "has_next": False, "file_list": None}, "child"),
+    ({"ret": 0}, {"next_start": 0, "has_next": False}, "other-folder"),
+])
+def test_empty_child_requires_success_exhausted_page_and_matching_id(tmp_path, head, body, request_id):
+    root = "https://drive.weixin.qq.com/webdisk/index#/cgi/ssr/space/space-id?folderid=root"
+    page = CachedChildPage(root)
+    page.child_head, page.child_body, page.child_request_id = head, body, request_id
+    collector = Collector(FakeContext(page), tmp_path / "profile")
+    with patch("weknora_wedrive_agent.collector.time.monotonic", side_effect=lambda: page.clock):
+        with pytest.raises(ScanFailure) as failure:
+            collector.collect(root, False)
+    assert failure.value.code == "tree_walk_failed"
 
 
 class FakeBrowserType:
@@ -301,6 +386,7 @@ class SelectedFolderTest(TestCase):
             "accepted_listings": 0,
             "enter_click_failed": 0,
             "enter_listing_timeout": 0,
+            "enter_fresh_attempts": 0,
             "return_navigation_failed": 0,
             "return_cache_verified": 0,
             "return_direct_attempts": 0,
