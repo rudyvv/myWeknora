@@ -133,3 +133,21 @@ func TestWeDriveResponseRedactsHistoricalRawErrors(t *testing.T) {
 	assert.NotContains(t, string(logBody), secretURL)
 	assert.Equal(t, "fetch failed: "+secretURL, log.ErrorMessage)
 }
+
+func TestWeDriveResponseKeepsSafeAggregateFailureReasons(t *testing.T) {
+	message := "Agent could not create some share links because the WeCom Drive sharing UI was unavailable (17 items); " +
+		"Agent could not create some share links; check the source user's share permission and tenant sharing policy (1 items); " +
+		"Some offline files do not have a usable share link (1 items); " +
+		"Some online documents could not be exported by the configured WeCom CLI identity (14 items); " +
+		"The WeCom CLI bot daily file-content retrieval quota has been reached; retry after the quota resets (1 items); " +
+		"Unsupported file formats are not supported (.rp: 1 item; .sql: 28 items); " +
+		"https://drive.example.com/share/private-token"
+	log := SafeWeDriveSyncLog(&types.SyncLog{ErrorMessage: message})
+	assert.Contains(t, log.ErrorMessage, "sharing UI was unavailable (17 items)")
+	assert.Contains(t, log.ErrorMessage, "tenant sharing policy (1 items)")
+	assert.Contains(t, log.ErrorMessage, "usable share link (1 items)")
+	assert.Contains(t, log.ErrorMessage, "exported by the configured WeCom CLI identity (14 items)")
+	assert.Contains(t, log.ErrorMessage, "quota has been reached")
+	assert.Contains(t, log.ErrorMessage, ".rp: 1 item; .sql: 28 items")
+	assert.NotContains(t, log.ErrorMessage, "private-token")
+}

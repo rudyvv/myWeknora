@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 
@@ -102,12 +103,62 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
 	return response
 }
 
-// Historical WeDrive failures can contain share URLs or local paths. Keep the
-// stored diagnostics for operators while returning only safe summaries through
-// the ordinary data-source API.
+// Historical WeDrive failures can contain share URLs or local paths. Extract
+// only connector-defined aggregate reasons; never forward arbitrary log text.
+var safeWeDriveReasons = []string{
+	"Agent could not create some share links because the WeCom Drive sharing UI was unavailable",
+	"Agent could not create some share links; check the source user's share permission and tenant sharing policy",
+	"Agent could not create some share links because the WeCom Drive sharing operation failed",
+	"Some offline files do not have a usable share link",
+	"Some online documents are not accessible to the configured WeCom CLI identity",
+	"Some online documents could not be exported by the configured WeCom CLI identity",
+	"Some offline file share links cannot be downloaded by the configured WeCom CLI identity",
+	"Some offline files with a share link could not be downloaded by the configured WeCom CLI identity",
+	"Some WeCom Drive content is not accessible to the configured WeCom CLI identity",
+	"Some WeCom Drive content is no longer available to the configured WeCom CLI identity",
+	"The configured WeCom CLI credentials were rejected",
+	"The WeCom CLI bot daily file-content retrieval quota has been reached; retry after the quota resets",
+	"WeCom CLI rate limit was reached; retry later",
+	"WeCom CLI credential storage is unavailable",
+	"WeCom CLI request timed out",
+	"Some online document types are not supported",
+	"Some files could not be fetched from WeCom Drive",
+}
+
+var safeWeDriveCount = regexp.MustCompile(`^\s*\(([0-9]{1,9}) items?\)`)
+var safeWeDriveExtension = regexp.MustCompile(`^(?:\.[a-zA-Z0-9_-]{1,16}|\[no extension\]): [1-9][0-9]{0,8} items?$`)
+
 func safeWeDriveError(message string) string {
 	if message == "" {
 		return ""
+	}
+	var safe []string
+	for _, reason := range safeWeDriveReasons {
+		index := strings.Index(message, reason)
+		if index < 0 {
+			continue
+		}
+		count := safeWeDriveCount.FindStringSubmatch(message[index+len(reason):])
+		if len(count) == 2 {
+			safe = append(safe, reason+" ("+count[1]+" items)")
+		}
+	}
+	const unsupportedPrefix = "Unsupported file formats are not supported ("
+	if index := strings.Index(message, unsupportedPrefix); index >= 0 {
+		tail := message[index+len(unsupportedPrefix):]
+		if end := strings.IndexByte(tail, ')'); end >= 0 {
+			formats := strings.Split(tail[:end], "; ")
+			valid := len(formats) > 0 && len(formats) <= 50
+			for _, format := range formats {
+				valid = valid && safeWeDriveExtension.MatchString(format)
+			}
+			if valid {
+				safe = append(safe, unsupportedPrefix+strings.Join(formats, "; ")+")")
+			}
+		}
+	}
+	if len(safe) > 0 {
+		return strings.Join(safe, "; ")
 	}
 	return "WeCom Drive sync failed; see server logs"
 }
