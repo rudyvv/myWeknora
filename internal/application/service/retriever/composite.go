@@ -40,6 +40,9 @@ func (c *CompositeRetrieveEngine) Retrieve(ctx context.Context,
 					continue
 				}
 				if slices.Contains(engineInfo.retrieverType, param.RetrieverType) {
+					if len(param.SourceIDs) > 0 && engineInfo.retrieveEngine.EngineType() != types.PostgresRetrieverEngineType {
+						return fmt.Errorf("repository source scope is unavailable on this retrieval engine")
+					}
 					result, err := engineInfo.retrieveEngine.Retrieve(ctx, param)
 					if err != nil {
 						return err

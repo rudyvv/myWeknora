@@ -46,6 +46,8 @@ type RetrieveParams struct {
 	KnowledgeBaseIDs []string
 	// Knowledge IDs
 	KnowledgeIDs []string
+	// SourceIDs constrains source chunks to these data source identities.
+	SourceIDs []string
 	// Tag IDs for filtering (used for FAQ priority filtering)
 	TagIDs []string
 	// Excluded knowledge IDs

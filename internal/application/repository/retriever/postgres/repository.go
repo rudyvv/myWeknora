@@ -36,6 +36,13 @@ func sourceTagFilterSQL(marks string) string {
 		AND ktr.tag_id IN (` + marks + `)))`
 }
 
+func sourceRepositoryFilterSQL(marks string) string {
+	return `EXISTS (SELECT 1 FROM source_chunk_references sc
+		JOIN source_files sf ON sf.id=sc.source_file_id
+		WHERE sc.chunk_id=embeddings.chunk_id AND sf.knowledge_base_id=embeddings.knowledge_base_id
+		AND sf.data_source_id IN (` + marks + `))`
+}
+
 // NewPostgresRetrieveEngineRepository creates a new PostgreSQL retriever repository
 func NewPostgresRetrieveEngineRepository(db *gorm.DB) interfaces.RetrieveEngineRepository {
 	logger.GetLogger(context.Background()).Info("[Postgres] Initializing PostgreSQL retriever engine repository")
@@ -205,6 +212,13 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	if g.sourceVisibility {
 		conds = append(conds, clause.Expr{SQL: source.PublishedChunkSQL("embeddings.chunk_id")})
 	}
+	if len(params.SourceIDs) > 0 {
+		if !g.sourceVisibility {
+			return nil, errors.New("repository source scope requires the built-in source index")
+		}
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(params.SourceIDs)), ",")
+		conds = append(conds, clause.Expr{SQL: sourceRepositoryFilterSQL(marks), Vars: common.ToInterfaceSlice(params.SourceIDs)})
+	}
 
 	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
 	// - If only KnowledgeBaseIDs: search entire knowledge bases
@@ -319,6 +333,9 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 		whereParts = append(whereParts, source.PublishedChunkSQL("embeddings.chunk_id"))
 	}
 	allVars := make([]interface{}, 0)
+	if len(params.SourceIDs) > 0 && !g.sourceVisibility {
+		return nil, errors.New("repository source scope requires the built-in source index")
+	}
 
 	// Add query vector first (used in ORDER BY for HNSW index)
 	allVars = append(allVars, queryVector)
@@ -326,6 +343,14 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	// Dimension filter (required for HNSW index WHERE clause)
 	whereParts = append(whereParts, fmt.Sprintf("dimension = $%d", len(allVars)+1))
 	allVars = append(allVars, dimension)
+	if len(params.SourceIDs) > 0 {
+		marks := make([]string, len(params.SourceIDs))
+		for i, id := range params.SourceIDs {
+			allVars = append(allVars, id)
+			marks[i] = fmt.Sprintf("$%d", len(allVars))
+		}
+		whereParts = append(whereParts, sourceRepositoryFilterSQL(strings.Join(marks, ", ")))
+	}
 
 	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
 	// - If only KnowledgeBaseIDs: search entire knowledge bases

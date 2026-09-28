@@ -434,6 +434,7 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 				Threshold:        params.VectorThreshold,
 				RetrieverType:    types.VectorRetrieverType,
 				KnowledgeIDs:     params.KnowledgeIDs,
+				SourceIDs:        params.SourceIDs,
 				TagIDs:           params.TagIDs,
 				KnowledgeType:    knowledgeType,
 			})
@@ -463,6 +464,7 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 			Threshold:        params.KeywordThreshold,
 			RetrieverType:    types.KeywordsRetrieverType,
 			KnowledgeIDs:     params.KnowledgeIDs,
+			SourceIDs:        params.SourceIDs,
 			TagIDs:           params.TagIDs,
 		})
 		logger.Info(ctx, "Keyword retrieval parameters setup completed")

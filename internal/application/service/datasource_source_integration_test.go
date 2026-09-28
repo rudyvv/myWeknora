@@ -229,6 +229,36 @@ func TestSourceSearchHonorsFileTenantAndTagScopes(t *testing.T) {
 	}
 }
 
+func TestSourceSearchSeparatesSamePathAcrossRepositorySources(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	second := &types.DataSource{ID: uuid.NewString(), TenantID: f.ds.TenantID, KnowledgeBaseID: f.kb.ID, Name: "independent second source", Type: f.ds.Type, Status: types.DataSourceStatusPaused, Config: append(types.JSON{}, f.ds.Config...)}
+	_, err := f.service.CreateDataSource(f.ctx, second)
+	require.NoError(t, err)
+	for _, ds := range []*types.DataSource{f.ds, second} {
+		log, err := f.service.ManualSync(f.ctx, ds.ID)
+		require.NoError(t, err)
+		payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+		require.NoError(t, err)
+		require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	}
+	all, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "getPushSchedule", MatchCount: 10})
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	require.NotEqual(t, all[0].KnowledgeID, all[1].KnowledgeID, "same path in two sources must retain separate file identities")
+	for _, keywordsOnly := range []bool{true, false} {
+		for _, id := range []string{f.ds.ID, second.ID, uuid.NewString()} {
+			hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "getPushSchedule", MatchCount: 1, SourceIDs: []string{id}, DisableVectorMatch: keywordsOnly, DisableKeywordsMatch: !keywordsOnly})
+			require.NoError(t, err)
+			if id != f.ds.ID && id != second.ID {
+				require.Empty(t, hits)
+				continue
+			}
+			require.Len(t, hits, 1)
+			require.Equal(t, id, hits[0].Metadata["datasource_id"], "repository scope must apply before topK")
+		}
+	}
+}
+
 func TestSourceInvalidEmbeddingNeverPublishes(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	f.embedVector = []float32{0, 0, 0}
