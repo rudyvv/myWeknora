@@ -19,27 +19,8 @@ func (c *Connector) ResolveSourceRepository(ctx context.Context, ds *types.DataS
 	if err != nil {
 		return nil, err
 	}
-	var token struct {
-		Active bool     `json:"active"`
-		Scopes []string `json:"scopes"`
-	}
-	if configured.client.get(ctx, "/personal_access_tokens/self", &token) != nil {
-		return nil, fmt.Errorf("cannot verify read-only GitLab token scopes; token self API must be available")
-	}
-	readAPI, readRepository := false, false
-	for _, scope := range token.Scopes {
-		switch scope {
-		case "read_api":
-			readAPI = true
-		case "read_repository":
-			readRepository = true
-		case "read_user":
-		default:
-			return nil, fmt.Errorf("source mode requires read-only GitLab token scopes read_api and read_repository")
-		}
-	}
-	if !token.Active || !readAPI || !readRepository {
-		return nil, fmt.Errorf("source mode requires read-only GitLab token scopes read_api and read_repository")
+	if err := configured.validateSourceToken(ctx); err != nil {
+		return nil, err
 	}
 	selection := settings.Projects[0]
 	project, err := configured.client.project(ctx, selection.ProjectID)
@@ -64,6 +45,34 @@ func (c *Connector) ResolveSourceRepository(ctx context.Context, ds *types.DataS
 		return nil, fmt.Errorf("GitLab clone URL must use the configured instance origin")
 	}
 	return &types.SourceRepository{ProjectID: selection.ProjectID, Branch: selection.Ref, CommitSHA: branch.Commit.ID, CloneURL: clone.String(), Token: configured.client.token}, nil
+}
+
+// Credential rotation remains possible when a selected branch is unavailable.
+// Repository and branch availability are checked separately during preview.
+func (c *Connector) validateSourceToken(ctx context.Context) error {
+	var token struct {
+		Active bool     `json:"active"`
+		Scopes []string `json:"scopes"`
+	}
+	if c.client.get(ctx, "/personal_access_tokens/self", &token) != nil {
+		return fmt.Errorf("cannot verify read-only GitLab token scopes; token self API must be available")
+	}
+	readAPI, readRepository := false, false
+	for _, scope := range token.Scopes {
+		switch scope {
+		case "read_api":
+			readAPI = true
+		case "read_repository":
+			readRepository = true
+		case "read_user":
+		default:
+			return fmt.Errorf("source mode requires read-only GitLab token scopes read_api and read_repository")
+		}
+	}
+	if !token.Active || !readAPI || !readRepository {
+		return fmt.Errorf("source mode requires read-only GitLab token scopes read_api and read_repository")
+	}
+	return nil
 }
 
 func validObjectID(value string) bool {

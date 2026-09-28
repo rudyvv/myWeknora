@@ -19,6 +19,8 @@
 
 源码凭据要求可验证的只读 GitLab token：`read_api`、`read_repository`，可附加 `read_user`。服务端通过 `GET /personal_access_tokens/self` 校验范围；该端点不可用时明确报错，不推断 token 是只读的。旧文档模式沿用原有凭据要求。GitLab 的权限范围定义见 [官方文档](https://docs.gitlab.com/security/tokens/access_token_scopes/)，token self 接口见 [官方 API](https://docs.gitlab.com/api/personal_access_tokens/)。
 
+凭据轮换验证身份和只读范围，分支可用性由预览单独检查；已选分支被删除时仍可换入有效的新 token。
+
 ## 预览 API
 
 `POST /api/v1/datasource/:id/source-preview`，请求 `{"settings": {...}}`。`settings` 可省略以使用已保存的规则；请求不能替换凭据。接口采用现有 Admin、租户、知识库和 API-key 范围检查，返回项目、分支、固定 SHA、规则版本、完整文件列表和能力检查结果。
@@ -31,12 +33,14 @@
 
 ## 能力检查与当前阶段
 
-双索引检查使用知识库实际绑定的、经过租户所有权验证的 PostgreSQL 引擎，并检查其 `vector` 和 `pg_search` 扩展；知识库须启用关键词、向量索引并指定 Embedding 模型。Wiki 未启用时显示提示，不修改知识库开关或 Agent AllowedTools。
+双索引检查使用知识库实际绑定的、经过租户所有权验证的 PostgreSQL 引擎，并检查其 `vector` 和 `pg_search` 扩展；知识库须启用关键词、向量索引。Embedding 模型必须存在、属于该租户或为内置模型、类型正确、处于 active 且维度有效，不能仅凭模型 ID 宣告就绪。Wiki 未启用时显示提示，不修改知识库开关或 Agent AllowedTools。
 
 `SOURCE_PARSER_URL` 是部署端配置的解析服务地址，健康检查为 `GET /health`，响应要求 `{"ready":true,"parser_version":"<locked version>","languages":["java"]}`。缺失、不可达、无版本或不支持 Java 时报告未就绪。T01 尚未安装解析服务或开启源码同步，`can_sync` 保持 false；管理员可保存配置和规则，不能误入文档解析/Wiki 后处理链路。预览本身不创建 Knowledge、检索索引、WikiPage 或摘要。
 
 ## 验证
 
-测试入口为数据源公开服务 API 和管理界面的用户操作。受控 GitLab REST/Smart HTTP 服务配合真实 Git 仓库验证固定提交、中文路径、CRLF、规则、生成代码、LFS、子模块、超大文件、编码及只读 token；数据库边界夹具验证实际后端扩展缺失不会误报就绪。
+测试入口为数据源公开服务/HTTP API 和管理界面的用户操作。受控 GitLab REST/Smart HTTP 服务配合真实 Git 仓库验证固定提交、中文路径、CRLF、规则、生成代码、LFS、子模块、超大文件、编码及只读 token；数据库边界夹具验证扩展、模型缺失及跨租户模型不会误报就绪，也验证能力全部就绪的情况。HTTP API 验证租户和 API-key 知识库范围在访问仓库前生效。真实编辑器的本地夹具截图见下图；不是实际内网仓库的验收结果。
 
-前端类型检查及编辑器测试通过；全量前端测试 584/585 通过，现有 CLI POSIX-shell 测试因 Windows 缺少 `/bin/sh` 失败。`go test ./...` 已运行，现有 SQLite 向量绑定缺少 `sqlite3.h` 导致相关包编译失败。涉及包的回归结果和双轴审查将在本 ticket 收尾时记录。
+![源码预览管理界面（夹具数据）](images/gitlab-source-preview-t01.png)
+
+前端类型检查及编辑器 8 项测试通过；源码服务/HTTP 权限、文档入库及普通 Wiki 后处理与修订的针对性回归通过。全量前端测试 584/585 通过，CLI POSIX-shell 测试因 Windows 缺少 `/bin/sh` 失败。全量 Go 测试已执行但未全通过，完整分类和双轴复查限制见 [T01 验证记录](plans/gitlab-code-wiki-rag-t01-validation.md)。源码解析及真实双索引发布属于 T02，此处数据库替身仅验证预检行为。

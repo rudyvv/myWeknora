@@ -42,7 +42,7 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 		return nil, datasource.ErrInvalidConfig
 	}
 	config, err := ds.ParseConfig()
-	if err != nil {
+	if err != nil || config == nil {
 		return nil, datasource.ErrInvalidConfig
 	}
 	if settings != nil {
@@ -105,7 +105,11 @@ func (s *DataSourceService) sourceIndexesReady(ctx context.Context, kb *types.Kn
 		ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
 	}
 	engine, err := retriever.CreateRetrieveEngineForKB(ctx, s.sourceRetrieve, s.sourceOwnership, kb.TenantID, kb.VectorStoreID)
-	return err == nil && engine.SupportsEngine(types.PostgresRetrieverEngineType, types.KeywordsRetrieverType, types.VectorRetrieverType) && engine.CheckSourceIndexes(ctx) == nil
+	if err != nil || !engine.SupportsEngine(types.PostgresRetrieverEngineType, types.KeywordsRetrieverType, types.VectorRetrieverType) || engine.CheckSourceIndexes(ctx) != nil || s.sourceModels == nil {
+		return false
+	}
+	model, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
+	return err == nil && model != nil && (model.IsBuiltin || model.TenantID == kb.TenantID) && model.Type == types.ModelTypeEmbedding && model.Status == types.ModelStatusActive && model.Parameters.EmbeddingParameters.Dimension > 0
 }
 
 func sourceParserReady(ctx context.Context) bool {

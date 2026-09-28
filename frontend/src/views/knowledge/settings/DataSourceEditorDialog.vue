@@ -1644,7 +1644,7 @@ const drawerConfirmText = computed(() => {
         </t-radio-group>
         <p v-if="isSourceMode" class="ds-resource-hint">{{ t('datasource.gitlab.sourceHint') }}</p>
         <h4 class="setting-drawer__section-title">{{ t('datasource.gitlab.projects') }}</h4>
-        <p class="ds-resource-hint">{{ t('datasource.gitlab.projectsHint') }}</p>
+        <p v-if="!isSourceMode" class="ds-resource-hint">{{ t('datasource.gitlab.projectsHint') }}</p>
         <div class="gitlab-project-list">
           <div v-for="(project, index) in gitlabProjects" :key="index" class="gitlab-project-row">
             <div class="gitlab-project-row__header">

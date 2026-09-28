@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/datasource/connector/gitlab"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
 	"github.com/stretchr/testify/require"
 	pgdriver "gorm.io/driver/postgres"
@@ -95,6 +96,47 @@ func TestManualSyncDoesNotSendSourceModeThroughDocumentIngestion(t *testing.T) {
 	log, err := svc.ManualSync(context.Background(), stored.ID)
 	require.ErrorContains(t, err, "source ingestion pipeline is not available")
 	require.Nil(t, log)
+}
+
+func TestSourceCredentialsCanRotateAfterSelectedBranchIsDeleted(t *testing.T) {
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1,::1,localhost")
+	utils.ResetSSRFWhitelistForTest()
+	t.Cleanup(utils.ResetSSRFWhitelistForTest)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "replacement-token", r.Header.Get("PRIVATE-TOKEN"))
+		switch r.URL.Path {
+		case "/api/v4/user":
+			fmt.Fprint(w, `{"id":1}`)
+		case "/api/v4/personal_access_tokens/self":
+			fmt.Fprint(w, `{"active":true,"scopes":["read_api","read_repository"]}`)
+		case "/api/v4/projects/123":
+			fmt.Fprint(w, `{"id":123}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	config, err := json.Marshal(map[string]interface{}{
+		"type": "gitlab", "credentials": map[string]string{"base_url": server.URL, "access_token": "expired-token"},
+		"settings": map[string]interface{}{"content_mode": "source", "projects": []interface{}{map[string]interface{}{"project_id": "123", "ref": "deleted-branch"}}},
+	})
+	require.NoError(t, err)
+	stored := &types.DataSource{ID: "source-one", TenantID: 1, KnowledgeBaseID: "kb-one", Type: "gitlab", Config: types.JSON(config)}
+	repo := &sourceSettingsRepo{kbDeleteDSRepo: newKBDeleteDSRepo("kb-one", stored)}
+	registry := datasource.NewConnectorRegistry()
+	require.NoError(t, registry.Register(gitlab.NewConnector()))
+	kbRepo := newFakeKBRepo()
+	kbRepo.rows["kb-one"] = &types.KnowledgeBase{ID: "kb-one", TenantID: 1}
+	svc := &DataSourceService{dsRepo: repo, connectorRegistry: registry, kbService: &knowledgeBaseService{repo: kbRepo}}
+	_, err = svc.UpdateDataSourceCredentials(context.Background(), stored.ID, map[string]interface{}{"base_url": server.URL, "access_token": "replacement-token"})
+	require.NoError(t, err, "branch availability must not block read-only credential rotation")
+	saved, err := svc.GetDataSource(context.Background(), stored.ID)
+	require.NoError(t, err)
+	parsed, err := saved.ParseConfig()
+	require.NoError(t, err)
+	require.Equal(t, "replacement-token", parsed.Credentials["access_token"])
+	_, err = svc.PreviewSource(context.Background(), stored.ID, nil)
+	require.Error(t, err, "the deleted branch must still fail source preflight")
 }
 
 func TestPreviewSourceUsesFixedCommitAndReportsActualFileAvailability(t *testing.T) {
@@ -178,8 +220,10 @@ func TestPreviewSourceUsesFixedCommitAndReportsActualFileAvailability(t *testing
 	registry := datasource.NewConnectorRegistry()
 	require.NoError(t, registry.Register(gitlab.NewConnector()))
 	kb := &types.KnowledgeBase{ID: "kb-one", TenantID: 1}
+	kbRepo := newFakeKBRepo()
+	kbRepo.rows[kb.ID] = kb
 	svc := &DataSourceService{dsRepo: newKBDeleteDSRepo("kb-one", stored), connectorRegistry: registry,
-		kbService: &processSyncKBService{kb: kb}}
+		kbService: &knowledgeBaseService{repo: kbRepo}}
 	preview, err := svc.PreviewSource(context.Background(), stored.ID, nil)
 	require.NoError(t, err)
 	require.Equal(t, sha, preview.CommitSHA)
@@ -232,7 +276,55 @@ func TestPreviewSourceUsesFixedCommitAndReportsActualFileAvailability(t *testing
 		}
 	}
 	require.NoError(t, database.ExpectationsWereMet())
+	database.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"vector", "bm25"}).AddRow(true, true))
+	svc.sourceModels = sourcePreviewModels{model: nil}
+	preview, err = svc.PreviewSource(ctx, stored.ID, nil)
+	require.NoError(t, err)
+	for _, check := range preview.Checks {
+		if check.Name == "indexes" {
+			require.False(t, check.Ready, "nonexistent embedding model cannot be ready")
+		}
+	}
+	require.NoError(t, database.ExpectationsWereMet())
+	parser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/health", r.URL.Path)
+		fmt.Fprint(w, `{"ready":true,"parser_version":"fixture-java-1","languages":["java"]}`)
+	}))
+	t.Cleanup(parser.Close)
+	t.Setenv("SOURCE_PARSER_URL", parser.URL)
+	model := &types.Model{ID: kb.EmbeddingModelID, TenantID: 2, Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive,
+		Parameters: types.ModelParameters{EmbeddingParameters: types.EmbeddingParameters{Dimension: 3}}}
+	svc.sourceModels = sourcePreviewModels{model: model}
+	database.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"vector", "bm25"}).AddRow(true, true))
+	preview, err = svc.PreviewSource(ctx, stored.ID, nil)
+	require.NoError(t, err)
+	for _, check := range preview.Checks {
+		if check.Name == "indexes" {
+			require.False(t, check.Ready, "another tenant's embedding model cannot be ready")
+		}
+	}
+	model.TenantID = kb.TenantID
+	database.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"vector", "bm25"}).AddRow(true, true))
+	preview, err = svc.PreviewSource(ctx, stored.ID, nil)
+	require.NoError(t, err)
+	checks := map[string]bool{}
+	for _, check := range preview.Checks {
+		checks[check.Name] = check.Ready
+	}
+	require.True(t, checks["indexes"], "installed active embedding model and both extensions are ready")
+	require.True(t, checks["parser"], "versioned Java health response is ready")
+	require.False(t, preview.CanSync, "T01 cannot enable the not-yet-installed source ingestion pipeline")
+	require.NoError(t, database.ExpectationsWereMet())
 	writeToken = true
 	_, err = svc.PreviewSource(context.Background(), stored.ID, nil)
 	require.ErrorContains(t, err, "read-only")
+}
+
+type sourcePreviewModels struct {
+	interfaces.ModelRepository
+	model *types.Model
+}
+
+func (r sourcePreviewModels) GetByID(_ context.Context, _ uint64, _ string) (*types.Model, error) {
+	return r.model, nil
 }

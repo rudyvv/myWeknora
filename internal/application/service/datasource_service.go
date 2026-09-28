@@ -38,6 +38,7 @@ type DataSourceService struct {
 	audit             interfaces.AuditLogService
 	sourceRetrieve    interfaces.RetrieveEngineRegistry
 	sourceOwnership   retriever.TenantStoreOwnership
+	sourceModels      interfaces.ModelRepository
 }
 
 // NewDataSourceService creates a new data source service
@@ -54,6 +55,7 @@ func NewDataSourceService(
 	audit interfaces.AuditLogService,
 	sourceRetrieve interfaces.RetrieveEngineRegistry,
 	sourceOwnership retriever.TenantStoreOwnership,
+	sourceModels interfaces.ModelRepository,
 ) interfaces.DataSourceService {
 	return &DataSourceService{
 		dsRepo:            dsRepo,
@@ -68,6 +70,7 @@ func NewDataSourceService(
 		audit:             audit,
 		sourceRetrieve:    sourceRetrieve,
 		sourceOwnership:   sourceOwnership,
+		sourceModels:      sourceModels,
 	}
 }
 

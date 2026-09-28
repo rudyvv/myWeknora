@@ -51,8 +51,10 @@ func (c *Connector) Validate(ctx context.Context, ds *types.DataSourceConfig) er
 			return err
 		}
 		if mode == datasource.ContentModeSource {
-			_, err := c.ResolveSourceRepository(ctx, ds)
-			return err
+			if _, _, err := datasource.ParseSourceSettings(ds); err != nil {
+				return err
+			}
+			return configured.validateSourceToken(ctx)
 		}
 		if _, ok := ds.Settings["projects"]; ok {
 			if _, err := parseConfig(ds); err != nil {
