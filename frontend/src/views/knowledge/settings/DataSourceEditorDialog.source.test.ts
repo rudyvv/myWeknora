@@ -26,8 +26,9 @@ async function settle() {
   }
 }
 
-async function fixture({ create = false, twoProjects = false } = {}) {
+async function fixture({ create = false, twoProjects = false, delayedPreview = false } = {}) {
   const calls: Array<{ method: string; args: any[] }> = []
+  let releasePreview: (() => void) | undefined
   let storedCredentials = { base_url: 'https://gitlab.example.com', access_token: 'token-A' }
   const record = (method: string, ...args: any[]) => calls.push({ method, args: JSON.parse(JSON.stringify(args)) })
   const api = {
@@ -38,6 +39,7 @@ async function fixture({ create = false, twoProjects = false } = {}) {
     },
     async previewSource(id: string, settings: any) {
       record('previewSource', id, settings)
+      if (delayedPreview) await new Promise<void>(resolve => { releasePreview = resolve })
       return { commit_sha: '1111111111111111111111111111111111111111', rules_version: 'v1:fixture', can_sync: false,
         files: [{ path: 'dist/Business.java', status: 'included', reason: 'selected', generated: false, size: 20 }],
         checks: [{ name: 'parser', ready: false, message: 'Source parser is unavailable' }], warnings: ['Wiki is disabled'] }
@@ -95,7 +97,7 @@ async function fixture({ create = false, twoProjects = false } = {}) {
     input.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
     await settle()
   }
-  return { click, fill, calls, storedCredentials: () => storedCredentials, async close() {
+  return { click, fill, calls, async finishPreview() { assert.ok(releasePreview); releasePreview(); await settle() }, storedCredentials: () => storedCredentials, async close() {
     app.unmount()
     await settle()
     document.body.innerHTML = ''
@@ -119,6 +121,25 @@ test('source selection requires one project and an explicit branch through edito
     assert.equal(document.querySelector('.source-preview'), null, 'editor advances to sync settings')
     assert.ok(document.body.textContent?.includes('datasource.step.strategy'))
     assert.deepEqual(f.calls, [])
+  } finally { await f.close() }
+})
+
+test('a delayed preview cannot display the previous instance after credentials change', async () => {
+  const f = await fixture({ delayedPreview: true })
+  try {
+    await f.click('datasource.next')
+    await f.click('datasource.gitlab.sourceMode')
+    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
+    await f.click('datasource.gitlab.preview')
+    await f.click('datasource.back')
+    await f.click('credential.update')
+    await f.fill('https://gitlab.example.com', 'https://other-gitlab.example.com')
+    await f.fill('credential.inputPlaceholder', 'token-B')
+    await f.click('datasource.testConnection')
+    await f.click('datasource.next')
+    await f.finishPreview()
+    assert.equal(document.querySelector('.source-preview__files'), null, 'stale response must not restore the previous instance manifest')
+    assert.ok(!document.body.textContent?.includes('1111111111111111111111111111111111111111'))
   } finally { await f.close() }
 })
 

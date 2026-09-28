@@ -223,12 +223,17 @@ const sourcePreviewLoading = ref(false)
 const sourcePreviewError = ref('')
 const sourcePreviewSearch = ref('')
 const sourcePreviewPage = ref(1)
+let sourcePreviewGeneration = 0
 const sourcePreviewFiles = computed(() => {
   const search = sourcePreviewSearch.value.toLowerCase()
   return (sourcePreview.value?.files ?? []).filter(file => file.path.toLowerCase().includes(search))
 })
 const sourcePreviewPageFiles = computed(() => sourcePreviewFiles.value.slice((sourcePreviewPage.value - 1) * 50, sourcePreviewPage.value * 50))
-watch([gitlabProjects, sourceExcludePaths, isSourceMode, () => form.value.config.credentials], () => { sourcePreview.value = null; sourcePreviewError.value = '' }, { deep: true })
+watch([gitlabProjects, sourceExcludePaths, isSourceMode, () => form.value.config.credentials], () => {
+  sourcePreviewGeneration++
+  sourcePreview.value = null
+  sourcePreviewError.value = ''
+}, { deep: true, flush: 'sync' })
 watch(sourcePreviewSearch, () => { sourcePreviewPage.value = 1 })
 function syncGitLabProjectsToSettings() {
   if (!isGitLabConnector(form.value.type)) return
@@ -249,13 +254,19 @@ async function loadSourcePreview() {
     return
   }
   sourcePreviewLoading.value = true
+  const generation = ++sourcePreviewGeneration
   sourcePreviewError.value = ''
   sourcePreview.value = null
   try {
     syncGitLabProjectsToSettings()
     if (!tempDsId.value) {
       const response: any = await createDataSource({ ...form.value, config: buildConfigPayload(), knowledge_base_id: props.kbId, status: 'paused' } as any)
-      tempDsId.value = (response.data ?? response).id
+      const draftId = (response.data ?? response).id
+      if (generation !== sourcePreviewGeneration || !visible.value) {
+        await deleteDataSource(draftId)
+        return
+      }
+      tempDsId.value = draftId
     } else if (!isEdit.value && !(await commitCredentialsIfNeeded(tempDsId.value))) {
       return
     }
@@ -263,12 +274,12 @@ async function loadSourcePreview() {
     const settings = JSON.parse(JSON.stringify(form.value.config.settings))
     const result = await previewSource(id, settings)
     syncGitLabProjectsToSettings()
-    if (tempDsId.value === id && JSON.stringify(form.value.config.settings) === JSON.stringify(settings)) {
+    if (generation === sourcePreviewGeneration && visible.value && tempDsId.value === id && JSON.stringify(form.value.config.settings) === JSON.stringify(settings)) {
       sourcePreview.value = result
       sourcePreviewPage.value = 1
     }
   } catch (e: any) {
-    sourcePreviewError.value = e?.message || e?.error || t('datasource.gitlab.previewFailed')
+    if (generation === sourcePreviewGeneration && visible.value) sourcePreviewError.value = e?.message || e?.error || t('datasource.gitlab.previewFailed')
   } finally { sourcePreviewLoading.value = false }
 }
 
@@ -707,6 +718,7 @@ const currentDef = computed(() => connectorDefs.value.find(d => d.type === form.
 
 // --- Drawer lifecycle ---
 watch(visible, async (v) => {
+  sourcePreviewGeneration++
   if (!v) {
     if (!isEdit.value && tempDsId.value) {
       try {
