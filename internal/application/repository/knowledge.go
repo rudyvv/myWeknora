@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
@@ -44,12 +45,26 @@ var omitFieldsOnUpdate = []string{"DeletedAt", "PendingSubtasksCount"}
 
 // knowledgeRepository implements knowledge base and knowledge repository interface
 type knowledgeRepository struct {
-	db *gorm.DB
+	db               *gorm.DB
+	sourceVisibility bool
 }
 
 // NewKnowledgeRepository creates a new knowledge repository
 func NewKnowledgeRepository(db *gorm.DB) interfaces.KnowledgeRepository {
 	return &knowledgeRepository{db: db}
+}
+
+// NewSourceAwareKnowledgeRepository hides source identities outside the published manifest.
+func NewSourceAwareKnowledgeRepository(db *gorm.DB) interfaces.KnowledgeRepository {
+	return &knowledgeRepository{db: db, sourceVisibility: db.Dialector.Name() == "postgres"}
+}
+
+func (r *knowledgeRepository) readDB(ctx context.Context) *gorm.DB {
+	query := r.db.WithContext(ctx)
+	if r.sourceVisibility {
+		query = query.Where(source.PublishedKnowledgeSQL("knowledges.id"))
+	}
+	return query
 }
 
 // CreateKnowledge creates knowledge
@@ -66,7 +81,7 @@ func (r *knowledgeRepository) GetKnowledgeByID(
 	id string,
 ) (*types.Knowledge, error) {
 	var knowledge types.Knowledge
-	if err := r.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).First(&knowledge).Error; err != nil {
+	if err := r.readDB(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).First(&knowledge).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrKnowledgeNotFound
 		}
@@ -78,7 +93,7 @@ func (r *knowledgeRepository) GetKnowledgeByID(
 // GetKnowledgeByIDOnly returns knowledge by ID without tenant filter (for permission resolution).
 func (r *knowledgeRepository) GetKnowledgeByIDOnly(ctx context.Context, id string) (*types.Knowledge, error) {
 	var knowledge types.Knowledge
-	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&knowledge).Error; err != nil {
+	if err := r.readDB(ctx).Where("id = ?", id).First(&knowledge).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrKnowledgeNotFound
 		}
@@ -92,7 +107,7 @@ func (r *knowledgeRepository) ListKnowledgeByKnowledgeBaseID(
 	ctx context.Context, tenantID uint64, kbID string,
 ) ([]*types.Knowledge, error) {
 	var knowledges []*types.Knowledge
-	if err := r.db.WithContext(ctx).Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
+	if err := r.readDB(ctx).Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
 		Order("created_at DESC").Find(&knowledges).Error; err != nil {
 		return nil, err
 	}
@@ -191,11 +206,11 @@ func (r *knowledgeRepository) ListPagedKnowledgeByKnowledgeBaseID(
 		)
 	}
 
-	if err := scope(r.db.WithContext(ctx).Model(&types.Knowledge{})).Count(&total).Error; err != nil {
+	if err := scope(r.readDB(ctx).Model(&types.Knowledge{})).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
-	if err := scope(r.db.WithContext(ctx)).
+	if err := scope(r.readDB(ctx)).
 		Order("created_at DESC").
 		Offset(page.Offset()).
 		Limit(page.Limit()).
@@ -215,7 +230,7 @@ func (r *knowledgeRepository) ListKnowledgeFolderCounts(
 	kbID string,
 ) ([]*types.KnowledgeFolderCount, error) {
 	var counts []*types.KnowledgeFolderCount
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Model(&types.Knowledge{}).
 		Select("folder_path AS folder_path, COUNT(*) AS count").
 		Where("tenant_id = ? AND knowledge_base_id = ? AND parse_status <> ?",
@@ -347,7 +362,7 @@ func (r *knowledgeRepository) GetKnowledgeBatch(
 	ctx context.Context, tenantID uint64, ids []string,
 ) ([]*types.Knowledge, error) {
 	var knowledge []*types.Knowledge
-	if err := r.db.WithContext(ctx).Debug().
+	if err := r.readDB(ctx).Debug().
 		Where("tenant_id = ? AND id IN ?", tenantID, ids).
 		Find(&knowledge).Error; err != nil {
 		return nil, err
@@ -362,7 +377,7 @@ func (r *knowledgeRepository) CheckKnowledgeExists(
 	kbID string,
 	params *types.KnowledgeCheckParams,
 ) (bool, *types.Knowledge, error) {
-	query := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+	query := r.readDB(ctx).Model(&types.Knowledge{}).
 		Where("tenant_id = ? AND knowledge_base_id = ? AND parse_status <> ?", tenantID, kbID, "failed")
 
 	switch params.Type {
@@ -472,7 +487,7 @@ func (r *knowledgeRepository) AminusB(
 	// Order so the retained (matched) copies are the earliest ones and the
 	// surplus we return is deterministic across runs.
 	var aRows []hashRow
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Model(&types.Knowledge{}).
 		Select("id, file_hash").
 		Where("tenant_id = ? AND knowledge_base_id = ?", Atenant, A).
@@ -486,7 +501,7 @@ func (r *knowledgeRepository) AminusB(
 		Cnt      int
 	}
 	var bCounts []hashCount
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Model(&types.Knowledge{}).
 		Select("file_hash, COUNT(*) AS cnt").
 		Where("tenant_id = ? AND knowledge_base_id = ?", Btenant, B).
@@ -697,7 +712,7 @@ func (r *knowledgeRepository) CountKnowledgeByKnowledgeBaseID(
 	kbID string,
 ) (int64, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+	err := r.readDB(ctx).Model(&types.Knowledge{}).
 		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
 		Count(&count).Error
 	return count, err
@@ -715,7 +730,7 @@ func (r *knowledgeRepository) CountKnowledgeByStatus(
 	}
 
 	var count int64
-	query := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+	query := r.readDB(ctx).Model(&types.Knowledge{}).
 		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
 		Where("parse_status IN ?", parseStatuses)
 
@@ -740,7 +755,7 @@ func (r *knowledgeRepository) FindByMetadataKey(
 	value string,
 ) (*types.Knowledge, error) {
 	var knowledge types.Knowledge
-	err := r.db.WithContext(ctx).
+	err := r.readDB(ctx).
 		Where("tenant_id = ? AND knowledge_base_id = ? AND deleted_at IS NULL", tenantID, kbID).
 		Where("metadata->>? = ?", key, value).
 		First(&knowledge).Error
@@ -778,7 +793,7 @@ func (r *knowledgeRepository) FindByMetadataKeyPrefix(
 	// prefix and drives the index. The explicit ESCAPE '\' keeps backslash-escaped
 	// wildcards (e.g. \_) literal on both PostgreSQL and SQLite.
 	keyExpr := "metadata->>'" + strings.ReplaceAll(key, "'", "''") + "'"
-	err := r.db.WithContext(ctx).
+	err := r.readDB(ctx).
 		Where("tenant_id = ? AND knowledge_base_id = ? AND deleted_at IS NULL", tenantID, kbID).
 		Where(keyExpr+" LIKE ? ESCAPE ?", escaped+"%", `\`).
 		Find(&items).Error
@@ -796,7 +811,7 @@ func (r *knowledgeRepository) FindByDataSourceExternalID(
 	kbID, dataSourceID, externalID string,
 ) (*types.Knowledge, error) {
 	var knowledge types.Knowledge
-	err := r.db.WithContext(ctx).
+	err := r.readDB(ctx).
 		Where("tenant_id = ? AND knowledge_base_id = ? AND deleted_at IS NULL", tenantID, kbID).
 		Where("metadata->>'datasource_id' = ? AND metadata->>'external_id' = ?", dataSourceID, externalID).
 		First(&knowledge).Error
@@ -842,7 +857,7 @@ func (r *knowledgeRepository) SearchKnowledge(
 	}
 
 	var results []KnowledgeWithKBName
-	query := r.db.WithContext(ctx).
+	query := r.readDB(ctx).
 		Table("knowledges").
 		Select("knowledges.*, knowledge_bases.name as knowledge_base_name").
 		Joins("JOIN knowledge_bases ON knowledge_bases.id = knowledges.knowledge_base_id").
@@ -962,7 +977,7 @@ func (r *knowledgeRepository) SearchKnowledgeInScopes(
 	}
 	scopeCondition := "(knowledges.tenant_id, knowledges.knowledge_base_id) IN (" + strings.Join(placeholders, ",") + ")"
 
-	query := r.db.WithContext(ctx).
+	query := r.readDB(ctx).
 		Table("knowledges").
 		Select("knowledges.*, knowledge_bases.name as knowledge_base_name").
 		Joins("JOIN knowledge_bases ON knowledge_bases.id = knowledges.knowledge_base_id AND knowledge_bases.tenant_id = knowledges.tenant_id").
@@ -1068,7 +1083,7 @@ func (r *knowledgeRepository) ListIDsByTagIDs(
 		return nil, nil
 	}
 	var ids []string
-	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+	err := r.readDB(ctx).Model(&types.Knowledge{}).
 		Joins("JOIN knowledge_tag_relations ktr ON knowledges.id = ktr.knowledge_id").
 		Where("knowledges.tenant_id = ? AND knowledges.knowledge_base_id = ? AND ktr.tag_id IN (?)",
 			tenantID, kbID, tagIDs).

@@ -7,6 +7,7 @@ import 'katex/dist/katex.min.css';
 import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
 import mermaid from "mermaid";
+import SourceCodeView from './SourceCodeView.vue';
 import { onMounted, ref, nextTick, onUnmounted, watch, computed } from "vue";
 import {
   downKnowledgeDetails, deleteGeneratedQuestion, getChunkByIdOnly, previewKnowledgeFile,
@@ -34,10 +35,11 @@ const authStore = useAuthStore();
 // 才允许删除。父组件 KnowledgeBase.vue 通过 :canEditKB 把 KB 级权限
 // 传下来（包含 KB creator / Admin / 组织分享 editor 三种来源），未
 // 传时按更严格的 Admin 兜底，避免 Viewer 看到一个会 403 的入口。
-const canDeleteGeneratedQuestion = computed(() => {
+const canManageMetadata = computed(() => {
   if (props.canEditKB === true) return true;
   return authStore.hasRole('admin');
 });
+const canDeleteGeneratedQuestion = computed(() => canManageMetadata.value && props.details?.type !== 'source');
 const canEditContent = canDeleteGeneratedQuestion;
 
 type MetadataValueType = 'text' | 'number' | 'boolean' | 'null';
@@ -207,7 +209,7 @@ const showSummarySection = computed(() =>
   Boolean(props.details?.description)
   || props.details?.summary_status === 'pending'
   || props.details?.summary_status === 'processing'
-  || Boolean(props.details?.id && canEditContent.value),
+  || Boolean(props.details?.id && canManageMetadata.value),
 );
 
 // Mermaid 初始化计数器，用于生成唯一ID
@@ -262,7 +264,7 @@ const applySummaryState = (summaryStatus?: string, description?: string) => {
 
 const isSummaryStatusInFlight = (status?: string) => status === 'pending' || status === 'processing';
 const summaryStatusRefreshing = computed(() => isSummaryStatusInFlight(props.details?.summary_status));
-const canEditSummary = computed(() => canEditContent.value && !summaryStatusRefreshing.value);
+const canEditSummary = computed(() => canManageMetadata.value && !summaryStatusRefreshing.value);
 let summaryStatusPollTimer: ReturnType<typeof setTimeout> | null = null;
 let summaryStatusPollGeneration = 0;
 
@@ -1682,7 +1684,7 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
                 {{ Object.keys(details.custom_metadata || {}).length }}/20
               </span>
             </h4>
-            <t-tooltip v-if="canEditContent && !metadataEditing" :content="$t('common.edit')" placement="top">
+            <t-tooltip v-if="canManageMetadata && !metadataEditing" :content="$t('common.edit')" placement="top">
               <t-button class="icon-action-btn" size="small" variant="text" shape="square" @click="startMetadataEdit">
                 <template #icon><t-icon name="edit" size="15px" /></template>
               </t-button>
@@ -1696,7 +1698,7 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
                 <span class="metadata-item-value">{{ formatMetadataValue(value) }}</span>
               </div>
             </div>
-            <button v-else-if="canEditContent" type="button" class="metadata-empty-action" @click="startMetadataEdit">
+            <button v-else-if="canManageMetadata" type="button" class="metadata-empty-action" @click="startMetadataEdit">
               <t-icon name="add" size="15px" />
               <span>{{ $t('knowledgeBase.addMetadataField') }}</span>
             </button>
@@ -1755,14 +1757,14 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
                 <span>{{ $t('knowledgeBase.generatingSummary') }}</span>
               </span>
             </div>
-            <div v-if="canEditContent && !summaryEditing" class="summary-title-actions">
+            <div v-if="canManageMetadata && !summaryEditing" class="summary-title-actions">
               <t-tooltip v-if="canEditSummary" :content="$t('common.edit')" placement="top">
                 <t-button class="icon-action-btn" size="small" variant="text" shape="square"
                   @click="startSummaryEdit">
                   <template #icon><t-icon name="edit" size="15px" /></template>
                 </t-button>
               </t-tooltip>
-              <t-tooltip :content="$t('knowledgeBase.regenerateSummary')" placement="top">
+              <t-tooltip v-if="details.type !== 'source'" :content="$t('knowledgeBase.regenerateSummary')" placement="top">
                 <t-button class="icon-action-btn" size="small" variant="text" shape="square"
                   :loading="summaryRefreshing" @click="refreshSummary">
                   <template #icon><t-icon name="refresh" size="15px" /></template>
@@ -1817,7 +1819,7 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
                 {{ $t('knowledgeBase.chunkCount', { count: details.total }) }}
               </span>
             </div>
-            <div class="view-mode-buttons">
+            <div v-if="details.type !== 'source'" class="view-mode-buttons">
               <t-button v-if="canPreview()" size="small" :variant="viewMode === 'preview' ? 'base' : 'outline'"
                 :theme="viewMode === 'preview' ? 'primary' : 'default'" @click="viewMode = 'preview'"
                 class="view-mode-btn">
@@ -1848,7 +1850,8 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
           </div>
 
           <!-- 合并视图 -->
-          <div v-if="viewMode === 'merged'">
+          <SourceCodeView v-if="details.type === 'source'" :knowledge-id="details.id" :file-version-id="details.metadata?.source_file_version_id" />
+          <div v-else-if="viewMode === 'merged'">
             <div v-if="isChunkPageTransition" class="chunk-page-loading">
               <t-loading size="small" />
               <span>{{ $t('common.loading') }}</span>

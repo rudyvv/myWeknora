@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
@@ -25,12 +26,26 @@ var ErrChunkNotFound = errors.New("chunk not found")
 
 // chunkRepository implements the ChunkRepository interface
 type chunkRepository struct {
-	db *gorm.DB
+	db               *gorm.DB
+	sourceVisibility bool
 }
 
 // NewChunkRepository creates a new chunk repository
 func NewChunkRepository(db *gorm.DB) interfaces.ChunkRepository {
 	return &chunkRepository{db: db}
+}
+
+// The application provider enables publication membership on its migrated PG DB.
+func NewSourceAwareChunkRepository(db *gorm.DB) interfaces.ChunkRepository {
+	return &chunkRepository{db: db, sourceVisibility: db.Dialector.Name() == "postgres"}
+}
+
+func (r *chunkRepository) readDB(ctx context.Context) *gorm.DB {
+	query := r.db.WithContext(ctx)
+	if r.sourceVisibility {
+		query = query.Where(source.PublishedChunkSQL("chunks.id"))
+	}
+	return query
 }
 
 // CreateChunks creates multiple chunks in batches.
@@ -72,7 +87,7 @@ func (r *chunkRepository) CreateChunks(ctx context.Context, chunks []*types.Chun
 // GetChunkByID retrieves a chunk by its ID and tenant ID
 func (r *chunkRepository) GetChunkByID(ctx context.Context, tenantID uint64, id string) (*types.Chunk, error) {
 	var chunk types.Chunk
-	if err := r.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).First(&chunk).Error; err != nil {
+	if err := r.readDB(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).First(&chunk).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrChunkNotFound
 		}
@@ -84,7 +99,7 @@ func (r *chunkRepository) GetChunkByID(ctx context.Context, tenantID uint64, id 
 // GetChunkByIDOnly retrieves a chunk by ID without tenant filter (for permission resolution).
 func (r *chunkRepository) GetChunkByIDOnly(ctx context.Context, id string) (*types.Chunk, error) {
 	var chunk types.Chunk
-	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&chunk).Error; err != nil {
+	if err := r.readDB(ctx).Where("id = ?", id).First(&chunk).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrChunkNotFound
 		}
@@ -96,7 +111,7 @@ func (r *chunkRepository) GetChunkByIDOnly(ctx context.Context, id string) (*typ
 // GetChunkBySeqID retrieves a chunk by its seq_id and tenant ID
 func (r *chunkRepository) GetChunkBySeqID(ctx context.Context, tenantID uint64, seqID int64) (*types.Chunk, error) {
 	var chunk types.Chunk
-	if err := r.db.WithContext(ctx).Where("tenant_id = ? AND seq_id = ?", tenantID, seqID).First(&chunk).Error; err != nil {
+	if err := r.readDB(ctx).Where("tenant_id = ? AND seq_id = ?", tenantID, seqID).First(&chunk).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrChunkNotFound
 		}
@@ -110,7 +125,7 @@ func (r *chunkRepository) ListChunksByID(
 	ctx context.Context, tenantID uint64, ids []string,
 ) ([]*types.Chunk, error) {
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Where("tenant_id = ? AND id IN ?", tenantID, ids).
 		Find(&chunks).Error; err != nil {
 		return nil, err
@@ -124,7 +139,7 @@ func (r *chunkRepository) ListChunksByIDOnly(ctx context.Context, ids []string) 
 		return nil, nil
 	}
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&chunks).Error; err != nil {
+	if err := r.readDB(ctx).Where("id IN ?", ids).Find(&chunks).Error; err != nil {
 		return nil, err
 	}
 	return chunks, nil
@@ -138,7 +153,7 @@ func (r *chunkRepository) ListChunksBySeqID(
 		return []*types.Chunk{}, nil
 	}
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Where("tenant_id = ? AND seq_id IN ?", tenantID, seqIDs).
 		Find(&chunks).Error; err != nil {
 		return nil, err
@@ -151,7 +166,7 @@ func (r *chunkRepository) ListChunksByKnowledgeID(
 	ctx context.Context, tenantID uint64, knowledgeID string,
 ) ([]*types.Chunk, error) {
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Where("tenant_id = ? AND knowledge_id = ? and chunk_type = ?", tenantID, knowledgeID, "text").
 		Order("chunk_index ASC").
 		Find(&chunks).Error; err != nil {
@@ -171,7 +186,7 @@ func (r *chunkRepository) ListChunksByKnowledgeIDAndTypes(
 		return nil, nil
 	}
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Where("tenant_id = ? AND knowledge_id = ? AND chunk_type IN ?", tenantID, knowledgeID, chunkTypes).
 		Order("chunk_index ASC").
 		Find(&chunks).Error; err != nil {
@@ -256,7 +271,7 @@ func (r *chunkRepository) ListPagedChunksByKnowledgeID(
 		return db
 	}
 
-	query := baseFilter(r.db.WithContext(ctx).Model(&types.Chunk{}))
+	query := baseFilter(r.readDB(ctx).Model(&types.Chunk{}))
 
 	// First query the total count
 	if err := query.Count(&total).Error; err != nil {
@@ -264,7 +279,7 @@ func (r *chunkRepository) ListPagedChunksByKnowledgeID(
 	}
 
 	// Then query the paginated data
-	dataQuery := baseFilter(r.db.WithContext(ctx))
+	dataQuery := baseFilter(r.readDB(ctx))
 
 	// Determine sort order based on knowledge type
 	var orderClause string
@@ -299,7 +314,7 @@ func (r *chunkRepository) ListChunkByParentID(
 	parentID string,
 ) ([]*types.Chunk, error) {
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Where("tenant_id = ? AND parent_chunk_id = ?", tenantID, parentID).
 		Find(&chunks).Error; err != nil {
 		return nil, err
@@ -316,7 +331,7 @@ func (r *chunkRepository) ListChunksByParentIDs(
 		return nil, nil
 	}
 	var chunks []*types.Chunk
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx).
 		Where("tenant_id = ? AND parent_chunk_id IN ?", tenantID, parentIDs).
 		Find(&chunks).Error; err != nil {
 		return nil, err
@@ -556,7 +571,7 @@ func (r *chunkRepository) ListImageInfoByKnowledgeIDs(
 	ctx context.Context, tenantID uint64, knowledgeIDs []string,
 ) ([]interfaces.ChunkImageInfo, error) {
 	var results []interfaces.ChunkImageInfo
-	err := r.db.WithContext(ctx).
+	err := r.readDB(ctx).
 		Model(&types.Chunk{}).
 		Select("knowledge_id, image_info").
 		Where("tenant_id = ? AND knowledge_id IN ? AND image_info != ''", tenantID, knowledgeIDs).
@@ -632,7 +647,7 @@ func (r *chunkRepository) CountChunksByKnowledgeBaseID(
 	kbID string,
 ) (int64, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&types.Chunk{}).
+	err := r.readDB(ctx).Model(&types.Chunk{}).
 		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
 		Count(&count).Error
 	return count, err
@@ -1308,7 +1323,7 @@ func (r *chunkRepository) ListAllChunksByKnowledgeID(
 	knowledgeID string,
 ) ([]*types.Chunk, error) {
 	var chunks []*types.Chunk
-	err := r.db.WithContext(ctx).
+	err := r.readDB(ctx).
 		Where("tenant_id = ? AND knowledge_id = ?", tenantID, knowledgeID).
 		Order("id ASC").
 		Find(&chunks).

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
@@ -18,13 +19,20 @@ import (
 
 // pgRepository implements PostgreSQL-based retrieval operations
 type pgRepository struct {
-	db *gorm.DB // Database connection
+	db               *gorm.DB // Database connection
+	sourceVisibility bool
 }
 
 // NewPostgresRetrieveEngineRepository creates a new PostgreSQL retriever repository
 func NewPostgresRetrieveEngineRepository(db *gorm.DB) interfaces.RetrieveEngineRepository {
 	logger.GetLogger(context.Background()).Info("[Postgres] Initializing PostgreSQL retriever engine repository")
 	return &pgRepository{db: db}
+}
+
+// Bound PG stores retain their document-only schema; the built-in DB has the
+// complete source manifest and publication pointer used by this provider.
+func NewSourceAwarePostgresRetrieveEngineRepository(db *gorm.DB) interfaces.RetrieveEngineRepository {
+	return &pgRepository{db: db, sourceVisibility: true}
 }
 
 // EngineType returns the retriever engine type (PostgreSQL)
@@ -181,6 +189,9 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 ) ([]*types.RetrieveResult, error) {
 	logger.GetLogger(ctx).Infof("[Postgres] Keywords retrieval: query=%s, topK=%d", params.Query, params.TopK)
 	conds := make([]clause.Expression, 0)
+	if g.sourceVisibility {
+		conds = append(conds, clause.Expr{SQL: source.PublishedChunkSQL("embeddings.chunk_id")})
+	}
 
 	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
 	// - If only KnowledgeBaseIDs: search entire knowledge bases
@@ -288,6 +299,9 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 
 	// Build WHERE conditions for filtering
 	whereParts := make([]string, 0)
+	if g.sourceVisibility {
+		whereParts = append(whereParts, source.PublishedChunkSQL("embeddings.chunk_id"))
+	}
 	allVars := make([]interface{}, 0)
 
 	// Add query vector first (used in ORDER BY for HNSW index)

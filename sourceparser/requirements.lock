@@ -1,0 +1,10 @@
+# Python 3.12; Linux x86_64/aarch64 and Windows x86_64 wheels only.
+# Verified against the official PyPI release metadata. Install with --require-hashes.
+tree-sitter-language-pack==1.19.0 \
+    --hash=sha256:22dfe6caff6dbc32d9d35940beba8e670d2c05986cc1494ea1395f6cd60d6d0e \
+    --hash=sha256:ca81a3e2ef17854e3379f0af3a53b46a4074dbd7e056aa29f62bd6ea04656039 \
+    --hash=sha256:6f8593f2a4cb864c1f52c8b297013c184a5898b2ca5f732f6163720c2aa8dfb7
+tree-sitter==0.26.0 \
+    --hash=sha256:5a6b333b0282d8bb0af741f9b018bd2523d4eecb2686bf6717066a625fecfaa4 \
+    --hash=sha256:30a88be89ff1f2755297f81e8080d88b795dd98720c3f9fa2acf93873182cc95 \
+    --hash=sha256:ca89e361a276dbc934b28a43dd881199e25d34ff5493ee0ce45f3c52a6124a37

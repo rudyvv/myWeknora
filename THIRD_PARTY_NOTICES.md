@@ -7,6 +7,13 @@ backend and desktop packages. Container distributions include them in `/app`;
 macOS applications include them in `Contents/Resources`.
 Windows installers place them next to the installed executable.
 
+## Java source parser
+
+- `tree-sitter-language-pack` 1.19.0, MIT, Copyright 2025–2026 Kreuzberg, Inc.; [license](sourceparser/LICENSE-language-pack.txt), [source](https://github.com/xberg-io/tree-sitter-language-pack/tree/v1.19.0).
+- Python `tree-sitter` 0.26.0, MIT, Copyright (c) 2019 Max Brunsfeld, GitHub; [license](sourceparser/LICENSE-tree-sitter.txt), [source](https://github.com/tree-sitter/py-tree-sitter/tree/v0.26.0).
+- Java grammar distributed in the locked language-pack archive, MIT, Copyright (c) 2017 Ayman Nadeem; [license](sourceparser/LICENSE-tree-sitter-java.txt), [source](https://github.com/tree-sitter/tree-sitter-java).
+- These components run in the optional source-parser image. Their code is unmodified; WeKnora supplies a separate range/annotation and HTTP adapter. The original license texts also ship in `/opt/source-parser` in that image. Dependency wheel and grammar bundle checksums are recorded in the parser lock/build files.
+
 ## Go MySQL Driver
 
 - Component: `github.com/go-sql-driver/mysql`, version `v1.10.0`.

@@ -22,6 +22,10 @@ type folderMoveRepoStub struct {
 	renameCalls int
 }
 
+func (r *folderMoveRepoStub) ListKnowledgeByKnowledgeBaseID(context.Context, uint64, string) ([]*types.Knowledge, error) {
+	return []*types.Knowledge{{ID: "k1", TenantID: 1, KnowledgeBaseID: "kb-1", Type: "file", FolderPath: "docs"}}, nil
+}
+
 func (r *folderMoveRepoStub) UpdateKnowledgeFolderPath(
 	_ context.Context, _ uint64, _ string, ids []string, folderPath string,
 ) (int64, error) {

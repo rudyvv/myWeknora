@@ -38,7 +38,7 @@ func TestSourcePreviewAPIEnforcesTenantAndKnowledgeBaseScopeBeforeRepositoryAcce
 	kb := &types.KnowledgeBase{ID: "kb-one", TenantID: 1}
 	kbService := service.NewKnowledgeBaseService(previewAPIKBRepo{kb: kb}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	stored := &types.DataSource{ID: "source-one", TenantID: 1, KnowledgeBaseID: kb.ID, Type: "gitlab", Config: types.JSON(`{"settings":{"content_mode":"source","projects":[{"project_id":"123","ref":"main"}]}}`)}
-	dsService := service.NewDataSourceService(previewAPIDataSourceRepo{source: stored}, nil, nil, kbService, nil, datasource.NewConnectorRegistry(), nil, nil, nil, nil, nil, nil, nil)
+	dsService := service.NewDataSourceService(previewAPIDataSourceRepo{source: stored}, nil, nil, kbService, nil, datasource.NewConnectorRegistry(), nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	h := NewDataSourceHandler(dsService, kbService)
 	router := gin.New()
 	router.Use(func(c *gin.Context) {

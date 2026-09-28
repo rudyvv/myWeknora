@@ -29,6 +29,13 @@ import (
 // existing redirect and dial-time SSRF policy; credentials never enter command
 // arguments, Git configuration, environment variables, or subprocess output.
 func PreviewGit(ctx context.Context, repository *types.SourceRepository, rules *datasource.SourceSettings) ([]types.SourcePreviewFile, error) {
+	return ReadGit(ctx, repository, rules, nil)
+}
+
+// ReadGit visits verified, selected text blobs while the isolated object
+// database is alive, and returns the complete inventory. The caller decides
+// whether the entire inventory can be committed; callbacks never imply publish.
+func ReadGit(ctx context.Context, repository *types.SourceRepository, rules *datasource.SourceSettings, consume func(types.SourcePreviewFile, []byte) error) ([]types.SourcePreviewFile, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	root, err := os.MkdirTemp("", "weknora-source-preview-")
@@ -132,6 +139,11 @@ func PreviewGit(ctx context.Context, repository *types.SourceRepository, rules *
 			return nil, fmt.Errorf("source object framing failed")
 		}
 		classify(file, content)
+		if consume != nil && file.Status == "included" {
+			if err := consume(*file, content); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return files, nil
 }

@@ -12,6 +12,8 @@ import (
 )
 
 const (
+	// KnowledgeTypeSource is an immutable repository-managed source file.
+	KnowledgeTypeSource = "source"
 	// KnowledgeTypeManual represents the manual knowledge type
 	KnowledgeTypeManual = "manual"
 	// KnowledgeTypeFAQ represents the FAQ knowledge type

@@ -37,6 +37,22 @@ type KnowledgeHandler struct {
 	spanRepo          repository.KnowledgeSpanRepository
 }
 
+func (h *KnowledgeHandler) GetSourceFile(c *gin.Context) {
+	id := c.Param("id")
+	_, ctx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleViewer)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	file, err := h.kgService.GetSourceFile(ctx, id, c.Query("version_id"))
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": file})
+}
+
 // NewKnowledgeHandler creates a new knowledge handler instance
 func NewKnowledgeHandler(
 	cfg *config.Config,

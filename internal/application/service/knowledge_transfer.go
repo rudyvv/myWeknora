@@ -83,6 +83,9 @@ func validateTransferKnowledge(k *types.Knowledge, kb *types.KnowledgeBase) erro
 	if k == nil || k.ID == "" || k.TenantID != kb.TenantID || k.KnowledgeBaseID != kb.ID {
 		return fmt.Errorf("knowledge binding does not match the transfer scope")
 	}
+	if err := rejectGitManagedContent(k); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -93,6 +96,13 @@ func (s *knowledgeService) transferChunks(
 	k *types.Knowledge,
 	allowedKBs ...string,
 ) ([]*types.Chunk, error) {
+	persisted, err := s.repo.GetKnowledgeByID(ctx, k.TenantID, k.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectGitManagedContent(persisted); err != nil {
+		return nil, err
+	}
 	allowed := map[string]bool{}
 	for _, id := range allowedKBs {
 		allowed[id] = true
@@ -211,6 +221,9 @@ func (s *knowledgeService) planKnowledgeMove(
 func validateMoveItem(ctx context.Context, k *types.Knowledge, source, target *types.KnowledgeBase, mode string) error {
 	if k == nil || k.TenantID != source.TenantID {
 		return access.ErrForbidden
+	}
+	if err := rejectGitManagedContent(k); err != nil {
+		return err
 	}
 	state, err := transferState(k)
 	if err != nil {

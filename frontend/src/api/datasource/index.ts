@@ -38,6 +38,11 @@ export interface SyncItemError {
 }
 
 export interface SyncResultDetail {
+  source?: {
+    snapshot: { id: string; state: string; commit_sha: string; project_id: string; repository_url: string;
+      manifest_complete: boolean; member_count: number; file_count: number; chunk_count: number; error?: string };
+    members: Array<{ path: string; status: string; reason: string; source_file_id: string; file_version_id: string }>;
+  }
   total?: number
   created?: number
   updated?: number

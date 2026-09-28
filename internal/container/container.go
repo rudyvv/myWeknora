@@ -153,9 +153,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewTenantInvitationRepository))
 	must(container.Provide(repository.NewAuditLogRepository))
 	must(container.Provide(repository.NewKnowledgeBaseRepository))
-	must(container.Provide(repository.NewKnowledgeRepository))
+	must(container.Provide(repository.NewSourceAwareKnowledgeRepository))
 	must(container.Provide(repository.NewKnowledgeSpanRepository))
-	must(container.Provide(repository.NewChunkRepository))
+	must(container.Provide(repository.NewSourceAwareChunkRepository))
 	must(container.Provide(repository.NewKnowledgeTagRepository))
 	must(container.Provide(repository.NewSessionRepository))
 	must(container.Provide(repository.NewMessageRepository))
@@ -179,6 +179,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewUserResourceFavoriteRepository))
 	must(container.Provide(service.NewWebSearchStateService))
 	must(container.Provide(repository.NewDataSourceRepository))
+	must(container.Provide(repository.NewSourceSnapshotRepository))
 	must(container.Provide(repository.NewSyncLogRepository))
 	must(container.Provide(repository.NewWikiPageRepository))
 	must(container.Provide(repository.NewMemoryRepository))
@@ -1152,7 +1153,7 @@ func initRetrieveEngineRegistry(
 	auditSink := newAuditSinkAdapter(auditSvc)
 
 	if slices.Contains(retrieveDriver, "postgres") {
-		postgresRepo := postgresRepo.NewPostgresRetrieveEngineRepository(db)
+		postgresRepo := postgresRepo.NewSourceAwarePostgresRetrieveEngineRepository(db)
 		if err := registry.Register(
 			retriever.NewKVHybridRetrieveEngine(postgresRepo, types.PostgresRetrieverEngineType),
 		); err != nil {

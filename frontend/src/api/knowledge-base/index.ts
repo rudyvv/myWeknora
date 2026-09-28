@@ -2,6 +2,17 @@ import { get, post, put, del, postUpload, getDown } from "../../utils/request";
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import type { AuditLog, AuditOutcome, ListAuditLogResponse } from '@/api/tenant/audit-log';
 
+export interface SourceRange { start_byte: number; end_byte: number; start_line: number; end_line: number }
+export interface SourceFileView {
+  knowledge_id: string; snapshot_id: string; file_version_id: string; project_id: string;
+  commit_sha: string; repository_url: string; path: string; sha256: string; encoding: string;
+  quality: string; parser_version: string; content: string;
+  symbols: Array<{ kind: string; name: string; qualified_name: string; signature: string; range: SourceRange }>;
+}
+export function getSourceFile(id: string, versionID?: string): Promise<{ data: SourceFileView }> {
+  return get(`/api/v1/knowledge/${encodeURIComponent(id)}/source${versionID ? `?version_id=${encodeURIComponent(versionID)}` : ''}`) as unknown as Promise<{ data: SourceFileView }>;
+}
+
 export type KnowledgeBaseActivity = AuditLog;
 
 export interface ListKnowledgeBaseActivityParams {

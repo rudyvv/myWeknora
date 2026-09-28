@@ -1045,7 +1045,7 @@ func (s *agentService) registerTools(
 				s.cfg,
 			)
 		case tools.ToolGrepChunks:
-			toolToRegister = tools.NewGrepChunksTool(s.db, config.SearchTargets)
+			toolToRegister = tools.NewSourceAwareGrepChunksTool(s.db, config.SearchTargets)
 			logger.Infof(ctx, "Registered grep_chunks tool with searchTargets: %d targets", len(config.SearchTargets))
 		case tools.ToolListKnowledgeChunks:
 			toolToRegister = tools.NewListKnowledgeChunksTool(s.knowledgeService, s.chunkService, config.SearchTargets)

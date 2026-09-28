@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onUnmounted } from 'vue'
+import SourceSnapshotRunView from '@/components/SourceSnapshotRunView.vue'
 import { useI18n } from 'vue-i18n'
 import { getSyncLogs, type SyncLog, type SyncItemError } from '@/api/datasource'
 import { formatSyncLogError, syncLogDisplayStatus } from './syncLogDisplay'
@@ -18,9 +19,13 @@ const loadingMore = ref(false)
 const hasMore = ref(false)
 const expandedId = ref('')
 const pageSize = 50
+let generation = 0
+let polling: ReturnType<typeof setInterval> | undefined
 
 async function fetchLogs(reset = true) {
   if (!props.dataSourceId) return
+  const sourceID = props.dataSourceId
+  const requestGeneration = generation
 
   if (reset) {
     loading.value = true
@@ -30,7 +35,8 @@ async function fetchLogs(reset = true) {
 
   try {
     const offset = reset ? 0 : logs.value.length
-    const res = await getSyncLogs(props.dataSourceId, pageSize, offset)
+    const res = await getSyncLogs(sourceID, pageSize, offset)
+    if (!visible.value || sourceID !== props.dataSourceId || requestGeneration !== generation) return
     const items = res?.data || res || []
     logs.value = reset ? items : [...logs.value, ...items]
     hasMore.value = items.length === pageSize
@@ -43,11 +49,19 @@ async function fetchLogs(reset = true) {
   }
 }
 
-watch(visible, (v) => {
+watch([visible, () => props.dataSourceId], ([v]) => {
+  generation++
+  if (polling) clearInterval(polling)
+  polling = undefined
   if (!v) return
+  logs.value = []
   expandedId.value = ''
   fetchLogs(true)
+  polling = setInterval(() => {
+    if (!loading.value && !loadingMore.value && logs.value.some(log => log.status === 'running')) fetchLogs(true)
+  }, 5000)
 })
+onUnmounted(() => { generation++; if (polling) clearInterval(polling) })
 
 function toggleExpand(id: string) {
   expandedId.value = expandedId.value === id ? '' : id
@@ -287,6 +301,7 @@ const groupedLogs = computed(() => {
 
               <!-- Expanded -->
               <div v-if="expandedId === log.id" class="tl-detail" @click.stop>
+                <SourceSnapshotRunView v-if="log.result?.source" :result="log.result.source" />
                 <div class="detail-row">
                   <span class="detail-label">{{ t('datasource.logDetail.startTime') }}</span>
                   <span>{{ formatTime(log.started_at) }}</span>

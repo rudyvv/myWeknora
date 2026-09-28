@@ -147,5 +147,8 @@ func (s *knowledgeService) RequestKnowledgeSummaryRefresh(
 	if err != nil {
 		return err
 	}
+	if err := rejectGitManagedContent(knowledge); err != nil {
+		return err
+	}
 	return enqueueSummaryRefresh(ctx, s.repo, s.task, s.kbService, s.tracker(), knowledge)
 }

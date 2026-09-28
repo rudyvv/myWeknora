@@ -26,19 +26,21 @@ import (
 
 // DataSourceService implements the DataSourceService interface
 type DataSourceService struct {
-	dsRepo            interfaces.DataSourceRepository
-	syncLogRepo       interfaces.SyncLogRepository
-	knowledgeService  interfaces.KnowledgeService
-	kbService         interfaces.KnowledgeBaseService
-	taskEnqueuer      interfaces.TaskEnqueuer
-	connectorRegistry *datasource.ConnectorRegistry
-	scheduler         *datasource.Scheduler
-	tenantRepo        interfaces.TenantRepository
-	tagService        interfaces.KnowledgeTagService
-	audit             interfaces.AuditLogService
-	sourceRetrieve    interfaces.RetrieveEngineRegistry
-	sourceOwnership   retriever.TenantStoreOwnership
-	sourceModels      interfaces.ModelRepository
+	dsRepo             interfaces.DataSourceRepository
+	syncLogRepo        interfaces.SyncLogRepository
+	knowledgeService   interfaces.KnowledgeService
+	kbService          interfaces.KnowledgeBaseService
+	taskEnqueuer       interfaces.TaskEnqueuer
+	connectorRegistry  *datasource.ConnectorRegistry
+	scheduler          *datasource.Scheduler
+	tenantRepo         interfaces.TenantRepository
+	tagService         interfaces.KnowledgeTagService
+	audit              interfaces.AuditLogService
+	sourceRetrieve     interfaces.RetrieveEngineRegistry
+	sourceOwnership    retriever.TenantStoreOwnership
+	sourceModels       interfaces.ModelRepository
+	sourceSnapshots    interfaces.SourceSnapshotRepository
+	sourceModelService interfaces.ModelService
 }
 
 // NewDataSourceService creates a new data source service
@@ -56,21 +58,25 @@ func NewDataSourceService(
 	sourceRetrieve interfaces.RetrieveEngineRegistry,
 	sourceOwnership retriever.TenantStoreOwnership,
 	sourceModels interfaces.ModelRepository,
+	sourceSnapshots interfaces.SourceSnapshotRepository,
+	sourceModelService interfaces.ModelService,
 ) interfaces.DataSourceService {
 	return &DataSourceService{
-		dsRepo:            dsRepo,
-		syncLogRepo:       syncLogRepo,
-		knowledgeService:  knowledgeService,
-		kbService:         kbService,
-		taskEnqueuer:      taskEnqueuer,
-		connectorRegistry: connectorRegistry,
-		scheduler:         scheduler,
-		tenantRepo:        tenantRepo,
-		tagService:        tagService,
-		audit:             audit,
-		sourceRetrieve:    sourceRetrieve,
-		sourceOwnership:   sourceOwnership,
-		sourceModels:      sourceModels,
+		dsRepo:             dsRepo,
+		syncLogRepo:        syncLogRepo,
+		knowledgeService:   knowledgeService,
+		kbService:          kbService,
+		taskEnqueuer:       taskEnqueuer,
+		connectorRegistry:  connectorRegistry,
+		scheduler:          scheduler,
+		tenantRepo:         tenantRepo,
+		tagService:         tagService,
+		audit:              audit,
+		sourceRetrieve:     sourceRetrieve,
+		sourceOwnership:    sourceOwnership,
+		sourceModels:       sourceModels,
+		sourceSnapshots:    sourceSnapshots,
+		sourceModelService: sourceModelService,
 	}
 }
 
@@ -513,7 +519,16 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		return nil, err
 	}
 	if mode == datasource.ContentModeSource {
-		return nil, datasource.ErrSourcePipelineUnavailable
+		if s.sourceSnapshots == nil || s.sourceModelService == nil {
+			return nil, datasource.ErrSourcePipelineUnavailable
+		}
+		kb, err := s.kbService.GetKnowledgeBaseByID(ctx, ds.KnowledgeBaseID)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.checkSourceSyncReady(ctx, kb, config); err != nil {
+			return nil, err
+		}
 	}
 
 	if ds.Status != types.DataSourceStatusActive &&
@@ -731,13 +746,13 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		}
 	}
 	mode, modeErr := datasource.ContentMode(config)
-	if modeErr != nil || mode == datasource.ContentModeSource {
-		if modeErr == nil {
-			modeErr = datasource.ErrSourcePipelineUnavailable
-		}
+	if modeErr != nil {
 		s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
 			types.SyncLogStatusFailed, modeErr.Error(), wasPaused)
 		return fmt.Errorf("%w: %v", asynq.SkipRetry, modeErr)
+	}
+	if mode == datasource.ContentModeSource {
+		return s.processSourceSync(ctx, ds, syncLog, kb, connector, config, wasPaused)
 	}
 	// Surface the KB's multimodal/VLM state to the connector so it only extracts
 	// embedded images for OCR when the KB can actually ingest them (never persisted).

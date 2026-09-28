@@ -12,6 +12,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
 )
@@ -65,8 +66,9 @@ type GrepChunksInput struct {
 // the snippet, mirroring the UX of wiki_search.
 type GrepChunksTool struct {
 	BaseTool
-	db            *gorm.DB
-	searchTargets types.SearchTargets
+	db               *gorm.DB
+	searchTargets    types.SearchTargets
+	sourceVisibility bool
 
 	mu         sync.Mutex
 	seenChunks map[string]bool
@@ -80,6 +82,13 @@ func NewGrepChunksTool(db *gorm.DB, searchTargets types.SearchTargets) *GrepChun
 		searchTargets: searchTargets,
 		seenChunks:    make(map[string]bool),
 	}
+}
+
+// NewSourceAwareGrepChunksTool shares the published-manifest boundary with RAG.
+func NewSourceAwareGrepChunksTool(db *gorm.DB, searchTargets types.SearchTargets) *GrepChunksTool {
+	tool := NewGrepChunksTool(db, searchTargets)
+	tool.sourceVisibility = db.Dialector.Name() == "postgres"
+	return tool
 }
 
 // Execute executes the grep chunks tool
@@ -390,6 +399,9 @@ func (t *GrepChunksTool) searchChunks(
 		Where("chunks.is_enabled = ?", true).
 		Where("chunks.deleted_at IS NULL").
 		Where("knowledges.deleted_at IS NULL")
+	if t.sourceVisibility {
+		query = query.Where(source.PublishedChunkSQL("chunks.id"))
+	}
 
 	// Combine specific knowledge IDs, tag scopes, and full-KB scopes with OR so
 	// that mixing @KB with @tag/@file searches BOTH, mirroring knowledge_search's
@@ -443,7 +455,11 @@ func (t *GrepChunksTool) searchChunks(
 			Count       int    `gorm:"column:cnt"`
 		}
 		var counts []countRow
-		if err := t.db.WithContext(ctx).Table("chunks").
+		countQuery := t.db.WithContext(ctx).Table("chunks")
+		if t.sourceVisibility {
+			countQuery = countQuery.Where(source.PublishedChunkSQL("chunks.id"))
+		}
+		if err := countQuery.
 			Select("knowledge_id, COUNT(*) AS cnt").
 			Where("knowledge_id IN ?", uniqueKnowledgeIDs).
 			Where("is_enabled = ?", true).

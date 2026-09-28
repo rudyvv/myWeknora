@@ -14,6 +14,13 @@ type knowledgeBaseWriteLookup interface {
 	GetKnowledgeBaseByID(context.Context, string) (*types.KnowledgeBase, error)
 }
 
+func rejectGitManagedContent(knowledge *types.Knowledge) error {
+	if knowledge != nil && knowledge.Type == types.KnowledgeTypeSource {
+		return apperrors.NewConflictError("Git-managed source is read-only; update its source rules or synchronize the repository")
+	}
+	return nil
+}
+
 func writeResourceIDs(ids []string) ([]string, error) {
 	result := make([]string, 0, len(ids))
 	seen := make(map[string]bool, len(ids))

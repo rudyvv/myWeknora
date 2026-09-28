@@ -1,0 +1,30 @@
+# Opt-in source parser: docker compose -f docker-compose.yml -f docker-compose.source.yml up --build -d
+services:
+  app:
+    environment:
+      - SOURCE_PARSER_URL=http://source-parser:8081
+    depends_on:
+      source-parser:
+        condition: service_healthy
+    networks:
+      - WeKnora-network
+      - source-parser-internal
+  source-parser:
+    build:
+      context: ./sourceparser
+    image: weknora-source-parser:java-1.19.0
+    restart: unless-stopped
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 2
+    pids_limit: 64
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    networks:
+      - source-parser-internal
+networks:
+  source-parser-internal:
+    internal: true

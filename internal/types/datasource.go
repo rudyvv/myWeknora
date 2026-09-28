@@ -417,6 +417,8 @@ type SyncCursor struct {
 
 // SyncResult summarizes the outcome of a sync operation
 type SyncResult struct {
+	// Source is present only for repository source mode, never document mode.
+	Source *SourceRunResult `json:"source,omitempty"`
 	// Total items processed
 	Total int `json:"total"`
 

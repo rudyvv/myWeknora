@@ -39,6 +39,9 @@ func (s *knowledgeService) reparseTaskScope(
 		if err := access.RejectMovingKnowledge(row); err != nil {
 			return ctx, nil, fmt.Errorf("reparse task document unavailable: %v: %w", err, asynq.SkipRetry)
 		}
+		if err := rejectGitManagedContent(row); err != nil {
+			return ctx, nil, fmt.Errorf("%v: %w", err, asynq.SkipRetry)
+		}
 		// Legacy payloads can reconstruct only their current unambiguous KB.
 		kbID = row.KnowledgeBaseID
 		seen[row.ID] = true

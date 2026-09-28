@@ -133,6 +133,9 @@ func (s *knowledgeService) planKnowledgeDelete(ctx context.Context, ids []string
 		if err := access.RejectMovingKnowledge(row); err != nil {
 			return nil, err
 		}
+		if err := rejectGitManagedContent(row); err != nil {
+			return nil, err
+		}
 		if _, ok := plan.kbs[row.KnowledgeBaseID]; !ok {
 			kb, err := knowledgeWriteKB(ctx, s.kbService, row)
 			if err != nil {

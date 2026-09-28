@@ -26,6 +26,9 @@ func (s *chunkService) writableChunk(ctx context.Context, id string) (*types.Chu
 	if chunk.KnowledgeBaseID != knowledge.KnowledgeBaseID {
 		return nil, apperrors.NewForbiddenError("chunk does not belong to its knowledge base")
 	}
+	if err := rejectGitManagedContent(knowledge); err != nil {
+		return nil, err
+	}
 	copyOfChunk := *chunk
 	return &copyOfChunk, nil
 }
@@ -51,6 +54,9 @@ func (s *chunkService) validateChunkWrites(ctx context.Context, chunks []*types.
 	}
 	parents := make(map[string]*types.Knowledge, len(knowledge))
 	for _, row := range knowledge {
+		if err := rejectGitManagedContent(row); err != nil {
+			return err
+		}
 		parents[row.ID] = row
 	}
 	storedByID := make(map[string]*types.Chunk)

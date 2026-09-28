@@ -229,6 +229,12 @@ func (s *knowledgeService) CloneKnowledgeBase(ctx context.Context, srcID, dstID 
 // It also ensures that the chunk's relationships (like pre and next chunk IDs) are maintained
 // by mapping the source chunk IDs to the new target chunk IDs.
 func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowledge) (err error) {
+	if err := rejectGitManagedContent(src); err != nil {
+		return err
+	}
+	if err := rejectGitManagedContent(dst); err != nil {
+		return err
+	}
 	sourceKB, err := knowledgeWriteKB(ctx, s.kbService, src)
 	if err != nil {
 		return err
@@ -242,6 +248,9 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 	}
 	stored, err := s.repo.GetKnowledgeByID(ctx, dst.TenantID, dst.ID)
 	if err != nil {
+		return err
+	}
+	if err := rejectGitManagedContent(stored); err != nil {
 		return err
 	}
 	if stored == nil || stored.ID != dst.ID || stored.TenantID != dst.TenantID ||

@@ -2456,6 +2456,9 @@ func (s *knowledgeService) ReparseKnowledge(
 		logger.Errorf(ctx, "Failed to load knowledge: %v", err)
 		return nil, err
 	}
+	if err := rejectGitManagedContent(existing); err != nil {
+		return nil, err
+	}
 
 	tenantID := existing.TenantID
 
@@ -2947,6 +2950,9 @@ func (s *knowledgeService) UpdateImageInfo(
 ) error {
 	knowledge, _, err := loadKnowledgeWrite(ctx, s.repo, s.kbService, knowledgeID)
 	if err != nil {
+		return err
+	}
+	if err := rejectGitManagedContent(knowledge); err != nil {
 		return err
 	}
 	imageInfo = common.CleanInvalidUTF8(imageInfo)

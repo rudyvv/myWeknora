@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -599,6 +600,9 @@ func (s *knowledgeService) MoveKnowledgeToFolder(ctx context.Context,
 	}
 	ids = make([]string, 0, len(rows))
 	for _, row := range rows {
+		if err := rejectGitManagedContent(row); err != nil {
+			return 0, err
+		}
 		if row.KnowledgeBaseID != kbID {
 			return 0, werrors.NewForbiddenError("knowledge outside target KB")
 		}
@@ -651,6 +655,17 @@ func (s *knowledgeService) RenameKnowledgeFolder(ctx context.Context,
 		return 0, err
 	}
 	tenantID := kb.TenantID
+	rows, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, tenantID, kbID)
+	if err != nil {
+		return 0, err
+	}
+	for _, row := range rows {
+		if row.FolderPath == source || strings.HasPrefix(row.FolderPath, source+"/") {
+			if err := rejectGitManagedContent(row); err != nil {
+				return 0, err
+			}
+		}
+	}
 	affected, err := s.repo.RenameKnowledgeFolderPath(ctx, tenantID, kbID, source, target)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to rename folder %q to %q: %v", source, target, err)
@@ -684,6 +699,13 @@ func (s *knowledgeService) GetKnowledgeFile(ctx context.Context, id string) (io.
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, id)
 	if err != nil {
 		return nil, "", err
+	}
+	if knowledge.Type == types.KnowledgeTypeSource {
+		file, err := s.GetSourceFile(ctx, id)
+		if err != nil {
+			return nil, "", err
+		}
+		return io.NopCloser(bytes.NewReader(file.RawContent)), knowledge.FileName, nil
 	}
 
 	// Manual knowledge stores content in Metadata — stream it directly as a .md file.
@@ -721,6 +743,9 @@ func (s *knowledgeService) UpdateKnowledge(ctx context.Context, knowledge *types
 		return err
 	}
 	// if need other fields update, please add here
+	if record.Type == types.KnowledgeTypeSource && knowledge.Title != "" && knowledge.Title != record.Title {
+		return rejectGitManagedContent(record)
+	}
 	if knowledge.Title != "" {
 		record.Title = knowledge.Title
 	}
@@ -766,7 +791,7 @@ func (s *knowledgeService) UpdateKnowledge(ctx context.Context, knowledge *types
 		logger.Errorf(ctx, "Failed to update knowledge: %v", err)
 		return err
 	}
-	if metadataChanged && record.SummaryStatus != "" && record.SummaryStatus != types.SummaryStatusNone {
+	if metadataChanged && record.Type != types.KnowledgeTypeSource && record.SummaryStatus != "" && record.SummaryStatus != types.SummaryStatusNone {
 		if err := enqueueSummaryRefresh(ctx, s.repo, s.task, s.kbService, s.tracker(), record); err != nil {
 			logger.Warnf(ctx, "Metadata saved but summary refresh enqueue failed for %s: %v", record.ID, err)
 		} else {

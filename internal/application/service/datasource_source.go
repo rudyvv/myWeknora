@@ -82,6 +82,26 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 	if !kb.IsWikiEnabled() {
 		preview.Warnings = append(preview.Warnings, "Wiki is disabled for this knowledge base")
 	}
+	if s.sourceSnapshots != nil && s.sourceModelService != nil {
+		count, size, javaOnly := 0, int64(0), true
+		for _, file := range files {
+			if file.Status != "included" && file.Status != "excluded" {
+				javaOnly = false
+			}
+			if file.Status == "included" {
+				count++
+				size += file.Size
+				javaOnly = javaOnly && strings.HasSuffix(strings.ToLower(file.Path), ".java")
+			}
+		}
+		pipeline := &preview.Checks[3]
+		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && javaOnly && count > 0 && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
+		pipeline.Message = "initial sync requires explicit paths, 1–100 Java files, at most 16 MiB and the built-in PostgreSQL indexes"
+		preview.CanSync = true
+		for _, check := range preview.Checks {
+			preview.CanSync = preview.CanSync && check.Ready
+		}
+	}
 	return preview, nil
 }
 
