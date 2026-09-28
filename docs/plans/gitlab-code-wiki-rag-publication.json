@@ -1,0 +1,240 @@
+{
+  "repository": "rudyvv/myWeknora",
+  "spec": 8,
+  "published_at": "2026-09-28",
+  "tickets": [
+    {
+      "ticket": "T01",
+      "issue": 9,
+      "url": "https://github.com/rudyvv/myWeknora/issues/9",
+      "title": "GitLab 源码模式配置与固定提交过滤预览",
+      "blocked_by": [],
+      "status": "open"
+    },
+    {
+      "ticket": "T02",
+      "issue": 10,
+      "url": "https://github.com/rudyvv/myWeknora/issues/10",
+      "title": "Java 小范围首次同步、双索引检索与固定版本代码阅读",
+      "blocked_by": [
+        9
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T03",
+      "issue": 11,
+      "url": "https://github.com/rudyvv/myWeknora/issues/11",
+      "title": "多仓库源码查询范围与同次问答快照一致性",
+      "blocked_by": [
+        10
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T04",
+      "issue": 12,
+      "url": "https://github.com/rudyvv/myWeknora/issues/12",
+      "title": "源码增删改、重命名与配置变化的完整版本更新",
+      "blocked_by": [
+        11
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T05",
+      "issue": 13,
+      "url": "https://github.com/rudyvv/myWeknora/issues/13",
+      "title": "Force-push、分支与鉴权异常的源码对账",
+      "blocked_by": [
+        12
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T06",
+      "issue": 14,
+      "url": "https://github.com/rudyvv/myWeknora/issues/14",
+      "title": "手动与定时源码更新的串行、追赶和重启恢复",
+      "blocked_by": [
+        12
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T07",
+      "issue": 15,
+      "url": "https://github.com/rudyvv/myWeknora/issues/15",
+      "title": "JavaScript 与 TypeScript 结构检索和原始位置引用",
+      "blocked_by": [
+        10
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T08",
+      "issue": 16,
+      "url": "https://github.com/rudyvv/myWeknora/issues/16",
+      "title": "Python 结构检索和原始位置引用",
+      "blocked_by": [
+        10
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T09",
+      "issue": 17,
+      "url": "https://github.com/rudyvv/myWeknora/issues/17",
+      "title": "Vue SFC 区域检索与整文件坐标",
+      "blocked_by": [
+        15
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T10",
+      "issue": 18,
+      "url": "https://github.com/rudyvv/myWeknora/issues/18",
+      "title": "Java Mapper 与 MyBatis XML/SQL 关联检索",
+      "blocked_by": [
+        10
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T11",
+      "issue": 19,
+      "url": "https://github.com/rudyvv/myWeknora/issues/19",
+      "title": "前端 API 到 Java 服务及 SQL 的静态业务链",
+      "blocked_by": [
+        17,
+        18
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T12",
+      "issue": 20,
+      "url": "https://github.com/rudyvv/myWeknora/issues/20",
+      "title": "超大源码与模板配置的有界切块和质量展示",
+      "blocked_by": [
+        10,
+        18
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T13",
+      "issue": 21,
+      "url": "https://github.com/rudyvv/myWeknora/issues/21",
+      "title": "代码标识符与路径检索的排序和融合",
+      "blocked_by": [
+        11
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T14",
+      "issue": 22,
+      "url": "https://github.com/rudyvv/myWeknora/issues/22",
+      "title": "单模块技术 WikiPage 的生成、证据校验与范围阅读",
+      "blocked_by": [
+        11
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T15",
+      "issue": 23,
+      "url": "https://github.com/rudyvv/myWeknora/issues/23",
+      "title": "系统、模块及业务流程骨架与首批卡片覆盖",
+      "blocked_by": [
+        22,
+        19
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T16",
+      "issue": 24,
+      "url": "https://github.com/rudyvv/myWeknora/issues/24",
+      "title": "源码变更驱动受影响技术卡片更新",
+      "blocked_by": [
+        12,
+        23
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T17",
+      "issue": 25,
+      "url": "https://github.com/rudyvv/myWeknora/issues/25",
+      "title": "Wiki 累计预算、并发编辑与生成恢复",
+      "blocked_by": [
+        22,
+        14
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T18",
+      "issue": 26,
+      "url": "https://github.com/rudyvv/myWeknora/issues/26",
+      "title": "技术 Wiki 修订证据、回滚与引用回收",
+      "blocked_by": [
+        22,
+        12
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T19",
+      "issue": 27,
+      "url": "https://github.com/rudyvv/myWeknora/issues/27",
+      "title": "暂停、解绑与明确清除仓库知识",
+      "blocked_by": [
+        14,
+        24,
+        26
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T20",
+      "issue": 28,
+      "url": "https://github.com/rudyvv/myWeknora/issues/28",
+      "title": "可选 GitLab Push Webhook 触发与定时对账",
+      "blocked_by": [
+        14
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T21",
+      "issue": 29,
+      "url": "https://github.com/rudyvv/myWeknora/issues/29",
+      "title": "Docker 离线部署、资源额度与运行观测",
+      "blocked_by": [
+        14,
+        20,
+        25,
+        27
+      ],
+      "status": "open"
+    },
+    {
+      "ticket": "T22",
+      "issue": 30,
+      "url": "https://github.com/rudyvv/myWeknora/issues/30",
+      "title": "代表仓库检索、Wiki、增量及性能验收",
+      "blocked_by": [
+        13,
+        16,
+        21,
+        28,
+        29
+      ],
+      "status": "open"
+    }
+  ]
+}

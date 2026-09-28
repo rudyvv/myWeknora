@@ -1,0 +1,21 @@
+# T18：[CodeWiki] 技术 Wiki 修订证据、回滚与引用回收
+
+已发布：[Issue #26](https://github.com/rudyvv/myWeknora/issues/26)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；未实施。
+
+## What to build
+
+用户阅读或回滚旧卡片时得到该正文的旧版本代码；现有版本窗口裁剪后无引用对象回收，而当前或其他引用仍可读。
+
+## Acceptance criteria
+
+- [ ] 修订来源/证据/验证版本与正文一起保存和回滚，再判断当前适用性，不继续使用当前页面的来源指向旧正文。
+- [ ] 沿用自动/旧空来源 50、所有来源硬 200 的页面版本窗口，不解释为天数或无限归档。
+- [ ] 当前快照、页面、保留修订和运行读取分别保护原文；旧证据独立于 Git 缓存/远端可达性并保持当前授权。
+- [ ] 旧索引退出当前检索后不因页面历史无限保留；原文按有效引用去重，候选回收前复核，引用失败保留重试。
+- [ ] 页面/修订裁剪、文件移除、任务结束和 KB 删除释放正确 owner，不误删其他授权引用仍使用的内容。
+- [ ] 历史查看/回滚 UI 与公开来源 API、真实资源引用数据库夹具验证 50/200 边界、并发阅读和共享对象回收。
+
+## Blocked by
+
+- [Issue #22 — 单模块技术 WikiPage 的生成、证据校验与范围阅读](https://github.com/rudyvv/myWeknora/issues/22)
+- [Issue #12 — 源码增删改、重命名与配置变化的完整版本更新](https://github.com/rudyvv/myWeknora/issues/12)
