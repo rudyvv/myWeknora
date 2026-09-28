@@ -37,6 +37,6 @@
 
 ## 执行状态
 
-ready-for-agent 是 triage 标记，只有 blockers 已完成的 ticket 才进入执行 frontier。当前仅 T01 无阻塞，下一步实施 [#9](https://github.com/rudyvv/myWeknora/issues/9)。各项经验证、审查后提交到当前分支 codex/gitlab-code-wiki-rag；尚未完成的 ticket 保持 open。
+ready-for-agent 是 triage 标记，只有 blockers 已完成的 ticket 才进入执行 frontier。T01 [#9](https://github.com/rudyvv/myWeknora/issues/9) 已实现、验证并完成双轴复审，代码已推送到 `codex/gitlab-code-wiki-rag`，Issue 已关闭；[验证记录](gitlab-code-wiki-rag-t01-validation.md)明确全量测试的环境限制。当前 frontier 为 T02 [#10](https://github.com/rudyvv/myWeknora/issues/10)，已开始核验真实解析与数据库运行时。尚未完成的 ticket 保持 open。
 
-发布映射见 [记录](gitlab-code-wiki-rag-publication.json)。本次通过用户恢复的浏览器登录发布并逐项核验；父 Spec 正文未被 tickets 发布改写，全部 Issue 保持 open。
+发布映射见 [记录](gitlab-code-wiki-rag-publication.json)。Spec 和 22 项 tickets 通过用户恢复的浏览器登录发布并逐项核验；父 Spec 正文未被 tickets 发布改写。父 Spec 与 T02–T22 仍保持 open。

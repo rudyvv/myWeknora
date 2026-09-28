@@ -9,7 +9,10 @@
       "url": "https://github.com/rudyvv/myWeknora/issues/9",
       "title": "GitLab 源码模式配置与固定提交过滤预览",
       "blocked_by": [],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-28",
+      "implementation_head": "b13c5d15",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t01-validation.md"
     },
     {
       "ticket": "T02",

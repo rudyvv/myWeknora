@@ -43,4 +43,4 @@
 
 ![源码预览管理界面（夹具数据）](images/gitlab-source-preview-t01.png)
 
-前端类型检查及编辑器 8 项测试通过；源码服务/HTTP 权限、文档入库及普通 Wiki 后处理与修订的针对性回归通过。全量前端测试 584/585 通过，CLI POSIX-shell 测试因 Windows 缺少 `/bin/sh` 失败。全量 Go 测试已执行但未全通过，完整分类和双轴复查限制见 [T01 验证记录](plans/gitlab-code-wiki-rag-t01-validation.md)。源码解析及真实双索引发布属于 T02，此处数据库替身仅验证预检行为。
+前端类型检查及编辑器 10 项测试通过；源码服务/HTTP 权限、文档入库及普通 Wiki 后处理与修订的针对性回归通过。最终全量前端测试 586/587 通过，CLI POSIX-shell 测试因 Windows 缺少 `/bin/sh` 失败。独立规范与 Spec 双轴复审均无剩余问题。全量 Go 测试已执行但未全通过，完整分类见 [T01 验证记录](plans/gitlab-code-wiki-rag-t01-validation.md)。源码解析及真实双索引发布属于 T02，此处数据库替身仅验证预检行为。
