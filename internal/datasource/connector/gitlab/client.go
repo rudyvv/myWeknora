@@ -35,6 +35,7 @@ type project struct {
 	Name              string `json:"name"`
 	WebURL            string `json:"web_url"`
 	DefaultBranch     string `json:"default_branch"`
+	HTTPURLToRepo     string `json:"http_url_to_repo"`
 	Namespace         struct {
 		ID int64 `json:"id"`
 	} `json:"namespace"`

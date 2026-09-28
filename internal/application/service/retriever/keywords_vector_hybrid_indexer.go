@@ -58,6 +58,14 @@ func (v *KeywordsVectorHybridRetrieveEngineService) EngineType() types.Retriever
 	return v.engineType
 }
 
+func (v *KeywordsVectorHybridRetrieveEngineService) CheckSourceIndexes(ctx context.Context) error {
+	preflight, ok := v.indexRepository.(interfaces.SourceIndexPreflight)
+	if !ok {
+		return fmt.Errorf("source index preflight is unavailable")
+	}
+	return preflight.CheckSourceIndexes(ctx)
+}
+
 // Retrieve performs retrieval based on the provided parameters
 func (v *KeywordsVectorHybridRetrieveEngineService) Retrieve(ctx context.Context,
 	params types.RetrieveParams,

@@ -46,6 +46,14 @@ func (c *Connector) Validate(ctx context.Context, ds *types.DataSourceConfig) er
 		return err
 	}
 	if ds != nil {
+		mode, err := datasource.ContentMode(ds)
+		if err != nil {
+			return err
+		}
+		if mode == datasource.ContentModeSource {
+			_, err := c.ResolveSourceRepository(ctx, ds)
+			return err
+		}
 		if _, ok := ds.Settings["projects"]; ok {
 			if _, err := parseConfig(ds); err != nil {
 				return err

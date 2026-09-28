@@ -22,6 +22,12 @@ async function fixture({ configured = true, create = false } = {}) {
   const calls: Array<{ method: string; args: any[] }> = []
   let storedToken = configured ? 'expired-token' : ''
   const api = {
+	async previewSource(id: string, settings: any) {
+      calls.push({ method: 'previewSource', args: [id, JSON.parse(JSON.stringify(settings))] })
+      return { commit_sha: 'abc123', rules_version: 'v1:fixture', can_sync: false,
+        files: [{ path: 'dist/Business.java', status: 'included', reason: 'selected', generated: false, size: 20 }],
+        checks: [{ name: 'parser', ready: false, message: 'Source parser is unavailable' }], warnings: ['Wiki is disabled'] }
+    },
     async validateCredentials(type: string, credentials: Record<string, string>) {
       calls.push({ method: 'validateCredentials', args: [type, { ...credentials }] })
       if (credentials.access_token !== 'rotated-token') throw new Error('gitlab API /user: status 401')
@@ -155,5 +161,39 @@ test('new GitLab data sources continue to test credentials without persistence',
     await f.vm.testConnection()
     assert.equal(f.vm.testResult, 'success')
     assert.deepEqual(f.calls.map(call => call.method), ['validateCredentials'])
+  } finally { f.close() }
+})
+
+test('source mode requires one project and an explicit branch before leaving resource selection', async () => {
+  const f = await fixture()
+  try {
+    f.vm.step = 2
+    f.vm.form.config.settings.content_mode = 'source'
+    await f.vm.nextStep()
+    assert.equal(f.vm.step, 2)
+    f.vm.gitlabProjects[0].ref = 'main'
+    f.vm.gitlabProjects.push({ project_id: '456', ref: 'main', pathsText: '' })
+    await f.vm.nextStep()
+    assert.equal(f.vm.step, 2)
+    f.vm.gitlabProjects.pop()
+    await f.vm.nextStep()
+    assert.equal(f.vm.step, 3)
+    assert.equal(f.calls.length, 0)
+  } finally { f.close() }
+})
+
+test('source preview uses draft rules and stored credentials without saving configuration', async () => {
+  const f = await fixture()
+  try {
+    f.vm.form.config.settings.content_mode = 'source'
+    f.vm.gitlabProjects[0].ref = 'main'
+    f.vm.sourceExcludePaths = 'vendor\nsrc/generated'
+    await f.vm.loadSourcePreview()
+    assert.equal(f.vm.sourcePreview.commit_sha, 'abc123')
+    assert.equal(f.vm.sourcePreview.can_sync, false)
+    assert.equal(f.vm.sourcePreview.files[0].path, 'dist/Business.java')
+    assert.deepEqual(f.calls.map(call => call.method), ['previewSource'])
+    assert.deepEqual(f.calls[0].args, ['source-one', { content_mode: 'source', projects: [{ project_id: '123', ref: 'main', paths: [] }], exclude_paths: ['vendor', 'src/generated'] }])
+    assert.equal(f.storedToken(), 'expired-token')
   } finally { f.close() }
 })

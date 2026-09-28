@@ -56,6 +56,9 @@ type DataSourceService interface {
 	// ManualSync triggers an immediate sync for a data source
 	ManualSync(ctx context.Context, dsID string) (*types.SyncLog, error)
 
+	// PreviewSource reads a fixed GitLab commit using draft rules and saved credentials.
+	PreviewSource(ctx context.Context, dsID string, settings map[string]interface{}) (*types.SourcePreview, error)
+
 	// PauseDataSource pauses a data source's scheduled syncs
 	PauseDataSource(ctx context.Context, id string) error
 

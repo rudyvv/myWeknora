@@ -19,6 +19,11 @@ type RetrieveEngine interface {
 	Support() []types.RetrieverType
 }
 
+// SourceIndexPreflight checks the running backend without creating indexes.
+type SourceIndexPreflight interface {
+	CheckSourceIndexes(context.Context) error
+}
+
 // RetrieveEngineRepository defines the retrieve engine repository interface
 type RetrieveEngineRepository interface {
 	// Save saves the index info

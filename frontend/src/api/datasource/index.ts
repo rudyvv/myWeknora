@@ -143,6 +143,22 @@ export function triggerSync(id: string) {
 	return post(`/api/v1/datasource/${id}/sync`, {})
 }
 
+export interface SourcePreview {
+  project_id: string
+  branch: string
+  commit_sha: string
+  rules_version: string
+  can_sync: boolean
+  files: Array<{ path: string; blob_sha: string; size: number; status: string; reason: string; generated: boolean; encoding?: string }>
+  checks: Array<{ name: string; ready: boolean; message: string }>
+  warnings: string[]
+}
+
+export async function previewSource(id: string, settings: Record<string, unknown>): Promise<SourcePreview> {
+  const response: any = await post(`/api/v1/datasource/${id}/source-preview`, { settings }, { timeout: 150000 })
+  return response.data ?? response
+}
+
 export function pauseDataSource(id: string) {
   return post(`/api/v1/datasource/${id}/pause`, {})
 }

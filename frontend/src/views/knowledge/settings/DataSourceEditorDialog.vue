@@ -13,6 +13,8 @@ import {
   deleteDataSource,
   putDataSourceCredentials,
   deleteDataSourceCredentials,
+  previewSource,
+  type SourcePreview,
   type DataSource,
   type Resource,
 } from '@/api/datasource'
@@ -210,6 +212,24 @@ const isGitLabConnector = (type: string) => type === 'gitlab'
 
 interface GitLabProjectInput { project_id: string; ref: string; pathsText: string }
 const gitlabProjects = ref<GitLabProjectInput[]>([])
+const isSourceMode = computed(() => isGitLabConnector(form.value.type) && form.value.config.settings.content_mode === 'source')
+const gitlabContentMode = computed({
+  get: () => form.value.config.settings.content_mode || 'document',
+  set: (mode: string) => { form.value.config.settings.content_mode = mode },
+})
+const sourceExcludePaths = ref('')
+const sourcePreview = ref<SourcePreview | null>(null)
+const sourcePreviewLoading = ref(false)
+const sourcePreviewError = ref('')
+const sourcePreviewSearch = ref('')
+const sourcePreviewPage = ref(1)
+const sourcePreviewFiles = computed(() => {
+  const search = sourcePreviewSearch.value.toLowerCase()
+  return (sourcePreview.value?.files ?? []).filter(file => file.path.toLowerCase().includes(search))
+})
+const sourcePreviewPageFiles = computed(() => sourcePreviewFiles.value.slice((sourcePreviewPage.value - 1) * 50, sourcePreviewPage.value * 50))
+watch([gitlabProjects, sourceExcludePaths, isSourceMode], () => { sourcePreview.value = null; sourcePreviewError.value = '' }, { deep: true })
+watch(sourcePreviewSearch, () => { sourcePreviewPage.value = 1 })
 function syncGitLabProjectsToSettings() {
   if (!isGitLabConnector(form.value.type)) return
   form.value.config.settings.projects = gitlabProjects.value
@@ -218,9 +238,37 @@ function syncGitLabProjectsToSettings() {
       project_id: project.project_id.trim(), ref: project.ref.trim(),
       paths: project.pathsText.split(/[\n,]/).map(path => path.trim()).filter(Boolean),
     }))
+  if (isSourceMode.value) form.value.config.settings.exclude_paths = sourceExcludePaths.value.split(/[\n,]/).map(path => path.trim()).filter(Boolean)
 }
 function addGitLabProject() { gitlabProjects.value.push({ project_id: '', ref: '', pathsText: '' }) }
 function removeGitLabProject(index: number) { gitlabProjects.value.splice(index, 1); syncGitLabProjectsToSettings() }
+
+async function loadSourcePreview() {
+  if (!isSourceMode.value || gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.project_id.trim() || !gitlabProjects.value[0]?.ref.trim()) {
+    sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
+    return
+  }
+  sourcePreviewLoading.value = true
+  sourcePreviewError.value = ''
+  sourcePreview.value = null
+  try {
+    syncGitLabProjectsToSettings()
+    if (!tempDsId.value) {
+      const response: any = await createDataSource({ ...form.value, config: buildConfigPayload(), knowledge_base_id: props.kbId, status: 'paused' } as any)
+      tempDsId.value = (response.data ?? response).id
+    }
+    const id = tempDsId.value
+    const settings = JSON.parse(JSON.stringify(form.value.config.settings))
+    const result = await previewSource(id, settings)
+    syncGitLabProjectsToSettings()
+    if (tempDsId.value === id && JSON.stringify(form.value.config.settings) === JSON.stringify(settings)) {
+      sourcePreview.value = result
+      sourcePreviewPage.value = 1
+    }
+  } catch (e: any) {
+    sourcePreviewError.value = e?.message || e?.error || t('datasource.gitlab.previewFailed')
+  } finally { sourcePreviewLoading.value = false }
+}
 
 // extractDriveFolderToken accepts either a bare folder_token or a Drive folder
 // URL (https://xxx.feishu.cn/drive/folder/<token> or the Lark equivalent
@@ -685,6 +733,10 @@ watch(visible, async (v) => {
   driveRootLoaded.value = false
   rssAuthHeaders.value = []
   gitlabProjects.value = []
+  sourceExcludePaths.value = ''
+  sourcePreview.value = null
+  sourcePreviewError.value = ''
+  sourcePreviewSearch.value = ''
 
   if (isEdit.value && props.dataSource) {
     // Reset edit/replace toggle every open so an aborted replace doesn't
@@ -703,7 +755,7 @@ watch(visible, async (v) => {
         resource_ids: editConfig.resource_ids || [],
         settings: props.dataSource.type === 'rss'
           ? hydrateRssFeedUrlsFromConfig(editConfig)
-          : (editConfig.settings || {}),
+          : JSON.parse(JSON.stringify(editConfig.settings || {})),
       },
       sync_schedule: props.dataSource.sync_schedule,
       sync_mode: props.dataSource.sync_mode,
@@ -712,6 +764,7 @@ watch(visible, async (v) => {
     }
     selectedResourceIds.value = form.value.config?.resource_ids || []
     if (isGitLabConnector(form.value.type)) {
+      sourceExcludePaths.value = Array.isArray(form.value.config.settings.exclude_paths) ? form.value.config.settings.exclude_paths.join('\n') : ''
       const savedProjects = Array.isArray(form.value.config.settings.projects) ? form.value.config.settings.projects : []
       gitlabProjects.value = savedProjects.map((project: any) => ({
         project_id: String(project.project_id || ''), ref: String(project.ref || ''),
@@ -1025,6 +1078,10 @@ async function nextStep() {
     syncGitLabProjectsToSettings()
     if (!gitlabProjects.value.some(project => project.project_id.trim())) {
       MessagePlugin.warning(t('datasource.gitlab.projectRequired'))
+      return
+    }
+    if (isSourceMode.value && (gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.ref.trim())) {
+      MessagePlugin.warning(t('datasource.gitlab.sourceSelectionRequired'))
       return
     }
   }
@@ -1580,6 +1637,12 @@ const drawerConfirmText = computed(() => {
     <!-- Step 2: Select resources -->
     <section v-if="step === 2" class="setting-drawer__section ds-resource-section">
       <template v-if="isGitLabConnector(form.type)">
+        <label class="form-label">{{ t('datasource.gitlab.contentMode') }}</label>
+        <t-radio-group v-model="gitlabContentMode">
+          <t-radio-button value="document">{{ t('datasource.gitlab.documentMode') }}</t-radio-button>
+          <t-radio-button value="source">{{ t('datasource.gitlab.sourceMode') }}</t-radio-button>
+        </t-radio-group>
+        <p v-if="isSourceMode" class="ds-resource-hint">{{ t('datasource.gitlab.sourceHint') }}</p>
         <h4 class="setting-drawer__section-title">{{ t('datasource.gitlab.projects') }}</h4>
         <p class="ds-resource-hint">{{ t('datasource.gitlab.projectsHint') }}</p>
         <div class="gitlab-project-list">
@@ -1590,12 +1653,32 @@ const drawerConfirmText = computed(() => {
             </div>
             <label class="form-label required">{{ t('datasource.gitlab.projectId') }}</label>
             <t-input v-model="project.project_id" :placeholder="t('datasource.gitlab.projectIdPlaceholder')" />
-            <label class="form-label">{{ t('datasource.gitlab.ref') }}</label>
-            <t-input v-model="project.ref" :placeholder="t('datasource.gitlab.refPlaceholder')" />
+            <label class="form-label" :class="{ required: isSourceMode }">{{ t('datasource.gitlab.ref') }}</label>
+            <t-input v-model="project.ref" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourceBranchPlaceholder' : 'datasource.gitlab.refPlaceholder')" />
             <label class="form-label">{{ t('datasource.gitlab.paths') }}</label>
             <t-textarea v-model="project.pathsText" :placeholder="t('datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
           </div>
-          <t-button variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>
+          <t-button v-if="!isSourceMode || !gitlabProjects.length" variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>
+        </div>
+        <div v-if="isSourceMode" class="source-preview">
+          <label class="form-label">{{ t('datasource.gitlab.excludePaths') }}</label>
+          <t-textarea v-model="sourceExcludePaths" :placeholder="t('datasource.gitlab.excludePathsHint')" :autosize="{ minRows: 2, maxRows: 5 }" />
+          <t-button variant="outline" :loading="sourcePreviewLoading" @click="loadSourcePreview">{{ t('datasource.gitlab.preview') }}</t-button>
+          <p v-if="sourcePreviewError" class="source-preview__error">{{ sourcePreviewError }}</p>
+          <template v-if="sourcePreview">
+            <p>{{ t('datasource.gitlab.fixedCommit') }} <code>{{ sourcePreview.commit_sha }}</code></p>
+            <p>{{ t('datasource.gitlab.rulesVersion') }} <code>{{ sourcePreview.rules_version }}</code></p>
+            <ul><li v-for="check in sourcePreview.checks" :key="check.name">{{ check.ready ? '✓' : '⚠' }} {{ check.message }}</li></ul>
+            <p v-for="warning in sourcePreview.warnings" :key="warning">⚠ {{ warning }}</p>
+            <t-input v-model="sourcePreviewSearch" :placeholder="t('datasource.gitlab.searchPaths')" clearable />
+            <div class="source-preview__files">
+              <div v-for="file in sourcePreviewPageFiles" :key="file.path" class="source-preview__file">
+                <code>{{ file.path }}</code><span>{{ file.size }} B · {{ file.status }}{{ file.generated ? ' · ' + t('datasource.gitlab.generated') : '' }}</span>
+                <small>{{ file.reason }}</small>
+              </div>
+            </div>
+            <t-pagination v-model="sourcePreviewPage" :total="sourcePreviewFiles.length" :page-size="50" :show-page-size="false" />
+          </template>
         </div>
       </template>
       <template v-else>
@@ -2706,6 +2789,22 @@ const drawerConfirmText = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.source-preview {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+}
+.source-preview__error { color: var(--td-error-color); }
+.source-preview__files { max-height: 360px; overflow: auto; }
+.source-preview__file {
+  display: grid;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--td-component-stroke);
+  span, small { color: var(--td-text-color-secondary); }
 }
 </style>
 

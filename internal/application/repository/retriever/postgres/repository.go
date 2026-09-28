@@ -37,6 +37,21 @@ func (r *pgRepository) Support() []types.RetrieverType {
 	return []types.RetrieverType{types.KeywordsRetrieverType, types.VectorRetrieverType}
 }
 
+// CheckSourceIndexes verifies both extensions on this engine's actual database.
+func (r *pgRepository) CheckSourceIndexes(ctx context.Context) error {
+	var extensions struct {
+		Vector bool
+		BM25   bool
+	}
+	if err := r.db.WithContext(ctx).Raw("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS vector, EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_search') AS bm25").Scan(&extensions).Error; err != nil {
+		return err
+	}
+	if !extensions.Vector || !extensions.BM25 {
+		return fmt.Errorf("source indexes require vector and pg_search extensions")
+	}
+	return nil
+}
+
 // calculateIndexStorageSize calculates storage size for a single index entry
 func (g *pgRepository) calculateIndexStorageSize(embeddingDB *pgVector) int64 {
 	// 1. Text content size

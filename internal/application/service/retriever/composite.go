@@ -100,6 +100,34 @@ func (c *CompositeRetrieveEngine) SupportRetriever(r types.RetrieverType) bool {
 	return false
 }
 
+// SupportsEngine requires the requested retrievers on the same resolved engine.
+func (c *CompositeRetrieveEngine) SupportsEngine(engine types.RetrieverEngineType, retrievers ...types.RetrieverType) bool {
+	for _, info := range c.engineInfos {
+		if info == nil || info.retrieveEngine.EngineType() != engine {
+			continue
+		}
+		if slices.ContainsFunc(retrievers, func(r types.RetrieverType) bool { return !slices.Contains(info.retrieverType, r) }) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (c *CompositeRetrieveEngine) CheckSourceIndexes(ctx context.Context) error {
+	for _, info := range c.engineInfos {
+		if info == nil || info.retrieveEngine.EngineType() != types.PostgresRetrieverEngineType {
+			continue
+		}
+		preflight, ok := info.retrieveEngine.(interfaces.SourceIndexPreflight)
+		if !ok {
+			return fmt.Errorf("source index preflight is unavailable")
+		}
+		return preflight.CheckSourceIndexes(ctx)
+	}
+	return fmt.Errorf("PostgreSQL source indexes are unavailable")
+}
+
 // BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
 func (c *CompositeRetrieveEngine) BatchUpdateChunkEnabledStatus(
 	ctx context.Context,

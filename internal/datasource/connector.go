@@ -137,6 +137,12 @@ type DataSourceBindingValidator interface {
 	ValidateDataSourceBinding(context.Context, *types.DataSourceConfig, *types.DataSource) error
 }
 
+// SourceRepositoryResolver resolves only the configured project and branch.
+// Source bytes are subsequently read from a controlled Git object database.
+type SourceRepositoryResolver interface {
+	ResolveSourceRepository(context.Context, *types.DataSourceConfig) (*types.SourceRepository, error)
+}
+
 // FullSyncWithCursor is optional. The batch sync path uses it for ForceFull and
 // sync_mode=full so a connector can re-fetch every document while still
 // reconciling deletions against the previous cursor. Connectors that omit it

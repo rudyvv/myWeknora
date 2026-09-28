@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/access"
+	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -35,6 +36,8 @@ type DataSourceService struct {
 	tenantRepo        interfaces.TenantRepository
 	tagService        interfaces.KnowledgeTagService
 	audit             interfaces.AuditLogService
+	sourceRetrieve    interfaces.RetrieveEngineRegistry
+	sourceOwnership   retriever.TenantStoreOwnership
 }
 
 // NewDataSourceService creates a new data source service
@@ -49,6 +52,8 @@ func NewDataSourceService(
 	tenantRepo interfaces.TenantRepository,
 	tagService interfaces.KnowledgeTagService,
 	audit interfaces.AuditLogService,
+	sourceRetrieve interfaces.RetrieveEngineRegistry,
+	sourceOwnership retriever.TenantStoreOwnership,
 ) interfaces.DataSourceService {
 	return &DataSourceService{
 		dsRepo:            dsRepo,
@@ -61,6 +66,8 @@ func NewDataSourceService(
 		tenantRepo:        tenantRepo,
 		tagService:        tagService,
 		audit:             audit,
+		sourceRetrieve:    sourceRetrieve,
+		sourceOwnership:   sourceOwnership,
 	}
 }
 
@@ -215,6 +222,18 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 		configActuallyChanged = !reflect.DeepEqual(*mergedCfg, *existingParsedCfg)
 	}
 	hasCreds := mergedCfg != nil && mergedCfg.HasConfiguredCredentials(ds.Type)
+	if len(ds.Config) > 0 {
+		config, err := ds.ParseConfig()
+		if err != nil {
+			return nil, datasource.ErrInvalidConfig
+		}
+		if err := datasource.ValidateContentMode(ds.Type, config); err != nil {
+			return nil, err
+		}
+		if err := saveSourceRulesVersion(ds, config); err != nil {
+			return nil, err
+		}
+	}
 	if hasCreds && (ds.Type != existing.Type || configActuallyChanged) {
 		if err := s.validateDataSourceConfig(ctx, ds); err != nil {
 			return nil, err
@@ -482,6 +501,17 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 	if err != nil {
 		return nil, err
 	}
+	config, err := ds.ParseConfig()
+	if err != nil {
+		return nil, datasource.ErrInvalidConfig
+	}
+	mode, err := datasource.ContentMode(config)
+	if err != nil {
+		return nil, err
+	}
+	if mode == datasource.ContentModeSource {
+		return nil, datasource.ErrSourcePipelineUnavailable
+	}
 
 	if ds.Status != types.DataSourceStatusActive &&
 		ds.Status != types.DataSourceStatusError &&
@@ -696,6 +726,15 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 				types.SyncLogStatusFailed, "Data source binding is invalid", wasPaused)
 			return err
 		}
+	}
+	mode, modeErr := datasource.ContentMode(config)
+	if modeErr != nil || mode == datasource.ContentModeSource {
+		if modeErr == nil {
+			modeErr = datasource.ErrSourcePipelineUnavailable
+		}
+		s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
+			types.SyncLogStatusFailed, modeErr.Error(), wasPaused)
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, modeErr)
 	}
 	// Surface the KB's multimodal/VLM state to the connector so it only extracts
 	// embedded images for OCR when the KB can actually ingest them (never persisted).
@@ -1377,6 +1416,12 @@ func (s *DataSourceService) validateDataSourceConfig(ctx context.Context, ds *ty
 	config, err := ds.ParseConfig()
 	if err != nil {
 		return datasource.ErrInvalidConfig
+	}
+	if err := datasource.ValidateContentMode(ds.Type, config); err != nil {
+		return err
+	}
+	if err := saveSourceRulesVersion(ds, config); err != nil {
+		return err
 	}
 
 	if err := connector.Validate(ctx, config); err != nil {
