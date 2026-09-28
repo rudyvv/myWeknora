@@ -48,11 +48,13 @@
   },
   "devDependencies": {
     "@tsconfig/node22": "^22.0.5",
+    "@types/jsdom": "21.1.7",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-vue": "6.0.6",
     "@vitejs/plugin-vue-jsx": "5.1.5",
     "@vue/tsconfig": "^0.9.1",
     "@xmldom/xmldom": "0.9.12",
+    "jsdom": "26.1.0",
     "less": "^4.6.4",
     "less-loader": "^12.3.2",
     "npm-run-all2": "^8.0.4",

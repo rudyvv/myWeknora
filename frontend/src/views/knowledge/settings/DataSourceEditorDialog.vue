@@ -228,7 +228,7 @@ const sourcePreviewFiles = computed(() => {
   return (sourcePreview.value?.files ?? []).filter(file => file.path.toLowerCase().includes(search))
 })
 const sourcePreviewPageFiles = computed(() => sourcePreviewFiles.value.slice((sourcePreviewPage.value - 1) * 50, sourcePreviewPage.value * 50))
-watch([gitlabProjects, sourceExcludePaths, isSourceMode], () => { sourcePreview.value = null; sourcePreviewError.value = '' }, { deep: true })
+watch([gitlabProjects, sourceExcludePaths, isSourceMode, () => form.value.config.credentials], () => { sourcePreview.value = null; sourcePreviewError.value = '' }, { deep: true })
 watch(sourcePreviewSearch, () => { sourcePreviewPage.value = 1 })
 function syncGitLabProjectsToSettings() {
   if (!isGitLabConnector(form.value.type)) return
@@ -256,6 +256,8 @@ async function loadSourcePreview() {
     if (!tempDsId.value) {
       const response: any = await createDataSource({ ...form.value, config: buildConfigPayload(), knowledge_base_id: props.kbId, status: 'paused' } as any)
       tempDsId.value = (response.data ?? response).id
+    } else if (!isEdit.value && !(await commitCredentialsIfNeeded(tempDsId.value))) {
+      return
     }
     const id = tempDsId.value
     const settings = JSON.parse(JSON.stringify(form.value.config.settings))
@@ -1118,17 +1120,16 @@ function prevStep() {
 function buildConfigPayload(): Record<string, unknown> {
   syncGitLabProjectsToSettings()
   return {
-    credentials: isEdit.value ? {} : { ...form.value.config.credentials },
+    credentials: isEdit.value || tempDsId.value ? {} : { ...form.value.config.credentials },
     resource_ids: form.value.config.resource_ids,
     settings: form.value.config.settings,
   }
 }
 
-// In edit mode, when the user opted in to Replace credentials and typed at
-// least one value, commit it to /credentials before the main PUT. Aborts
-// the whole submit on failure so we don't leave the row partially saved.
+// A newly created preview draft also needs the latest credentials before its
+// next preview or final PUT. Main PUT preserves credentials on the server.
 async function commitCredentialsIfNeeded(dsId: string): Promise<boolean> {
-  if (!isEdit.value || !replaceCredentialsMode.value) return true
+  if (isEdit.value && !replaceCredentialsMode.value) return true
   syncRssAuthHeadersToCredentials()
   const filled = Object.entries(form.value.config.credentials).filter(
     ([, v]) => typeof v === 'string' ? v !== '' : v != null,
@@ -1137,9 +1138,11 @@ async function commitCredentialsIfNeeded(dsId: string): Promise<boolean> {
   try {
     await putDataSourceCredentials(dsId, Object.fromEntries(filled))
     credentialsConfigured.value = true
-    replaceCredentialsMode.value = false
-    form.value.config.credentials = {}
-    rssAuthHeaders.value = []
+    if (isEdit.value) {
+      replaceCredentialsMode.value = false
+      form.value.config.credentials = {}
+      rssAuthHeaders.value = []
+    }
     return true
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('credential.saveFailed'))
