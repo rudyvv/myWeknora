@@ -331,7 +331,11 @@ func (s *chunkService) DeleteChunks(ctx context.Context, ids []string) error {
 // Returns:
 //   - error: Any error encountered during bulk deletion
 func (s *chunkService) DeleteChunksByKnowledgeID(ctx context.Context, knowledgeID string) error {
-	if _, err := loadKnowledgeWriteBatch(ctx, s.knowledgeRepo, s.kbRepository, []string{knowledgeID}); err != nil {
+	knowledge, _, err := loadKnowledgeWrite(ctx, s.knowledgeRepo, s.kbRepository, knowledgeID)
+	if err != nil {
+		return err
+	}
+	if err := rejectGitManagedContent(knowledge); err != nil {
 		return err
 	}
 	logger.Info(ctx, "Start deleting all chunks by knowledge ID")
@@ -340,7 +344,7 @@ func (s *chunkService) DeleteChunksByKnowledgeID(ctx context.Context, knowledgeI
 	tenantID := types.MustTenantIDFromContext(ctx)
 	logger.Infof(ctx, "Tenant ID: %d", tenantID)
 
-	err := s.chunkRepository.DeleteChunksByKnowledgeID(ctx, tenantID, knowledgeID)
+	err = s.chunkRepository.DeleteChunksByKnowledgeID(ctx, tenantID, knowledgeID)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"knowledge_id": knowledgeID,
@@ -354,8 +358,14 @@ func (s *chunkService) DeleteChunksByKnowledgeID(ctx context.Context, knowledgeI
 }
 
 func (s *chunkService) DeleteByKnowledgeList(ctx context.Context, ids []string) error {
-	if _, err := loadKnowledgeWriteBatch(ctx, s.knowledgeRepo, s.kbRepository, ids); err != nil {
+	knowledges, err := loadKnowledgeWriteBatch(ctx, s.knowledgeRepo, s.kbRepository, ids)
+	if err != nil {
 		return err
+	}
+	for _, knowledge := range knowledges {
+		if err := rejectGitManagedContent(knowledge); err != nil {
+			return err
+		}
 	}
 	logger.Info(ctx, "Start deleting all chunks by knowledge IDs")
 	logger.Infof(ctx, "Knowledge IDs: %v", ids)
@@ -363,7 +373,7 @@ func (s *chunkService) DeleteByKnowledgeList(ctx context.Context, ids []string) 
 	tenantID := types.MustTenantIDFromContext(ctx)
 	logger.Infof(ctx, "Tenant ID: %d", tenantID)
 
-	err := s.chunkRepository.DeleteByKnowledgeList(ctx, tenantID, ids)
+	err = s.chunkRepository.DeleteByKnowledgeList(ctx, tenantID, ids)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"knowledge_id": ids,

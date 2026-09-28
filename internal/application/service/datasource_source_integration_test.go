@@ -99,6 +99,17 @@ func TestSourcePublishedChunksRemainReadOnlyButDescriptionMayChange(t *testing.T
 	_, err = f.knowledge.MoveKnowledgeToFolder(f.ctx, f.kb.ID, []string{stored.KnowledgeID}, "manual")
 	require.ErrorContains(t, err, "Git-managed")
 	require.ErrorContains(t, f.knowledge.RequestKnowledgeSummaryRefresh(f.ctx, stored.KnowledgeID), "Git-managed")
+	for _, operation := range []struct {
+		name string
+		run  func() error
+	}{
+		{"regenerate questions", func() error { _, err := f.knowledge.RegenerateChunkQuestions(f.ctx, stored.ID); return err }},
+		{"generate first summary", func() error { _, err := f.knowledge.RegenerateKnowledgeSummary(f.ctx, stored.KnowledgeID); return err }},
+		{"delete all file chunks", func() error { return f.chunks.DeleteChunksByKnowledgeID(f.ctx, stored.KnowledgeID) }},
+		{"delete chunks by file list", func() error { return f.chunks.DeleteByKnowledgeList(f.ctx, []string{stored.KnowledgeID}) }},
+	} {
+		t.Run(operation.name, func(t *testing.T) { require.ErrorContains(t, operation.run(), "Git-managed") })
+	}
 	require.NoError(t, f.knowledge.UpdateKnowledge(f.ctx, &types.Knowledge{ID: stored.KnowledgeID, Description: "排班服务说明", DescriptionSpecified: true}))
 	unchanged, err := f.chunks.GetChunkByID(f.ctx, stored.ID)
 	require.NoError(t, err)
@@ -132,6 +143,20 @@ func TestSourcePublishedFileDownloadPreservesOriginalBytes(t *testing.T) {
 	require.Equal(t, "src/Service.java", view.Path)
 	require.NotEmpty(t, view.FileVersionID)
 	require.NotEmpty(t, view.Symbols)
+	// Optional UI demonstration artifacts come only from public read results.
+	if directory := os.Getenv("SOURCE_TEST_DEMO_DIR"); directory != "" {
+		finished, readErr := f.service.GetSyncLog(f.ctx, log.ID)
+		require.NoError(t, readErr)
+		var progress types.SyncResult
+		require.NoError(t, json.Unmarshal(finished.Result, &progress))
+		require.NoError(t, os.MkdirAll(directory, 0755))
+		fileJSON, encodeErr := json.Marshal(map[string]any{"data": view})
+		require.NoError(t, encodeErr)
+		require.NoError(t, os.WriteFile(filepath.Join(directory, "source-file.json"), fileJSON, 0600))
+		runJSON, encodeErr := json.Marshal(progress.Source)
+		require.NoError(t, encodeErr)
+		require.NoError(t, os.WriteFile(filepath.Join(directory, "source-run.json"), runJSON, 0600))
+	}
 	pinned, err := f.knowledge.GetSourceFile(f.ctx, hits[0].KnowledgeID, view.FileVersionID)
 	require.NoError(t, err)
 	require.Equal(t, view.CommitSHA, pinned.CommitSHA)
@@ -174,6 +199,18 @@ func TestSourceSearchHonorsFileTenantAndTagScopes(t *testing.T) {
 	tag := &types.KnowledgeTag{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: f.kb.ID, Name: "排班"}
 	require.NoError(t, f.db.Create(tag).Error)
 	require.NoError(t, f.knowledge.SetKnowledgeTags(f.ctx, fileID, []string{tag.ID}))
+	for _, keywordsOnly := range []bool{true, false} {
+		for _, tagID := range []string{tag.ID, uuid.NewString()} {
+			params := types.SearchParams{QueryText: "getPushSchedule", MatchCount: 10, TagIDs: []string{tagID}, DisableVectorMatch: keywordsOnly, DisableKeywordsMatch: !keywordsOnly}
+			hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, params)
+			require.NoError(t, err)
+			if tagID == tag.ID {
+				require.NotEmpty(t, hits, "both index routes must honor document tags")
+			} else {
+				require.Empty(t, hits)
+			}
+		}
+	}
 	for _, tagID := range []string{tag.ID, uuid.NewString()} {
 		grep := agenttools.NewSourceAwareGrepChunksTool(f.db, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID, TenantID: 1, TagIDs: []string{tagID}}})
 		result, err := grep.Execute(f.ctx, json.RawMessage(`{"query":"getPushSchedule"}`))
@@ -183,6 +220,12 @@ func TestSourceSearchHonorsFileTenantAndTagScopes(t *testing.T) {
 		} else {
 			require.Equal(t, 0, result.Data["result_count"])
 		}
+	}
+	require.NoError(t, f.knowledge.SetKnowledgeTags(f.ctx, fileID, nil))
+	for _, keywordsOnly := range []bool{true, false} {
+		hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "getPushSchedule", MatchCount: 10, TagIDs: []string{tag.ID}, DisableVectorMatch: keywordsOnly, DisableKeywordsMatch: !keywordsOnly})
+		require.NoError(t, err)
+		require.Empty(t, hits, "removing a file tag must affect both indexes without rebuilding the snapshot")
 	}
 }
 

@@ -23,6 +23,19 @@ type pgRepository struct {
 	sourceVisibility bool
 }
 
+// Source tags belong to stable files and can change without rebuilding their
+// immutable indexes. Both retrieval routes apply this relation before LIMIT;
+// existing FAQ/index tag filtering remains available. marks contains only SQL
+// placeholders produced by the repository, never request text.
+func sourceTagFilterSQL(marks string) string {
+	return `(embeddings.tag_id IN (` + marks + `) OR EXISTS (
+		SELECT 1 FROM source_files sf
+		JOIN knowledge_tag_relations ktr ON ktr.knowledge_id=sf.id
+		JOIN knowledge_tags kt ON kt.id=ktr.tag_id AND kt.tenant_id=sf.tenant_id AND kt.knowledge_base_id=sf.knowledge_base_id
+		WHERE sf.id=embeddings.knowledge_id AND sf.knowledge_base_id=embeddings.knowledge_base_id
+		AND ktr.tag_id IN (` + marks + `)))`
+}
+
 // NewPostgresRetrieveEngineRepository creates a new PostgreSQL retriever repository
 func NewPostgresRetrieveEngineRepository(db *gorm.DB) interfaces.RetrieveEngineRepository {
 	logger.GetLogger(context.Background()).Info("[Postgres] Initializing PostgreSQL retriever engine repository")
@@ -214,10 +227,13 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	// Filter by tag IDs if specified
 	if len(params.TagIDs) > 0 {
 		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by tag IDs: %v", params.TagIDs)
-		conds = append(conds, clause.IN{
-			Column: "tag_id",
-			Values: common.ToInterfaceSlice(params.TagIDs),
-		})
+		values := common.ToInterfaceSlice(params.TagIDs)
+		if g.sourceVisibility {
+			marks := strings.TrimSuffix(strings.Repeat("?,", len(values)), ",")
+			conds = append(conds, clause.Expr{SQL: sourceTagFilterSQL(marks), Vars: append(append([]interface{}{}, values...), values...)})
+		} else {
+			conds = append(conds, clause.IN{Column: "tag_id", Values: values})
+		}
 	}
 
 	// Use ParadeDB's ||| operator for matching any token
@@ -355,8 +371,12 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 			placeholders[i] = fmt.Sprintf("$%d", paramStart+i)
 			allVars = append(allVars, params.TagIDs[i])
 		}
-		whereParts = append(whereParts, fmt.Sprintf("tag_id IN (%s)",
-			strings.Join(placeholders, ", ")))
+		marks := strings.Join(placeholders, ", ")
+		if g.sourceVisibility {
+			whereParts = append(whereParts, sourceTagFilterSQL(marks))
+		} else {
+			whereParts = append(whereParts, fmt.Sprintf("tag_id IN (%s)", marks))
+		}
 	}
 
 	// is_enabled filter

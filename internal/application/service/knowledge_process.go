@@ -2222,6 +2222,9 @@ func (s *knowledgeService) RegenerateChunkQuestions(
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectGitManagedContent(knowledge); err != nil {
+		return nil, err
+	}
 	if knowledge.KnowledgeBaseID != chunk.KnowledgeBaseID || chunk.TenantID != knowledge.TenantID {
 		return nil, werrors.NewForbiddenError("chunk does not belong to its knowledge document")
 	}
@@ -2297,6 +2300,9 @@ func (s *knowledgeService) RegenerateKnowledgeSummary(
 	tenantID := types.MustTenantIDFromContext(ctx)
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectGitManagedContent(knowledge); err != nil {
 		return nil, err
 	}
 	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
