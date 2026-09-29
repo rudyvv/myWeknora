@@ -9,8 +9,11 @@ const page = ref(0)
 const fileID = ref('')
 const versionID = ref('')
 const pageSize = 50
-const labels: Record<string, string> = { fetching: '正在获取固定提交', parsing: '正在解析源码', indexing: '正在建立双索引', ready: '准备发布', published: '已发布', failed: '发布失败' }
+const labels: Record<string, string> = { fetching: '正在获取固定提交', parsing: '正在解析源码', indexing: '正在建立双索引', ready: '准备发布', published: '已发布', failed: '发布失败（已保留当前发布）' }
+const detectedSHA = computed(() => props.result.snapshot.detected_commit_sha || props.result.snapshot.commit_sha)
+const targetSHA = computed(() => props.result.snapshot.target_commit_sha || props.result.snapshot.commit_sha)
 const publishedSHA = computed(() => props.result.snapshot.state === "published" ? props.result.snapshot.commit_sha : props.result.snapshot.previous_commit_sha)
+const lastSuccessfulAt = computed(() => props.result.snapshot.last_successful_published_at || props.result.snapshot.published_at || props.result.snapshot.previous_published_at)
 const filtered = computed(() => props.result.members.filter(member => member.path.toLowerCase().includes(filter.value.toLowerCase())))
 const members = computed(() => filtered.value.slice(page.value * pageSize, (page.value + 1) * pageSize))
 </script>
@@ -18,8 +21,10 @@ const members = computed(() => filtered.value.slice(page.value * pageSize, (page
 <template>
   <section class="source-run" aria-label="源码同步详情">
     <strong role="status">{{ labels[result.snapshot.state] || result.snapshot.state }}</strong>
-    <p class="commit">检测 HEAD / 处理目标：{{ result.snapshot.commit_sha || '正在解析分支' }}</p>
-    <p class="commit">已发布 SHA：{{ publishedSHA || '尚未发布' }}</p>
+    <p class="commit">检测 HEAD：{{ detectedSHA || '未能检测（请检查分支或凭据）' }}</p>
+    <p class="commit">处理目标：{{ targetSHA || '未建立目标（本次未开始扫描）' }}</p>
+    <p class="commit">当前发布 SHA：{{ publishedSHA || '尚未发布' }}</p>
+    <p class="commit">最后成功发布：{{ lastSuccessfulAt || '尚无成功发布' }}</p>
     <p>{{ result.snapshot.manifest_complete ? '成员清单完整' : '正在扫描成员清单' }} · {{ result.snapshot.member_count }} 个成员</p>
     <p>纳入文件 {{ result.snapshot.file_count }} · 源码块 {{ result.snapshot.chunk_count }}</p>
     <p>新增 {{ result.snapshot.added_count ?? 0 }} · 变更 {{ result.snapshot.changed_count ?? 0 }} · 删除/排除 {{ result.snapshot.deleted_count ?? 0 }} · 重命名 {{ result.snapshot.renamed_count ?? 0 }}</p>

@@ -408,28 +408,32 @@ func TestSourceStagingChunksCannotBeReadWhileEmbeddingIsPending(t *testing.T) {
 }
 
 type javaSourceFixture struct {
-	ctx              context.Context
-	db               *gorm.DB
-	service          *DataSourceService
-	kbs              interfacesKnowledgeBaseService
-	ds               *types.DataSource
-	kb               *types.KnowledgeBase
-	sha              string
-	chunks           interfaces.ChunkService
-	knowledge        interfaces.KnowledgeService
-	embedStarted     chan struct{}
-	embedRelease     chan struct{}
-	embedVector      []float32
-	embeddingForText func(string) []float32
-	embedCount       atomic.Int64
-	parseCount       atomic.Int64
-	parseStarted     chan struct{}
-	parseRelease     chan struct{}
-	advanceFiles     func(map[string][]byte) string
-	modelService     interfaces.ModelService
-	advanceJava      func(string) string
-	shares           interfaces.KBShareService
-	agentShares      interfaces.AgentShareService
+	ctx                     context.Context
+	db                      *gorm.DB
+	service                 *DataSourceService
+	kbs                     interfacesKnowledgeBaseService
+	ds                      *types.DataSource
+	kb                      *types.KnowledgeBase
+	sha                     string
+	chunks                  interfaces.ChunkService
+	knowledge               interfaces.KnowledgeService
+	embedStarted            chan struct{}
+	embedRelease            chan struct{}
+	embedVector             []float32
+	embeddingForText        func(string) []float32
+	embedCount              atomic.Int64
+	parseCount              atomic.Int64
+	parseStarted            chan struct{}
+	parseRelease            chan struct{}
+	advanceFiles            func(map[string][]byte) string
+	forcePush               func() string
+	gitlabBranchMissing     bool
+	gitlabTokenInvalid      bool
+	gitTransportUnavailable bool
+	modelService            interfaces.ModelService
+	advanceJava             func(string) string
+	shares                  interfaces.KBShareService
+	agentShares             interfaces.AgentShareService
 }
 
 // A local alias keeps the fixture's public boundary explicit.
@@ -627,18 +631,40 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	f.advanceJava = func(content string) string {
 		return f.advanceFiles(map[string][]byte{"src/Service.java": []byte(content)})
 	}
+	f.forcePush = func() string {
+		git("checkout", "--orphan", "force-push")
+		require.NoError(t, os.RemoveAll(filepath.Join(repoDir, "src")))
+		require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "src"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "ForcePushed.java"), []byte("class ForcePushed { int forcePushToken() { return 2; } }\n"), 0644))
+		git("add", ".")
+		git("commit", "-m", "Force-pushed unrelated history")
+		sha = git("rev-parse", "HEAD")
+		return sha
+	}
 	var gitlabServer *httptest.Server
 	gitlabServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v4/user":
 			fmt.Fprint(w, `{"id":1}`)
 		case "/api/v4/personal_access_tokens/self":
+			if f.gitlabTokenInvalid {
+				http.Error(w, "invalid token", http.StatusUnauthorized)
+				return
+			}
 			fmt.Fprint(w, `{"active":true,"scopes":["read_api","read_repository"]}`)
 		case "/api/v4/projects/123":
 			fmt.Fprintf(w, `{"id":123,"http_url_to_repo":%q}`, gitlabServer.URL+"/repo.git")
 		case "/api/v4/projects/123/repository/branches/main":
+			if f.gitlabBranchMissing {
+				http.Error(w, "branch not found", http.StatusNotFound)
+				return
+			}
 			fmt.Fprintf(w, `{"name":"main","commit":{"id":%q}}`, sha)
 		case "/repo.git/info/refs", "/repo.git/git-upload-pack":
+			if f.gitTransportUnavailable {
+				http.Error(w, "repository unavailable", http.StatusBadGateway)
+				return
+			}
 			args := []string{"upload-pack", "--stateless-rpc"}
 			if r.Method == http.MethodGet {
 				w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")

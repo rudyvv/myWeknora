@@ -68,37 +68,46 @@ type SourceFileVersion struct {
 }
 
 type SourceSnapshot struct {
-	ID                 string     `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID           uint64     `json:"tenant_id"`
-	KnowledgeBaseID    string     `json:"knowledge_base_id" gorm:"type:varchar(36)"`
-	DataSourceID       string     `json:"data_source_id" gorm:"type:varchar(36);index"`
-	SyncLogID          string     `json:"sync_log_id" gorm:"type:varchar(36);uniqueIndex"`
-	ProjectID          string     `json:"project_id"`
-	CommitSHA          string     `json:"commit_sha"`
-	RepositoryURL      string     `json:"repository_url"`
-	RulesVersion       string     `json:"rules_version"`
-	ProcessingVersion  string     `json:"processing_version"`
-	EmbeddingVersion   string     `json:"embedding_version"`
-	PreviousSnapshotID string     `json:"previous_snapshot_id"`
-	PreviousCommitSHA  string     `json:"previous_commit_sha"`
-	AddedCount         int        `json:"added_count"`
-	ChangedCount       int        `json:"changed_count"`
-	DeletedCount       int        `json:"deleted_count"`
-	RenamedCount       int        `json:"renamed_count"`
-	ParsedCount        int        `json:"parsed_count"`
-	ReusedFileCount    int        `json:"reused_file_count"`
-	ReusedChunkCount   int        `json:"reused_chunk_count"`
-	EmbeddedChunkCount int        `json:"embedded_chunk_count"`
-	ReusedVectorCount  int        `json:"reused_vector_count"`
-	State              string     `json:"state"`
-	ManifestComplete   bool       `json:"manifest_complete"`
-	ManifestDigest     string     `json:"manifest_digest"`
-	MemberCount        int        `json:"member_count"`
-	FileCount          int        `json:"file_count"`
-	ChunkCount         int        `json:"chunk_count"`
-	Error              string     `json:"error,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	PublishedAt        *time.Time `json:"published_at,omitempty"`
+	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID        uint64 `json:"tenant_id"`
+	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36)"`
+	DataSourceID    string `json:"data_source_id" gorm:"type:varchar(36);index"`
+	SyncLogID       string `json:"sync_log_id" gorm:"type:varchar(36);uniqueIndex"`
+	ProjectID       string `json:"project_id"`
+	CommitSHA       string `json:"commit_sha"`
+	// DetectedCommitSHA and TargetCommitSHA are run-local status fields. They
+	// deliberately do not become part of the immutable snapshot row: a source
+	// failure may happen before a candidate snapshot is created, but its log
+	// still needs to tell the operator which HEAD was observed (when available)
+	// and which commit was being processed.
+	DetectedCommitSHA         string     `json:"detected_commit_sha,omitempty" gorm:"-"`
+	TargetCommitSHA           string     `json:"target_commit_sha,omitempty" gorm:"-"`
+	RepositoryURL             string     `json:"repository_url"`
+	RulesVersion              string     `json:"rules_version"`
+	ProcessingVersion         string     `json:"processing_version"`
+	EmbeddingVersion          string     `json:"embedding_version"`
+	PreviousSnapshotID        string     `json:"previous_snapshot_id"`
+	PreviousCommitSHA         string     `json:"previous_commit_sha"`
+	AddedCount                int        `json:"added_count"`
+	ChangedCount              int        `json:"changed_count"`
+	DeletedCount              int        `json:"deleted_count"`
+	RenamedCount              int        `json:"renamed_count"`
+	ParsedCount               int        `json:"parsed_count"`
+	ReusedFileCount           int        `json:"reused_file_count"`
+	ReusedChunkCount          int        `json:"reused_chunk_count"`
+	EmbeddedChunkCount        int        `json:"embedded_chunk_count"`
+	ReusedVectorCount         int        `json:"reused_vector_count"`
+	State                     string     `json:"state"`
+	ManifestComplete          bool       `json:"manifest_complete"`
+	ManifestDigest            string     `json:"manifest_digest"`
+	MemberCount               int        `json:"member_count"`
+	FileCount                 int        `json:"file_count"`
+	ChunkCount                int        `json:"chunk_count"`
+	Error                     string     `json:"error,omitempty"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	PublishedAt               *time.Time `json:"published_at,omitempty"`
+	LastSuccessfulPublishedAt *time.Time `json:"last_successful_published_at,omitempty" gorm:"-"`
+	PreviousPublishedAt       *time.Time `json:"previous_published_at,omitempty" gorm:"-"`
 }
 
 type SourceSnapshotMember struct {

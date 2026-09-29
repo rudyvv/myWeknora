@@ -65,6 +65,20 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			s.updateSyncRunResult(context.WithoutCancel(ctx), ds, log, result, data, types.SyncLogStatusFailed, snapshot.Error, wasPaused)
 		}
 	}()
+	// Read the current publication before resolving the remote branch. Branch,
+	// token and Git transport failures can happen before a candidate snapshot is
+	// created; the failed run must still identify the version that remains
+	// readable and its last successful publication time.
+	previous, err := s.sourceSnapshots.GetPublished(ctx, ds.TenantID, ds.ID)
+	if err != nil {
+		return err
+	}
+	if previous != nil && previous.Snapshot != nil {
+		snapshot.PreviousSnapshotID = previous.Snapshot.ID
+		snapshot.PreviousCommitSHA = previous.Snapshot.CommitSHA
+		snapshot.PreviousPublishedAt = previous.Snapshot.PublishedAt
+		snapshot.LastSuccessfulPublishedAt = previous.Snapshot.PublishedAt
+	}
 	if err := s.checkSourceSyncReady(ctx, kb, config); err != nil {
 		return err
 	}
@@ -81,6 +95,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		return err
 	}
 	snapshot.ProjectID, snapshot.CommitSHA, snapshot.RulesVersion = repository.ProjectID, repository.CommitSHA, version
+	snapshot.DetectedCommitSHA, snapshot.TargetCommitSHA = repository.CommitSHA, repository.CommitSHA
 	snapshot.RepositoryURL = strings.TrimSuffix(repository.CloneURL, ".git")
 	progress := func(state string) error {
 		snapshot.State = state
@@ -96,14 +111,6 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			return s.sourceSnapshots.UpdateProgress(ctx, snapshot, result.Source.Members)
 		}
 		return nil
-	}
-	previous, err := s.sourceSnapshots.GetPublished(ctx, ds.TenantID, ds.ID)
-	if err != nil {
-		return err
-	}
-	if previous != nil {
-		snapshot.PreviousSnapshotID = previous.Snapshot.ID
-		snapshot.PreviousCommitSHA = previous.Snapshot.CommitSHA
 	}
 	if err := progress("fetching"); err != nil {
 		return err
@@ -224,6 +231,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err := s.sourceSnapshots.Publish(ctx, snapshot, ds, kb, dimension); err != nil {
 		return err
 	}
+	snapshot.LastSuccessfulPublishedAt = snapshot.PublishedAt
 	result.Total = snapshot.FileCount
 	result.Created = snapshot.AddedCount
 	result.Updated = snapshot.ChangedCount + snapshot.RenamedCount

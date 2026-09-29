@@ -44,7 +44,7 @@ test('run details expose complete manifest and permit code reading only after pu
     assert.ok(host.textContent?.includes('实际解析 1'))
     assert.ok(host.textContent?.includes('复用文件 3'))
     assert.ok(host.textContent?.includes('复用向量 6'))
-    assert.ok(host.textContent?.includes('已发布 SHA：' + 'b'.repeat(40)))
+    assert.ok(host.textContent?.includes('当前发布 SHA：' + 'b'.repeat(40)))
     assert.ok(host.textContent?.includes('README.md'))
     assert.equal(Array.from(host.querySelectorAll('button')).find(b => b.textContent?.includes('src/Service.java')), undefined)
     result.snapshot.state = 'published'
@@ -56,5 +56,35 @@ test('run details expose complete manifest and permit code reading only after pu
     for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
     assert.ok(host.textContent?.includes('class Service {}'))
     assert.ok(host.textContent?.includes('原文只读'))
+  } finally { app.unmount(); host.remove() }
+})
+
+test('failed source runs explain that the last complete publication remains active', async () => {
+  const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
+  const { descriptor } = parse(readFileSync(componentPath, 'utf8'), { filename: componentPath })
+  const compiled = ts.transpileModule(compileScript(descriptor, { id: componentPath, inlineTemplate: true }).content,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const module = { exports: {} as any }
+  new Function('require', 'module', 'exports', compiled)((name: string) => {
+    if (name.endsWith('.vue')) return { __esModule: true, default: {} }
+    return require(name)
+  }, module, module.exports)
+  const component = module.exports.default
+  const host = document.createElement('div')
+  document.body.append(host)
+  const result = reactive({ snapshot: {
+    id: 'failed-run', state: 'failed', commit_sha: '', detected_commit_sha: '', target_commit_sha: '',
+    project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: false,
+    member_count: 0, file_count: 0, chunk_count: 0, previous_commit_sha: 'b'.repeat(40),
+    previous_published_at: '2026-09-29T01:02:03Z', error: 'GitLab branch is unavailable'
+  }, members: [] })
+  const app = createApp({ render: () => h(component, { result }) })
+  app.mount(host)
+  try {
+    await nextTick()
+    assert.ok(host.textContent?.includes('发布失败（已保留当前发布）'))
+    assert.ok(host.textContent?.includes('当前发布 SHA：' + 'b'.repeat(40)))
+    assert.ok(host.textContent?.includes('最后成功发布：2026-09-29T01:02:03Z'))
+    assert.ok(host.textContent?.includes('GitLab branch is unavailable'))
   } finally { app.unmount(); host.remove() }
 })

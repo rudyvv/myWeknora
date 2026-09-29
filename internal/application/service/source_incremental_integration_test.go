@@ -164,6 +164,64 @@ func TestSourceIncrementalCompleteManifestKeepsUniqueRenameAndAccountsForOtherCh
 	require.True(t, keep.ParseReused)
 }
 
+func TestSourceForcePushReconcilesAgainstTheCompleteManifest(t *testing.T) {
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"src/BeforeForcePush.java": []byte("class BeforeForcePush { int oldForcePushToken() { return 1; } }\n"),
+	})
+	syncSourceFixture(t, f)
+	old := latestIncrementalRun(t, f)
+	newSHA := f.forcePush()
+	syncSourceFixture(t, f)
+	current := latestIncrementalRun(t, f)
+
+	require.NotEqual(t, old.Snapshot.CommitSHA, newSHA)
+	require.Equal(t, newSHA, current.Snapshot.CommitSHA)
+	require.Equal(t, "published", current.Snapshot.State)
+	require.Equal(t, 2, current.Snapshot.DeletedCount, "the unrelated history must still account for both old source files")
+	require.NotEmpty(t, sourceMember(t, current, "src/ForcePushed.java"))
+	for _, query := range []string{"getPushSchedule", "oldForcePushToken"} {
+		hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: query, QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10})
+		require.NoError(t, err)
+		require.Empty(t, hits, "old manifest content must not remain searchable after force-push publication")
+	}
+	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "forcePushToken", QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, newSHA, hits[0].Metadata["commit_sha"])
+}
+
+func TestSourceRemoteFailuresKeepPublishedVersionAndExposeLastSuccess(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	old := latestIncrementalRun(t, f)
+
+	for _, failure := range []struct {
+		name string
+		set  func(bool)
+	}{
+		{name: "branch missing", set: func(value bool) { f.gitlabBranchMissing = value }},
+		{name: "token invalid", set: func(value bool) { f.gitlabTokenInvalid = value }},
+		{name: "git fetch unavailable", set: func(value bool) { f.gitTransportUnavailable = value }},
+	} {
+		t.Run(failure.name, func(t *testing.T) {
+			failure.set(true)
+			log, done := startIncrementalRun(t, f)
+			err := <-done
+			require.Error(t, err)
+			failed, getErr := f.service.GetSyncLog(f.ctx, log.ID)
+			require.NoError(t, getErr)
+			require.Equal(t, types.SyncLogStatusFailed, failed.Status)
+			var result types.SyncResult
+			require.NoError(t, json.Unmarshal(failed.Result, &result))
+			require.NotNil(t, result.Source)
+			require.Equal(t, old.Snapshot.CommitSHA, result.Source.Snapshot.PreviousCommitSHA)
+			require.NotNil(t, result.Source.Snapshot.LastSuccessfulPublishedAt)
+			assertIncrementalOldPublication(t, f, sourceMember(t, old, "src/Service.java").SourceFileID, old.Snapshot.CommitSHA)
+			failure.set(false)
+		})
+	}
+}
+
 func TestSourceAmbiguousContentRenameIsExplicitDeleteAndAdd(t *testing.T) {
 	raw := []byte("class Same { int sameToken() { return 1; } }\n")
 	f := newJavaSourceFixture(t, map[string][]byte{"src/First.java": raw, "src/Second.java": raw})
