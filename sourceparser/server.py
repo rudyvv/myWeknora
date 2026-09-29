@@ -10,7 +10,7 @@ import os
 from pathlib import PurePosixPath
 import threading
 
-from runtime import load_runtime, parse_java
+from runtime import load_runtime, parse_source, runtime_version
 
 MAX_FILE_BYTES = 16 << 20
 MAX_REQUEST_BYTES = 23 << 20
@@ -18,10 +18,10 @@ SLOTS = threading.BoundedSemaphore(2)
 PROCESS_CONTEXT = multiprocessing.get_context('spawn')
 
 
-def parse_child(connection, cache, raw, maximum):
+def parse_child(connection, cache, raw, maximum, language, path):
     try:
-        parser_version = load_runtime(cache)
-        connection.send((True, parse_java(raw, maximum, parser_version)))
+        versions = load_runtime(cache)
+        connection.send((True, parse_source(raw, maximum, runtime_version(versions), language, path)))
     except Exception:
         # Exceptions may include source text; do not put them in RPC errors/logs.
         connection.send((False, {'error': 'source parsing failed'}))
@@ -51,7 +51,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.respond(200 if self.server.parser_version else 503, {
             'ready': bool(self.server.parser_version), 'parser_version': self.server.parser_version,
-            'languages': ['java'] if self.server.parser_version else [],
+            'languages': sorted(self.server.versions),
         })
 
     def do_POST(self):
@@ -59,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, {'error': 'not found'})
             return
         if not self.server.parser_version:
-            self.respond(503, {'error': 'offline Java grammar unavailable'})
+            self.respond(503, {'error': 'offline source grammar unavailable'})
             return
         try:
             length = int(self.headers.get('Content-Length', '0'))
@@ -74,7 +74,10 @@ class Handler(BaseHTTPRequestHandler):
             path = body['path']
             if not isinstance(path, str) or not path or len(path.encode()) > 4096 or path.startswith('/') or any(c in path for c in '\\:\x00\r\n') or '..' in PurePosixPath(path).parts:
                 raise ValueError()
-            if body['language'] != 'java' or not path.lower().endswith('.java'):
+            language = body['language']
+            extensions = {'java': ('.java',), 'javascript': ('.js', '.jsx', '.mjs', '.cjs'),
+                          'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',)}
+            if language not in self.server.versions or not path.lower().endswith(extensions[language]):
                 raise ValueError()
             raw = base64.b64decode(body['content_base64'], validate=True)
             if len(raw) > MAX_FILE_BYTES or hashlib.sha256(raw).hexdigest() != body['sha256']:
@@ -92,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(429, {'error': 'parser capacity reached'})
             return
         parent, child = PROCESS_CONTEXT.Pipe(duplex=False)
-        process = PROCESS_CONTEXT.Process(target=parse_child, args=(child, self.server.cache, raw, maximum))
+        process = PROCESS_CONTEXT.Process(target=parse_child, args=(child, self.server.cache, raw, maximum, language, path))
         try:
             process.start()
             child.close()
@@ -120,11 +123,12 @@ def main():
     args = parser.parse_args()
     cache = os.environ.get('SOURCE_PARSER_CACHE', '/opt/source-parser/grammar')
     try:
-        parser_version = load_runtime(cache)
+        versions = load_runtime(cache)
     except Exception:
-        parser_version = ''
+        versions = {}
+    parser_version = runtime_version(versions)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.cache, server.parser_version = cache, parser_version
+    server.cache, server.parser_version, server.versions = cache, parser_version, versions
     print(json.dumps({'port': server.server_port}), flush=True)
     server.serve_forever()
 

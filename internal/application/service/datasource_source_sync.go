@@ -31,10 +31,10 @@ func (s *DataSourceService) checkSourceSyncReady(ctx context.Context, kb *types.
 		return err
 	}
 	if len(rules.Projects[0].Paths) == 0 {
-		return fmt.Errorf("initial Java source sync requires explicitly selected paths")
+		return fmt.Errorf("initial source sync requires explicitly selected paths")
 	}
 	if !s.sourceIndexesReady(ctx, kb) || !sourceParserReady(ctx) {
-		return fmt.Errorf("source indexes or Java parser are not ready")
+		return fmt.Errorf("source indexes or parser are not ready")
 	}
 	return s.sourceSnapshots.CheckReady(ctx)
 }
@@ -115,14 +115,22 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	}
 	snapshot.ProcessingVersion = source.ArtifactKey(source.ProcessingVersion, parserVersion)
 	content := map[string][]byte{}
+	checkedLanguages := map[string]bool{}
 	var totalBytes int
 	manifest, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, raw []byte) error {
-		if !strings.HasSuffix(strings.ToLower(file.Path), ".java") {
-			return fmt.Errorf("initial source sync supports selected Java files only; narrow the included paths")
+		language := source.LanguageForPath(file.Path)
+		if language == "" {
+			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript files only; narrow the included paths")
+		}
+		if !checkedLanguages[language] {
+			if !sourceParserReady(ctx, language) {
+				return fmt.Errorf("selected source language grammar is not ready")
+			}
+			checkedLanguages[language] = true
 		}
 		totalBytes += len(raw)
 		if len(content) >= 100 || totalBytes > 16<<20 {
-			return fmt.Errorf("initial source sync is limited to 100 Java files and 16 MiB; narrow the included paths")
+			return fmt.Errorf("initial source sync is limited to 100 supported source files and 16 MiB; narrow the included paths")
 		}
 		content[file.Path] = raw
 		return nil
@@ -131,7 +139,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		return err
 	}
 	if len(content) == 0 && previous == nil {
-		return fmt.Errorf("initial source sync requires at least one selected Java file")
+		return fmt.Errorf("initial source sync requires at least one selected supported source file")
 	}
 	snapshot.ManifestComplete = true
 	snapshot.MemberCount = len(manifest)
@@ -170,7 +178,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			return err
 		}
 		if parsed == nil {
-			parsed, err = source.ParseJava(ctx, os.Getenv("SOURCE_PARSER_URL"), member.Path, raw)
+			parsed, err = source.ParseFile(ctx, os.Getenv("SOURCE_PARSER_URL"), member.Path, raw)
 			if err == nil && parsed.ParserVersion != parserVersion {
 				return fmt.Errorf("source parser version changed during processing")
 			}
