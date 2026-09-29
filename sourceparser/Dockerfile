@@ -4,7 +4,7 @@ WORKDIR /opt/source-parser
 COPY requirements.lock ./
 RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements.lock
 FROM dependencies AS build
-COPY runtime.py prefetch.py ./
+COPY runtime.py mybatis_parser.py prefetch.py ./
 RUN /opt/venv/bin/python prefetch.py --cache /opt/source-parser/grammar
 
 FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e

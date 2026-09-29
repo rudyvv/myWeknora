@@ -7,11 +7,11 @@ import (
 )
 
 const (
-	maxModelSourceAnalysisJSONBytes = 12 << 10
+	maxModelSourceAnalysisJSONBytes = 56 << 10 // Fixed cap; fitting also accounts for XML escaping.
 	maxModelSourceAnalysisBytes     = 64 << 10
 	maxModelSourceFacts             = 30
 	maxModelSourceDiagnostics       = 20
-	maxModelSourceRelations         = 20
+	maxModelSourceRelations         = 100 // Keep one complete repository relation page.
 	maxModelSourceTextRunes         = 160
 	maxModelSourceMessageRunes      = 400
 	maxModelSourceSnippetRunes      = 240
@@ -26,13 +26,10 @@ func appendModelSourceAnalysis(output string, raw interface{}) string {
 	if len(analysis) == 0 {
 		return output
 	}
-	var encoded bytes.Buffer
-	encoder := json.NewEncoder(&encoded)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(analysis); err != nil {
+	payload, err := encodeModelSourceAnalysis(analysis)
+	if err != nil {
 		return output
 	}
-	payload := strings.TrimSuffix(encoded.String(), "\n")
 	section := "  <source_analysis>" + escapeText(payload) + "</source_analysis>\n"
 	if len(section) > maxModelSourceAnalysisBytes {
 		return output
@@ -58,8 +55,8 @@ func modelSourceAnalysis(raw interface{}) map[string]interface{} {
 
 	facts, factTruncated := boundedModelRows(input["facts"], maxModelSourceFacts, modelFactFields, maxModelSourceTextRunes)
 	diagnostics, diagnosticTruncated := boundedModelDiagnostics(input["diagnostics"])
-	relations, relationTruncated := boundedModelRelations(input["relations"])
-	truncated = truncated || factTruncated || diagnosticTruncated || relationTruncated
+	relations, relationTruncated, relationContentTruncated := boundedModelRelations(input["relations"])
+	truncated = truncated || factTruncated || diagnosticTruncated || relationContentTruncated
 	output["facts"], output["diagnostics"], output["relations"] = facts, diagnostics, relations
 	output["facts_truncated"] = boolValue(input, "facts_truncated") || factTruncated
 	output["diagnostics_truncated"] = boolValue(input, "diagnostics_truncated") || diagnosticTruncated
@@ -71,27 +68,28 @@ func modelSourceAnalysis(raw interface{}) map[string]interface{} {
 		output["relations_truncated"] = true
 	}
 
-	for {
-		encoded, err := json.Marshal(output)
-		if err != nil || len(encoded) <= maxModelSourceAnalysisJSONBytes {
+	for compactStage := 0; ; {
+		if modelSourceAnalysisFits(output) {
 			break
 		}
 		truncated = true
 		switch {
-		case len(relations) > 0:
-			relations = relations[:len(relations)-1]
-			output["relations"] = relations
-			output["relations_truncated"] = true
-		case len(diagnostics) > 0:
-			diagnostics = diagnostics[:len(diagnostics)-1]
-			output["diagnostics"] = diagnostics
-			output["diagnostics_truncated"] = true
 		case len(facts) > 0:
 			facts = facts[:len(facts)-1]
 			output["facts"] = facts
 			output["facts_truncated"] = true
+		case len(diagnostics) > 0:
+			diagnostics = diagnostics[:len(diagnostics)-1]
+			output["diagnostics"] = diagnostics
+			output["diagnostics_truncated"] = true
+		case compactStage <= 5:
+			compactModelRelations(relations, compactStage)
+			compactStage++
+			output["relations"] = relations
 		default:
-			return nil
+			// Keep the repository page and its opaque cursor together even if a
+			// future schema change exceeds the budget; never silently drop edges.
+			return output
 		}
 	}
 	if truncated {
@@ -169,12 +167,13 @@ func boundedModelDiagnostics(raw interface{}) ([]map[string]interface{}, bool) {
 	return result, truncated
 }
 
-func boundedModelRelations(raw interface{}) ([]map[string]interface{}, bool) {
+func boundedModelRelations(raw interface{}) ([]map[string]interface{}, bool, bool) {
 	rows := mapsValue(raw)
-	truncated := len(rows) > maxModelSourceRelations
-	if truncated {
+	rowsTruncated := len(rows) > maxModelSourceRelations
+	if rowsTruncated {
 		rows = rows[:maxModelSourceRelations]
 	}
+	contentTruncated := false
 	result := make([]map[string]interface{}, 0, len(rows))
 	fields := []string{"id", "kind", "from_file_id", "to_file_id", "from_path", "from_key", "to_path", "to_key",
 		"determinacy", "quality", "resolution_reason"}
@@ -182,7 +181,7 @@ func boundedModelRelations(raw interface{}) ([]map[string]interface{}, bool) {
 		item := make(map[string]interface{})
 		for _, key := range fields {
 			if value, ok := row[key].(string); ok {
-				item[key], truncated = boundedModelString(value, maxModelSourceTextRunes, truncated)
+				item[key], contentTruncated = boundedModelString(value, maxModelSourceTextRunes, contentTruncated)
 			}
 		}
 		for _, key := range []string{"from_range", "to_range"} {
@@ -194,14 +193,14 @@ func boundedModelRelations(raw interface{}) ([]map[string]interface{}, bool) {
 			target := make(map[string]interface{})
 			for _, key := range []string{"knowledge_id", "snapshot_id", "file_version_id", "sha256", "path"} {
 				if value, ok := evidence[key].(string); ok {
-					target[key], truncated = boundedModelString(value, maxModelSourceTextRunes, truncated)
+					target[key], contentTruncated = boundedModelString(value, maxModelSourceTextRunes, contentTruncated)
 				}
 			}
 			if span := modelSourceRange(evidence["range"]); span != nil {
 				target["range"] = span
 			}
 			if snippet, ok := evidence["snippet"].(string); ok {
-				target["snippet"], truncated = boundedModelString(snippet, maxModelSourceSnippetRunes, truncated)
+				target["snippet"], contentTruncated = boundedModelString(snippet, maxModelSourceSnippetRunes, contentTruncated)
 			}
 			if value, ok := evidence["snippet_truncated"].(bool); ok {
 				target["snippet_truncated"] = value
@@ -210,7 +209,99 @@ func boundedModelRelations(raw interface{}) ([]map[string]interface{}, bool) {
 		}
 		result = append(result, item)
 	}
-	return result, truncated
+	return result, rowsTruncated, contentTruncated
+}
+
+func compactModelRelations(relations []map[string]interface{}, stage int) {
+	for _, relation := range relations {
+		switch stage {
+		case 0:
+			if evidence := objectValue(relation["target_evidence"]); evidence != nil {
+				if snippet, ok := evidence["snippet"].(string); ok {
+					if bounded, shortened := truncateModelString(snippet, 48); shortened {
+						evidence["snippet"] = bounded
+						evidence["snippet_truncated"] = true
+						relation["target_evidence"] = evidence
+					}
+				}
+			}
+		case 1:
+			if evidence := objectValue(relation["target_evidence"]); evidence != nil {
+				if _, ok := evidence["snippet"]; ok {
+					delete(evidence, "snippet")
+					evidence["snippet_truncated"] = true
+					relation["target_evidence"] = evidence
+				}
+			}
+		case 2:
+			for _, key := range []string{"from_path", "from_key", "to_path", "to_key", "resolution_reason"} {
+				compactModelStringField(relation, key, 64)
+			}
+			if evidence := objectValue(relation["target_evidence"]); evidence != nil {
+				compactModelStringField(evidence, "path", 64)
+				relation["target_evidence"] = evidence
+			}
+		case 3:
+			removeModelRelationFields(relation, "from_path", "to_path", "from_range", "to_range", "resolution_reason")
+			if evidence := objectValue(relation["target_evidence"]); evidence != nil {
+				removeModelRelationFields(evidence, "path", "range", "snippet", "snippet_truncated")
+				relation["target_evidence"] = evidence
+			}
+			for _, key := range []string{"from_key", "to_key"} {
+				compactModelStringField(relation, key, 48)
+			}
+		case 4:
+			removeModelRelationFields(relation, "target_evidence", "from_path", "to_path", "from_range", "to_range", "resolution_reason")
+			for _, key := range []string{"from_key", "to_key"} {
+				compactModelStringField(relation, key, 32)
+			}
+		case 5:
+			removeModelRelationFields(relation, "from_key", "to_key", "quality")
+			for _, key := range []string{"id", "kind", "from_file_id", "to_file_id", "determinacy"} {
+				limit := 64
+				if key == "kind" || key == "determinacy" {
+					limit = 32
+				}
+				compactModelStringField(relation, key, limit)
+			}
+		}
+	}
+}
+
+func compactModelStringField(values map[string]interface{}, key string, limit int) {
+	value, ok := values[key].(string)
+	if !ok {
+		return
+	}
+	bounded, shortened := truncateModelString(value, limit)
+	if shortened {
+		values[key] = bounded
+	}
+}
+
+func removeModelRelationFields(values map[string]interface{}, keys ...string) {
+	for _, key := range keys {
+		delete(values, key)
+	}
+}
+
+func encodeModelSourceAnalysis(analysis map[string]interface{}) (string, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(analysis); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(encoded.String(), "\n"), nil
+}
+
+func modelSourceAnalysisFits(analysis map[string]interface{}) bool {
+	payload, err := encodeModelSourceAnalysis(analysis)
+	if err != nil || len(payload) > maxModelSourceAnalysisJSONBytes {
+		return false
+	}
+	section := "  <source_analysis>" + escapeText(payload) + "</source_analysis>\n"
+	return len(section) <= maxModelSourceAnalysisBytes
 }
 
 func modelSourceRange(raw interface{}) map[string]interface{} {

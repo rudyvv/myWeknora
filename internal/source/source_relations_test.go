@@ -208,6 +208,93 @@ func TestCorrelateResolvesOwnedMyBatisReferencesAndRejectsAmbiguousDynamicOrCycl
 	}
 }
 
+func TestStatementResultMapReferencesRequireUniqueSourceAndOwner(t *testing.T) {
+	statement := func(reference string, start int) types.ParsedSourceFact {
+		fact := relationFact("mybatis_statement", "find", "demo.M", start, start+10)
+		fact.ResultMapRefs = []string{reference}
+		return fact
+	}
+	resultMap := relationFact("mybatis_result_map", "Base", "demo.Common", 40, 60)
+	common := SourceRelationMember{Path: "Common.xml", FileID: "common-file", VersionID: "common-version", Facts: []types.ParsedSourceFact{
+		relationFact("mybatis_mapper", "", "demo.Common", 0, 80), resultMap,
+	}}
+	findResultMap := func(members []SourceRelationMember) *types.SourceCodeRelation {
+		for _, relation := range CorrelateSourceFacts(1, "source", "snapshot", members) {
+			if relation.Kind == "result_map" {
+				return &relation
+			}
+		}
+		return nil
+	}
+	assertUnresolved := func(t *testing.T, name string, relation *types.SourceCodeRelation) {
+		t.Helper()
+		if relation == nil || relation.Determinacy != "uncertain" || relation.ToFileID != "" || relation.ToVersionID != "" || relation.ToPath != "" || relation.ToKey != "" || relation.ResolutionReason == "" {
+			t.Fatalf("%s resultMap reference became readable evidence: %#v", name, relation)
+		}
+	}
+
+	t.Run("duplicate statement owner", func(t *testing.T) {
+		source := SourceRelationMember{Path: "M.xml", FileID: "source-file", VersionID: "source-version", Facts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", "demo.M", 0, 100), statement("demo.Common.Base", 10), statement("demo.Common.Base", 21),
+		}}
+		var found int
+		for _, relation := range CorrelateSourceFacts(1, "source", "snapshot", []SourceRelationMember{source, common}) {
+			if relation.Kind == "result_map" {
+				found++
+				assertUnresolved(t, "duplicate owner", &relation)
+			}
+		}
+		if found != 2 {
+			t.Fatalf("expected both duplicate owner references to remain visible, got %d", found)
+		}
+	})
+
+	t.Run("duplicate source namespace", func(t *testing.T) {
+		first := SourceRelationMember{Path: "one.xml", FileID: "source-one", VersionID: "version-one", Facts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", "demo.M", 0, 100), statement("demo.Common.Base", 10),
+		}}
+		second := SourceRelationMember{Path: "two.xml", FileID: "source-two", VersionID: "version-two", Facts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", "demo.M", 0, 100),
+		}}
+		assertUnresolved(t, "duplicate namespace", findResultMap([]SourceRelationMember{first, second, common}))
+	})
+
+	t.Run("unique cross-namespace target", func(t *testing.T) {
+		source := SourceRelationMember{Path: "M.xml", FileID: "source-file", VersionID: "source-version", Facts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", "demo.M", 0, 100), statement("demo.Common.Base", 10),
+		}}
+		relation := findResultMap([]SourceRelationMember{source, common})
+		if relation == nil || relation.Determinacy != "certain" || relation.ToFileID != "common-file" || relation.ToVersionID != "common-version" || relation.ToPath != "Common.xml" {
+			t.Fatalf("unique cross-namespace resultMap was not bound: %#v", relation)
+		}
+	})
+
+	for _, test := range []struct {
+		name        string
+		reference   string
+		targetFacts []types.ParsedSourceFact
+	}{
+		{name: "missing target", reference: "demo.Common.Missing", targetFacts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", "demo.Common", 0, 80),
+		}},
+		{name: "dynamic target", reference: "demo.Common.${map}", targetFacts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", "demo.Common", 0, 80), resultMap,
+		}},
+		{name: "duplicate target", reference: "demo.Common.Base", targetFacts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", "demo.Common", 0, 80), resultMap,
+			relationFact("mybatis_result_map", "Base", "demo.Common", 61, 79),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := SourceRelationMember{Path: "M.xml", FileID: "source-file", VersionID: "source-version", Facts: []types.ParsedSourceFact{
+				relationFact("mybatis_mapper", "", "demo.M", 0, 100), statement(test.reference, 10),
+			}}
+			commonMember := SourceRelationMember{Path: "Common.xml", FileID: "common-file", VersionID: "common-version", Facts: test.targetFacts}
+			assertUnresolved(t, test.name, findResultMap([]SourceRelationMember{source, commonMember}))
+		})
+	}
+}
+
 func TestCorrelateDoesNotCertifyReferencesWithMissingOwnersOrDuplicateNamespaces(t *testing.T) {
 	missingOwner := relationFact("mybatis_include", "inner", "demo.M", 20, 28)
 	missingOwner.OwnerKind, missingOwner.TargetNamespace, missingOwner.TargetName = "mybatis_sql_fragment", "demo.M", "inner"

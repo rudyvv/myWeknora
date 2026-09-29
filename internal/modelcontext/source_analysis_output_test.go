@@ -44,6 +44,8 @@ func TestModelSourceAnalysisIsBoundedAndPreservesContinuationCursor(t *testing.T
 	require.LessOrEqual(t, len(encoded), maxModelSourceAnalysisJSONBytes)
 	require.Equal(t, cursor, analysis["relations_next_cursor"])
 	require.Equal(t, true, analysis["model_output_truncated"])
+	require.Len(t, analysis["relations"], len(relations))
+	require.Equal(t, false, analysis["relations_truncated"], "shortened relation context is not a missing relation page")
 
 	output := appendModelSourceAnalysis(`<retrieval></retrieval>`, map[string]interface{}{
 		"path": "src/Mapper.xml", "relations_next_cursor": cursor,

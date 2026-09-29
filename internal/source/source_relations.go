@@ -27,7 +27,6 @@ type factOwner struct {
 type mapperDocument struct {
 	member     SourceRelationMember
 	namespace  string
-	statements []types.ParsedSourceFact
 	resultMaps []types.ParsedSourceFact
 	sql        []types.ParsedSourceFact
 }
@@ -84,9 +83,19 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 			}
 			switch fact.Kind {
 			case "mybatis_statement":
-				doc.statements = append(doc.statements, fact)
 				key := relationLookupKey(doc.namespace, fact.Name)
 				statementsByKey[key] = append(statementsByKey[key], factOwner{member, fact})
+				for _, reference := range fact.ResultMapRefs {
+					targetNS, targetName := referenceTarget(doc.namespace, reference)
+					referenceFact := fact
+					referenceFact.Kind = "mybatis_result_map_reference"
+					referenceFact.Name = reference
+					referenceFact.TargetNamespace, referenceFact.TargetName = targetNS, targetName
+					referenceFact.OwnerKind, referenceFact.OwnerName = "mybatis_statement", fact.Name
+					referenceFact.ReferenceKind = "statement"
+					referenceFact.Dynamic = strings.Contains(reference, "${")
+					references = append(references, factOwner{member, referenceFact})
+				}
 			case "mybatis_result_map":
 				doc.resultMaps = append(doc.resultMaps, fact)
 				key := relationLookupKey(doc.namespace, fact.Name)
@@ -114,20 +123,6 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 		candidates := statementsByKey[relationLookupKey(fact.Namespace, fact.Name)]
 		relations = append(relations, resolveFactRelation(tenant, sourceID, snapshotID, "mapper_statement", owner, key, candidates,
 			len(documents[fact.Namespace]), "mapper statement"))
-	}
-
-	for _, docList := range documents {
-		for _, doc := range docList {
-			for _, statement := range doc.statements {
-				for _, ref := range statement.ResultMapRefs {
-					ns, name := referenceTarget(doc.namespace, ref)
-					targets := resultMapsByKey[relationLookupKey(ns, name)]
-					from := factOwner{doc.member, statement}
-					relations = append(relations, resolveFactRelation(tenant, sourceID, snapshotID, "result_map", from,
-						doc.namespace+"."+statement.Name, targets, len(documents[ns]), "resultMap"))
-				}
-			}
-		}
 	}
 
 	resolvedReferences := make([]sourceReference, 0, len(references))
@@ -168,7 +163,10 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 		} else {
 			resolution.relationKind, resolution.label = "result_map", "resultMap"
 			resolution.targets = resultMapsByKey[relationLookupKey(targetNS, targetName)]
-			if fact.OwnerKind == "mybatis_result_map" {
+			switch fact.OwnerKind {
+			case "mybatis_statement":
+				resolution.ownerCount = len(statementsByKey[relationLookupKey(fact.Namespace, fact.OwnerName)])
+			case "mybatis_result_map":
 				resolution.ownerCount = len(resultMapsByKey[relationLookupKey(fact.Namespace, fact.OwnerName)])
 			}
 			if fact.OwnerKind == "mybatis_result_map" && fact.OwnerName != "" {
