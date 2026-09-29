@@ -20,6 +20,10 @@ BUNDLES = {
 }
 
 
+class SFCAttributeLimitError(Exception):
+    """A bounded, source-free rejection for oversized SFC block attributes."""
+
+
 def load_sfc_runtime():
     """Advertise Vue only when the locked Node executable and parser are usable."""
     root = Path(__file__).resolve().parent / 'sfc'
@@ -178,11 +182,13 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         result = subprocess.run(
             [node_runtime['node'], str(Path(node_runtime['root']) / 'parse_sfc.cjs')],
             cwd=node_runtime['root'], input=request, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=4, check=False, text=True,
+            stderr=subprocess.DEVNULL, check=False, text=True,
             encoding='utf-8', env=environment)
         response = json.loads(result.stdout) if result.stdout else {}
     except (OSError, ValueError, subprocess.SubprocessError):
         raise RuntimeError('SFC parser unavailable') from None
+    if result.returncode != 0 and response.get('error') == 'sfc_attribute_limit':
+        raise SFCAttributeLimitError('sfc_attribute_limit') from None
     if result.returncode != 0 or response.get('sha256') != digest or response.get('source_bytes') != len(raw):
         raise RuntimeError('SFC parser rejected source')
     newlines = [index for index, byte in enumerate(raw) if byte == 10]
@@ -217,7 +223,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             chunks.extend(_split_raw(raw, cursor, start, max_bytes, span, 'structural', None))
         block_type, language = block['type'], block.get('lang', '').lower()
         kind = block_type if block_type in ('template', 'script', 'style') else 'custom'
-        script_language = {'': 'javascript', 'js': 'javascript', 'javascript': 'javascript',
+        script_language = {'': 'javascript', 'js': 'javascript', 'javascript': 'javascript', 'jsx': 'javascript',
                            'ts': 'typescript', 'typescript': 'typescript', 'tsx': 'tsx'}.get(language)
         body = raw[start:end]
         block_quality = 'structural'

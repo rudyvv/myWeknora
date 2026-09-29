@@ -44,6 +44,18 @@ test('an external script is returned as a literal reference and never loaded', (
   assert.equal(parsed.blocks[0].start_utf16, parsed.blocks[0].end_utf16)
 })
 
+test('block language and external source limits reject without losing authored values', () => {
+  const maxLanguage = 'x'.repeat(64)
+  assert.equal(parseSFC(request(`<script lang="${maxLanguage}"></script>`)).blocks[0].lang, maxLanguage)
+  assert.throws(() => parseSFC(request(`<script lang="${maxLanguage}x"></script>`)),
+    error => error.code === 'sfc_attribute_limit')
+
+  const maxSource = './' + 'a'.repeat(4094)
+  assert.equal(parseSFC(request(`<script src="${maxSource}"></script>`)).blocks[0].src, maxSource)
+  assert.throws(() => parseSFC(request(`<script src="${maxSource}a"></script>`)),
+    error => error.code === 'sfc_attribute_limit')
+})
+
 test('logical path and content hash are validated before invoking the compiler', () => {
   const input = request('<template><div /></template>')
   assert.throws(() => parseSFC({ ...input, sha256: '0'.repeat(64) }), /hash/i)

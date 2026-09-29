@@ -6,14 +6,41 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import unittest
+from http.server import ThreadingHTTPServer
 import urllib.error
 import urllib.request
 
 try:
     from sourceparser.runtime import load_runtime, load_sfc_runtime
+    from sourceparser.server import Handler, SLOTS
 except ModuleNotFoundError:
     from runtime import load_runtime, load_sfc_runtime
+    from server import Handler, SLOTS
+
+
+def _process_is_running(pid):
+    if os.name == 'nt':
+        tasklist = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, timeout=3, check=False, text=True)
+        return f'"{pid}"' in tasklist.stdout
+    proc_stat = Path('/proc') / str(pid) / 'stat'
+    try:
+        stat = proc_stat.read_text(encoding='utf-8')
+        fields = stat[stat.rfind(')') + 2:].split()
+        return bool(fields) and fields[0] not in ('Z', 'X')
+    except FileNotFoundError:
+        return False
+    except OSError:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
 
 
 class VueHTTPContract(unittest.TestCase):
@@ -104,6 +131,139 @@ class VueHTTPContract(unittest.TestCase):
         self.assertTrue(any((chunk.get('region') or {}).get('kind') == 'style' for chunk in parsed['chunks']))
         self.assertTrue(any(chunk.get('region') is None and '<template' in chunk['content']
                             for chunk in parsed['chunks']))
+
+    def test_jsx_script_alias_uses_javascript_structure_with_original_ranges(self):
+        raw = ('<script lang="jsx">\r\n'
+               'export const Widget = () => <button>go</button>;\r\n'
+               '</script>\r\n').encode()
+        status, parsed = self.parse(raw)
+        self.assertEqual(status, 200, parsed)
+        self.assertEqual(parsed['quality'], 'structural')
+        widget = next(symbol for symbol in parsed['symbols'] if symbol['name'] == 'Widget')
+        self.assertEqual(widget['region']['kind'], 'script')
+        self.assertEqual(widget['region']['language'], 'jsx')
+        signature_range = widget['signature_range']
+        self.assertEqual(raw[signature_range['start_byte']:signature_range['end_byte']].decode(), widget['signature'])
+        self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
+
+    def test_sfc_attribute_limits_reject_instead_of_erasing_declarations(self):
+        lang_at_limit = ('<script lang="' + 'x' * 64 + '"></script>\r\n').encode()
+        status, parsed = self.parse(lang_at_limit)
+        self.assertEqual(status, 200, parsed)
+        lang_region = next(symbol['region'] for symbol in parsed['symbols'] if symbol['kind'] == 'sfc_region')
+        self.assertEqual(len(lang_region['language']), 64)
+        self.assertEqual(parsed['quality'], 'unknown_preprocess')
+
+        lang_over_limit = ('<script lang="' + 'x' * 65 + '"></script>\r\n').encode()
+        status, rejected = self.parse(lang_over_limit)
+        self.assertEqual(status, 422, rejected)
+        self.assertEqual(rejected, {'error': 'sfc_attribute_limit'})
+
+        src_at_limit = ('<script src="./' + 'a' * 4094 + '"></script>\r\n').encode()
+        status, parsed = self.parse(src_at_limit)
+        self.assertEqual(status, 200, parsed)
+        src_region = next(symbol['region'] for symbol in parsed['symbols'] if symbol['kind'] == 'sfc_region')
+        self.assertEqual(len(src_region['external_source']), 4096)
+        self.assertEqual(src_region['external_status'], 'unchecked')
+
+        src_over_limit = ('<script src="./' + 'a' * 4095 + '"></script>\r\n').encode()
+        status, rejected = self.parse(src_over_limit)
+        self.assertEqual(status, 422, rejected)
+        self.assertEqual(rejected, {'error': 'sfc_attribute_limit'})
+
+    def test_timeout_kills_only_the_request_process_tree_before_slot_release(self):
+        cache = os.environ['SOURCE_PARSER_CACHE']
+        runtime = load_sfc_runtime()
+        self.assertIsNotNone(runtime)
+        acquired_reservation = SLOTS.acquire(timeout=1)
+        self.assertTrue(acquired_reservation)
+        server = None
+        server_thread = None
+        sentinel = None
+        pid_file = None
+        old_pid_file = os.environ.get('SFC_TEST_CHILD_PID_FILE')
+        try:
+            with tempfile.TemporaryDirectory(prefix='vue-process-tree-', dir=os.environ.get('TMPDIR')) as directory:
+                root = Path(directory)
+                pid_file = root / 'child-pids.txt'
+                sentinel = subprocess.Popen([runtime['node'], '-e', 'setInterval(() => {}, 1000)'],
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+                (root / 'parse_sfc.cjs').write_text(
+                    "const { spawn } = require('node:child_process')\n"
+                    "const fs = require('node:fs')\n"
+                    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })\n"
+                    "fs.writeFileSync(process.env.SFC_TEST_CHILD_PID_FILE, `${process.pid}\\n${child.pid}\\n`)\n"
+                    "setInterval(() => {}, 1000)\n", encoding='utf-8')
+                os.environ['SFC_TEST_CHILD_PID_FILE'] = str(pid_file)
+                server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+                server.cache = cache
+                server.parser_version = 'test-timeout'
+                server.versions = {'vue': 'test-timeout'}
+                server.sfc = runtime
+                server.parse_timeout = 8
+                server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+                server_thread.start()
+
+                def request(source):
+                    raw = source.encode('utf-8')
+                    body = {'path': 'src/Slow.vue', 'language': 'vue',
+                            'sha256': hashlib.sha256(raw).hexdigest(),
+                            'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': 128}
+                    req = urllib.request.Request('http://127.0.0.1:' + str(server.server_port) + '/v1/parse',
+                                                 data=json.dumps(body).encode(),
+                                                 headers={'Content-Type': 'application/json'})
+                    try:
+                        with urllib.request.urlopen(req, timeout=15) as response:
+                            return response.status, json.load(response)
+                    except urllib.error.HTTPError as response:
+                        return response.code, json.load(response)
+
+                status, parsed = request('<template><div>normal</div></template>')
+                self.assertEqual(status, 200, parsed)
+                self.assertTrue(SLOTS.acquire(timeout=5), 'normal completion must release its parser slot')
+                SLOTS.release()
+                SLOTS.release()
+                acquired_reservation = False
+
+                acquired_reservation = SLOTS.acquire(timeout=1)
+                self.assertTrue(acquired_reservation)
+                server.sfc = {**runtime, 'root': str(root)}
+                response = []
+                request_thread = threading.Thread(target=lambda: response.append(
+                    request('<script>slow</script>')), daemon=True)
+                request_thread.start()
+                deadline = time.monotonic() + 7
+                while not pid_file.exists() and request_thread.is_alive() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(pid_file.exists(), 'the controlled Node adapter should have started before timeout')
+                request_thread.join(timeout=12)
+                self.assertFalse(request_thread.is_alive(), 'the bounded HTTP request should finish')
+                self.assertEqual(response[0][0], 504, response[0] if response else 'no HTTP response')
+
+                self.assertTrue(SLOTS.acquire(timeout=5), 'timeout cleanup must eventually release its slot')
+                SLOTS.release()
+                SLOTS.release()
+                acquired_reservation = False
+                pids = [int(value) for value in pid_file.read_text(encoding='utf-8').splitlines()]
+                for pid in pids:
+                    self.assertFalse(_process_is_running(pid), f'parser descendant {pid} survived slot release')
+                self.assertTrue(_process_is_running(sentinel.pid), 'timeout cleanup must not kill unrelated Node processes')
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if server_thread is not None:
+                server_thread.join(timeout=3)
+            if acquired_reservation:
+                SLOTS.release()
+            if old_pid_file is None:
+                os.environ.pop('SFC_TEST_CHILD_PID_FILE', None)
+            else:
+                os.environ['SFC_TEST_CHILD_PID_FILE'] = old_pid_file
+            if sentinel is not None and sentinel.poll() is None:
+                sentinel.terminate()
+                sentinel.wait(timeout=3)
 
     def test_external_script_references_are_literal_and_never_loaded(self):
         for source, status_value in (('./api.js', 'unchecked'), ('../private.js', 'rejected'),

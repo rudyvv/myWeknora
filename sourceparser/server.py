@@ -8,9 +8,13 @@ import json
 import multiprocessing
 import os
 from pathlib import PurePosixPath
+import shutil
+import signal
+import subprocess
 import threading
+import time
 
-from runtime import load_runtime, load_sfc_runtime, parse_source, parse_vue_source, runtime_version
+from runtime import SFCAttributeLimitError, load_runtime, load_sfc_runtime, parse_source, parse_vue_source, runtime_version
 
 MAX_FILE_BYTES = 16 << 20
 MAX_REQUEST_BYTES = 23 << 20
@@ -19,7 +23,11 @@ PROCESS_CONTEXT = multiprocessing.get_context('spawn')
 
 
 def parse_child(connection, cache, raw, maximum, language, path, sfc):
+    result_message = None
     try:
+        if os.name != 'nt':
+            os.setsid()
+        connection.send(('ready',))
         versions = load_runtime(cache)
         if sfc and {'javascript', 'typescript'}.issubset(versions):
             versions['vue'] = sfc['runtime']
@@ -29,12 +37,57 @@ def parse_child(connection, cache, raw, maximum, language, path, sfc):
             parsed = parse_vue_source(raw, maximum, runtime_version(versions), path, sfc, set(versions))
         else:
             parsed = parse_source(raw, maximum, runtime_version(versions), language, path)
-        connection.send((True, parsed))
+        result_message = ('result', True, parsed)
+    except SFCAttributeLimitError:
+        result_message = ('result', False, {'error': 'sfc_attribute_limit'})
     except Exception:
         # Exceptions may include source text; do not put them in RPC errors/logs.
-        connection.send((False, {'error': 'source parsing failed'}))
+        result_message = ('result', False, {'error': 'source parsing failed'})
+    try:
+        if result_message is not None:
+            connection.send(result_message)
+            # Keep the worker alive until the HTTP parent tears down this request's
+            # process tree, so descendants remain addressable on every platform.
+            connection.recv()
+    except (EOFError, OSError):
+        pass
     finally:
         connection.close()
+
+
+def terminate_parser_process_tree(process):
+    """Stop only this request's parser worker and its descendants before releasing its slot."""
+    if process.pid is None:
+        return
+    if os.name == 'nt':
+        taskkill = shutil.which('taskkill')
+        system_root = os.environ.get('SystemRoot')
+        if not taskkill and system_root:
+            candidate = os.path.join(system_root, 'System32', 'taskkill.exe')
+            if os.path.isfile(candidate):
+                taskkill = candidate
+        if taskkill:
+            try:
+                subprocess.run([taskkill, '/PID', str(process.pid), '/T', '/F'],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=3, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if process.is_alive():
+            process.terminate()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            if process.is_alive():
+                process.terminate()
+        except OSError:
+            if process.is_alive():
+                process.terminate()
+    process.join(timeout=3)
+    if process.is_alive():
+        process.kill()
+        process.join()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -103,23 +156,35 @@ class Handler(BaseHTTPRequestHandler):
         if not SLOTS.acquire(blocking=False):
             self.respond(429, {'error': 'parser capacity reached'})
             return
-        parent, child = PROCESS_CONTEXT.Pipe(duplex=False)
+        parent, child = PROCESS_CONTEXT.Pipe(duplex=True)
         process = PROCESS_CONTEXT.Process(target=parse_child, args=(child, self.server.cache, raw, maximum, language, path, self.server.sfc))
+        started = False
         try:
+            deadline = time.monotonic() + getattr(self.server, 'parse_timeout', 6)
             process.start()
+            started = True
             child.close()
-            if not parent.poll(6):
+            remaining = max(0, deadline - time.monotonic())
+            if not parent.poll(remaining):
                 self.respond(504, {'error': 'source parsing time limit exceeded'})
                 return
-            success, result = parent.recv()
+            message = parent.recv()
+            if message[0] == 'ready':
+                remaining = max(0, deadline - time.monotonic())
+                if not parent.poll(remaining):
+                    self.respond(504, {'error': 'source parsing time limit exceeded'})
+                    return
+                message = parent.recv()
+            if message[0] != 'result':
+                self.respond(422, {'error': 'source parsing failed'})
+                return
+            _, success, result = message
             self.respond(200 if success else 422, result)
         except (EOFError, OSError):
             self.respond(422, {'error': 'source parsing failed'})
         finally:
-            if process.is_alive():
-                process.terminate()
-            if process.pid is not None:
-                process.join(timeout=2)
+            if started:
+                terminate_parser_process_tree(process)
             parent.close()
             child.close()
             SLOTS.release()

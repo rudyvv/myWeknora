@@ -32,8 +32,18 @@ function collectBlocks(descriptor, source) {
     const type = typeof block.type === 'string' ? block.type : ''
     if (!type || type.length > 64) throw new Error('invalid block type')
     const rawLanguage = block.lang ?? (block.attrs && block.attrs.lang)
-    const lang = typeof rawLanguage === 'string' && rawLanguage.length <= 64 ? rawLanguage : ''
-    const src = type === 'script' && typeof block.src === 'string' && block.src.length <= 4096 ? block.src : ''
+    if (typeof rawLanguage === 'string' && rawLanguage.length > 64) {
+      const error = new Error('SFC attribute limit')
+      error.code = 'sfc_attribute_limit'
+      throw error
+    }
+    if (type === 'script' && typeof block.src === 'string' && block.src.length > 4096) {
+      const error = new Error('SFC attribute limit')
+      error.code = 'sfc_attribute_limit'
+      throw error
+    }
+    const lang = typeof rawLanguage === 'string' ? rawLanguage : ''
+    const src = type === 'script' && typeof block.src === 'string' ? block.src : ''
     const contentHash = createHash('sha256').update(block.content, 'utf8').digest('hex')
     return { type, lang, src, setup: Boolean(block.setup), content_sha256: contentHash,
       start_utf16: start, end_utf16: end }
@@ -150,8 +160,9 @@ function main() {
   try {
     body = JSON.parse(require('node:fs').readFileSync(0, 'utf8'))
     process.stdout.write(JSON.stringify(parseSFC(body)))
-  } catch {
-    process.stdout.write(JSON.stringify({ error: 'sfc_parse_failed' }))
+  } catch (error) {
+    const code = error && error.code === 'sfc_attribute_limit' ? 'sfc_attribute_limit' : 'sfc_parse_failed'
+    process.stdout.write(JSON.stringify({ error: code }))
     process.exitCode = 1
   }
 }
