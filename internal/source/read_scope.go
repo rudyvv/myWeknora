@@ -28,6 +28,13 @@ func RelationCursorFromContext(ctx context.Context) string {
 	return cursor
 }
 
+// WithoutRelationCursor preserves the read lease and all other source scope
+// while clearing a file-bound relation cursor before a cross-file endpoint
+// read.
+func WithoutRelationCursor(ctx context.Context) context.Context {
+	return context.WithValue(ctx, relationCursorKey{}, "")
+}
+
 // WithRelationPageSize may lower (never raise) the repository's bounded
 // default for consumers such as Agent output.
 func WithRelationPageSize(ctx context.Context, pageSize int) context.Context {

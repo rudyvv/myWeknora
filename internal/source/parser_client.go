@@ -89,7 +89,8 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 			"java_mapper_method":  true,
 			"java_annotation_sql": true, "mybatis_mapper": true, "mybatis_statement": true,
 			"mybatis_result_map": true, "mybatis_sql_fragment": true, "mybatis_include": true,
-			"sql_table": true,
+			"mybatis_result_map_reference": true,
+			"sql_table":                    true,
 		}
 		for _, fact := range parsed.Facts {
 			if !allowedFacts[fact.Kind] || !validSourceRange(raw, fact.Range) || fact.Quality == "" {

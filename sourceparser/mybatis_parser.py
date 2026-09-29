@@ -465,6 +465,29 @@ def parse_mybatis_xml(raw):
             fact["text"] = raw[span["start_byte"]:span["end_byte"]].decode("utf-8")
         return fact
 
+    def reference_fact(kind, node, owner_kind, owner_name, reference_kind, reference):
+        reference = reference.strip()
+        if "." in reference:
+            target_namespace, target_name = reference.rsplit(".", 1)
+        else:
+            target_namespace, target_name = namespace, reference
+        dynamic = bool(re.search(r"\$\{[^{}]*\}", reference))
+        if dynamic:
+            diagnostics.append({
+                "code": "mybatis_reference_dynamic",
+                "message": "MyBatis reference contains a dynamic identifier",
+                "range": node_range(node),
+            })
+        fields = {
+            "name": reference, "namespace": namespace,
+            "target_namespace": target_namespace, "target_name": target_name,
+            "owner_kind": owner_kind, "owner_name": owner_name,
+            "reference_kind": reference_kind, "dynamic": dynamic,
+        }
+        if kind == "mybatis_include":
+            fields["statement_id"] = owner_name if owner_kind == "mybatis_statement" else ""
+        facts.append(node_fact(kind, node, **fields))
+
     def descendants(node):
         for child in node["children"]:
             yield child
@@ -489,6 +512,15 @@ def parse_mybatis_xml(raw):
             facts.append(node_fact("mybatis_result_map", node, name=ident, namespace=namespace))
             if not ident:
                 diagnostics.append({"code": "result_map_id_missing", "message": "resultMap has no id", "range": node_range(node)})
+            if node["attrs"].get("extends", "").strip():
+                reference_fact("mybatis_result_map_reference", node, "mybatis_result_map", ident,
+                               "extends", node["attrs"]["extends"])
+            for child in descendants(node):
+                if child["name"] in ("association", "collection", "case"):
+                    reference = child["attrs"].get("resultMap", "").strip()
+                    if reference:
+                        reference_fact("mybatis_result_map_reference", child, "mybatis_result_map", ident,
+                                       child["name"], reference)
         elif kind == "sql":
             sql_nodes.append(node)
             ident = node["attrs"].get("id", "")
@@ -518,9 +550,7 @@ def parse_mybatis_xml(raw):
         for child in includes:
             refid = child["attrs"].get("refid", "")
             if refid:
-                facts.append(node_fact("mybatis_include", child, name=refid, namespace=namespace,
-                                       statement_id=ident, target_namespace=(refid.rsplit(".", 1)[0] if "." in refid else namespace),
-                                       target_name=(refid.rsplit(".", 1)[-1] if refid else "")))
+                reference_fact("mybatis_include", child, "mybatis_statement", ident, "include", refid)
         sql = text_content(node)
         try:
             table_names, sql_dynamic = _sql_tables_and_diagnostics(sql)
@@ -534,6 +564,11 @@ def parse_mybatis_xml(raw):
 
     for node in sql_nodes:
         ident = node["attrs"].get("id", "")
+        for child in descendants(node):
+            if child["name"] == "include":
+                refid = child["attrs"].get("refid", "")
+                if refid:
+                    reference_fact("mybatis_include", child, "mybatis_sql_fragment", ident, "include", refid)
         sql = text_content(node)
         fragment_dynamic = any(child["name"] in DYNAMIC_TAGS for child in descendants(node))
         if fragment_dynamic:

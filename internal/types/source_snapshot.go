@@ -50,6 +50,8 @@ type ParsedSourceFact struct {
 	TargetNamespace string      `json:"target_namespace,omitempty"`
 	TargetName      string      `json:"target_name,omitempty"`
 	OwnerKind       string      `json:"owner_kind,omitempty"`
+	OwnerName       string      `json:"owner_name,omitempty"`
+	ReferenceKind   string      `json:"reference_kind,omitempty"`
 	Dynamic         bool        `json:"dynamic,omitempty"`
 	Certainty       string      `json:"certainty,omitempty"`
 	Quality         string      `json:"quality"`

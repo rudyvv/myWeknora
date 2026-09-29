@@ -1,11 +1,14 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,4 +46,63 @@ func TestSourceAnalysisRangeSnippetUsesExactVersionBytesAndRejectsInvalidBounds(
 	require.True(t, ok)
 	require.True(t, longTruncated)
 	require.Equal(t, maxAgentSnippetRunes+1, utf8.RuneCountInString(longSnippet))
+}
+
+type pagedSourceAnalysisKnowledge struct {
+	interfaces.KnowledgeService
+	test         *testing.T
+	targetCursor string
+	targetRead   bool
+}
+
+func (k *pagedSourceAnalysisKnowledge) GetSourceFile(ctx context.Context, id string, versionIDs ...string) (*types.SourceFileView, error) {
+	require.True(k.test, source.HasReadScope(ctx), "main and target reads retain the same authorized source scope")
+	require.Equal(k.test, 20, source.RelationPageSizeFromContext(ctx, 100))
+	versionID := "main-version"
+	if len(versionIDs) > 0 {
+		versionID = versionIDs[0]
+	}
+	if id == "main-file" {
+		require.Equal(k.test, "cursor-main-next", source.RelationCursorFromContext(ctx))
+		return &types.SourceFileView{
+			KnowledgeID: id, SnapshotID: "snapshot-one", FileVersionID: versionID, SHA256: "a",
+			RelationsTruncated: true, RelationsNextCursor: "cursor-main-next",
+			Relations: []types.SourceCodeRelation{{
+				ID: "edge", Kind: "mapper_statement", FromFileID: id, FromVersionID: versionID,
+				ToFileID: "target-file", ToVersionID: "target-version", ToPath: "src/Target.xml",
+				Determinacy: "certain", Quality: "structural",
+				ToRange: types.JSON(`{"start_byte":0,"end_byte":6,"start_line":1,"end_line":1}`),
+			}},
+		}, nil
+	}
+	k.targetRead = true
+	k.targetCursor = source.RelationCursorFromContext(ctx)
+	if k.targetCursor != "" {
+		return nil, context.Canceled // Simulate a repository rejecting a main-file cursor for another file.
+	}
+	return &types.SourceFileView{
+		KnowledgeID: id, SnapshotID: "snapshot-one", FileVersionID: versionID,
+		SHA256: "b", Path: "src/Target.xml", RawContent: []byte("target"),
+	}, nil
+}
+
+func TestSourceAnalysisContinuationReadsCrossFileTargetWithoutReusingCursor(t *testing.T) {
+	knowledge := &pagedSourceAnalysisKnowledge{test: t}
+	ctx, release := source.WithReadScope(context.Background(), types.SourceReadLease{
+		ID: "00000000-0000-4000-8000-000000000001", HasSources: true,
+	}, nil, func() {})
+	defer release()
+
+	analysis, err := readSourceAnalysis(ctx, knowledge, "main-file", &types.SourceEvidence{
+		SnapshotID: "snapshot-one", FileVersionID: "main-version",
+	}, "cursor-main-next")
+	require.NoError(t, err)
+	require.True(t, knowledge.targetRead)
+	require.Empty(t, knowledge.targetCursor)
+	relations := analysis["relations"].([]map[string]interface{})
+	require.Len(t, relations, 1)
+	target := relations[0]["target_evidence"].(map[string]interface{})
+	require.Equal(t, "target-version", target["file_version_id"])
+	require.Equal(t, "target", target["snippet"])
+	require.Equal(t, "cursor-main-next", analysis["relations_next_cursor"])
 }

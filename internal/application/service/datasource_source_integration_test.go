@@ -85,8 +85,10 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 		"src/mapper/PushScheduleMapper.xml": []byte(`<?xml version="1.0"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="demo.PushScheduleMapper">
-  <resultMap id="ScheduleMap" type="demo.Schedule"><id column="id" property="id"/></resultMap>
-  <sql id="columns">ORDER BY id</sql>
+  <resultMap id="Base" type="demo.Base"><id column="id" property="id"/></resultMap>
+  <resultMap id="ScheduleMap" type="demo.Schedule" extends="Base"><association property="owner" resultMap="Base"/></resultMap>
+  <sql id="columns"><include refid="baseColumns"/>ORDER BY id</sql>
+  <sql id="baseColumns">id</sql>
   <select id="getPushSchedule" resultMap="ScheduleMap">
     SELECT id FROM push_schedule WHERE id = #{id} <include refid="columns"/>
   </select>
@@ -128,13 +130,30 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	}
 	require.True(t, factKinds["mybatis_statement"])
 	require.True(t, factKinds["mybatis_sql_fragment"])
-	var includeRelation, resultMapRelation, tableRelation types.SourceCodeRelation
-	require.NoError(t, f.db.Where("snapshot_id=? AND kind='include' AND determinacy='certain'", snapshot.ID).Take(&includeRelation).Error)
+	require.True(t, factKinds["mybatis_result_map_reference"])
+	var includeRelation, resultMapRelation, associationRelation, extendsRelation, tableRelation types.SourceCodeRelation
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='include' AND from_key=? AND determinacy='certain'", snapshot.ID,
+		"demo.PushScheduleMapper.columns -> include baseColumns").Take(&includeRelation).Error)
 	require.Equal(t, xmlFile.ID, includeRelation.FromFileID)
 	require.Equal(t, xmlFile.ID, includeRelation.ToFileID)
 	require.NoError(t, f.db.Where("snapshot_id=? AND kind='result_map' AND determinacy='certain'", snapshot.ID).Take(&resultMapRelation).Error)
 	require.Equal(t, xmlFile.ID, resultMapRelation.FromFileID)
 	require.Equal(t, xmlFile.ID, resultMapRelation.ToFileID)
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='result_map' AND from_key=? AND determinacy='certain'", snapshot.ID,
+		"demo.PushScheduleMapper.ScheduleMap -> association Base").Take(&associationRelation).Error)
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='result_map' AND from_key=? AND determinacy='certain'", snapshot.ID,
+		"demo.PushScheduleMapper.ScheduleMap -> extends Base").Take(&extendsRelation).Error)
+	var includeRange, includeTargetRange types.SourceRange
+	require.NoError(t, json.Unmarshal(includeRelation.FromRange, &includeRange))
+	require.NoError(t, json.Unmarshal(includeRelation.ToRange, &includeTargetRange))
+	require.Equal(t, `<include refid="baseColumns"/>`, string(files["src/mapper/PushScheduleMapper.xml"][includeRange.StartByte:includeRange.EndByte]))
+	require.Equal(t, `<sql id="baseColumns">id</sql>`, string(files["src/mapper/PushScheduleMapper.xml"][includeTargetRange.StartByte:includeTargetRange.EndByte]))
+	var extendsRange, extendsTargetRange types.SourceRange
+	require.NoError(t, json.Unmarshal(extendsRelation.FromRange, &extendsRange))
+	require.NoError(t, json.Unmarshal(extendsRelation.ToRange, &extendsTargetRange))
+	require.Contains(t, string(files["src/mapper/PushScheduleMapper.xml"][extendsRange.StartByte:extendsRange.EndByte]), `extends="Base"`)
+	require.Equal(t, `<resultMap id="Base" type="demo.Base"><id column="id" property="id"/></resultMap>`,
+		string(files["src/mapper/PushScheduleMapper.xml"][extendsTargetRange.StartByte:extendsTargetRange.EndByte]))
 	require.NoError(t, f.db.Where("snapshot_id=? AND kind='table_access' AND to_key='push_schedule' AND determinacy='certain'", snapshot.ID).Take(&tableRelation).Error)
 	require.Empty(t, tableRelation.ToFileID, "database table facts must not fabricate a readable source-file target")
 	require.Empty(t, tableRelation.ResolutionReason)
@@ -204,7 +223,8 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 			Kind: "pagination_probe", FromFileID: javaFile.ID, FromVersionID: javaView.FileVersionID,
 			FromPath: javaFile.Path, FromKey: fmt.Sprintf("probe-%03d", i),
 			FromRange: types.JSON(fmt.Sprintf(`{"start_byte":%d,"end_byte":%d,"start_line":1,"end_line":1}`, i, i+1)),
-			ToKey:     fmt.Sprintf("probe-%03d", i), ToRange: types.JSON(`null`),
+			ToFileID:  xmlFile.ID, ToVersionID: xmlVersion.ID, ToPath: xmlFile.Path,
+			ToKey: fmt.Sprintf("probe-%03d", i), ToRange: mapperRelation.ToRange,
 			Determinacy: "certain", Quality: "structural", Context: types.JSON(`[]`),
 		}
 		probeIDs[probeRelations[i].ID] = true
@@ -228,6 +248,17 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	nextAnalysis := agentNext.Data["source_analysis"].(map[string]interface{})
 	nextAgentRelations := nextAnalysis["relations"].([]map[string]interface{})
 	require.Len(t, nextAgentRelations, 20)
+	var continuedTarget map[string]interface{}
+	for _, relation := range nextAgentRelations {
+		if target, ok := relation["target_evidence"].(map[string]interface{}); ok {
+			continuedTarget = target
+			break
+		}
+	}
+	require.NotNil(t, continuedTarget, "continuation target reads must not reuse the main-file cursor")
+	require.Equal(t, xmlFile.ID, continuedTarget["knowledge_id"])
+	require.Equal(t, xmlVersion.ID, continuedTarget["file_version_id"])
+	require.Contains(t, continuedTarget["snippet"], "getPushSchedule")
 	firstAgentIDs := map[string]bool{}
 	for _, relation := range firstAgentRelations {
 		firstAgentIDs[relation["id"].(string)] = true

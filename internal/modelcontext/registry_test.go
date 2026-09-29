@@ -61,6 +61,34 @@ func TestOutputFilesAreRenderedOnlyForLiveModelResults(t *testing.T) {
 	require.Contains(t, registry.ModelToolResultForTool("shell_exec", result), "sandbox:比赛信息.pptx")
 }
 
+func TestListKnowledgeChunksModelResultPreservesBoundedSourceAnalysis(t *testing.T) {
+	result := &types.ToolResult{
+		Success: true,
+		Output:  `<retrieval type="knowledge" mode="deep_read"><document><chunk>content</chunk></document></retrieval>`,
+		Data: map[string]interface{}{
+			"display_type": "knowledge_chunks_list",
+			"chunks":       []map[string]interface{}{{"chunk_id": "chunk-real", "knowledge_id": "knowledge-real", "content": "mapper"}},
+			"source_analysis": map[string]interface{}{
+				"path": "src/Mapper.xml", "quality": "structural", "parser_version": "mybatis-pack",
+				"facts":       []map[string]interface{}{{"kind": "mybatis_result_map_reference", "name": "Base"}},
+				"diagnostics": []map[string]interface{}{{"code": "result_map_missing", "message": "no Base"}},
+				"relations": []map[string]interface{}{{"kind": "result_map", "from_key": "Derived", "to_key": "Base",
+					"target_evidence": map[string]interface{}{"path": "src/Mapper.xml", "snippet": `<resultMap id="Base">`}}},
+				"relations_truncated": true, "relations_next_cursor": "opaque-next-page-token",
+			},
+		},
+	}
+	modelOutput := NewRegistry(true).ModelToolResultForTool("list_knowledge_chunks", result)
+	for _, marker := range []string{
+		"<source_analysis>", "mybatis_result_map_reference", "result_map_missing",
+		"opaque-next-page-token", "src/Mapper.xml", `&lt;resultMap id=\"Base\"&gt;`,
+	} {
+		require.Contains(t, modelOutput, marker)
+	}
+	require.NotContains(t, modelOutput, `<resultMap id="Base">`, "untrusted source text must remain escaped")
+	require.NotContains(t, modelOutput, "chunk-real", "the established model formatter still uses source handles")
+}
+
 func TestRegistryAuditsUnresolvedAndPartiallyResolvedToolHandles(t *testing.T) {
 	registry := NewRegistry(true)
 	registry.RegisterKnowledgeBase("kb-real")

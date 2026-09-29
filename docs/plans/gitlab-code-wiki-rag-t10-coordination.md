@@ -12,8 +12,9 @@ that unrun acceptance tests passed.
   SQLGlot's MySQL AST. Source facts carry ranges into the original bytes.
 - Go `source.CorrelateSourceFacts` consumes only allow-listed parser facts
   belonging to one staged snapshot. It creates interface-method-to-XML-statement
-  relations only when the namespace and method/statement identity are unique.
-  It does not join Java call sites, fields, receivers, or inferred scopes.
+  relations and owner-bound MyBatis include/resultMap-reference relations only
+  when namespace, owner, and target identities are unique and acyclic. It does
+  not join Java call sites, fields, receivers, or inferred scopes.
   `java_field` and `java_mapper_call` are not emitted or accepted by the Go
   parser client. Overloaded or unresolved mappings remain uncertain with a
   reason; table accesses do not invent a readable source-file target.
@@ -31,9 +32,15 @@ that unrun acceptance tests passed.
   question `SourceRead` scope is present. It requests the exact version pinned
   in chunk evidence, returns bounded fact/diagnostic/relation summaries, and
   fetches each verified cross-file endpoint through the existing
-  `GetSourceFile(ctx, id, version)` API under that same scope. Target evidence
-  reports the actual file/version/SHA/range and a byte-sliced snippet; it does
-  not manufacture a source span for SQL text.
+  `GetSourceFile(ctx, id, version)` API under that same scope. Relation cursors
+  are main-file-bound and are cleared only for cross-file endpoint reads; the
+  source lease, endpoint version, and snapshot pin remain unchanged. Target
+  evidence reports the actual file/version/SHA/range and a byte-sliced snippet;
+  it does not manufacture a source span for SQL text.
+- The shared `modelcontext.Registry` formatter reads `source_analysis` from
+  structured `ToolResult.Data`, emits a bounded JSON sidecar inside its
+  retrieval output, and XML-escapes source text. It does not rely on the
+  UI-oriented `ToolResult.Output` append surviving model reformatting.
 - `SourceCodeView` and the Agent knowledge-chunks result display known quality
   labels, typed facts, parser diagnostics, relation certainty/reasons, bounded
   relation continuation, and any target evidence returned by the scoped Agent
@@ -47,8 +54,9 @@ subqueries, nested and qualified CTE visibility, table-valued functions, and
 DELETE target aliases. In particular,
 `UPDATE orders o JOIN (SELECT * FROM customers) c ...` reports both `orders`
 and `customers`; CTE references are excluded while physical tables inside CTE
-bodies remain included. The parser rules fingerprint is `rules-9`, reflecting
-the removal of unsupported Java field/call facts.
+bodies remain included. The parser rules fingerprint is `rules-10`, reflecting
+the removal of unsupported Java field/call facts and the added owner-bound
+MyBatis fragment/result-map reference facts.
 
 ## Read-only representative validation
 
@@ -73,28 +81,31 @@ limitation; no representative SQL text was copied here.
 
 ## Validation status and remaining limits
 
-- Python parser HTTP contract: 32 tests passed, including the derived-DML
-  regression.
-- Go `internal/source` and `internal/application/repository` unit suites
-  passed. Focused Agent source-analysis helper tests passed. The tagged
-  PostgreSQL integration group passed against the designated isolated
-  loopback test database, including `TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes`,
-  pinned-read/revocation and purge cases, repository/tag scope intersection,
-  and published-snapshot retention. The group exercised 100-row HTTP-default
-  relation paging and bounded Agent continuation; no database credentials
-  were read from another container or conversation.
+- Python parser HTTP contracts: 33 tests passed, including derived-DML and
+  exact-range fragment/result-map reference regressions.
+- Go `internal/source`, `internal/application/repository`, and
+  `internal/modelcontext` suites passed. Focused Agent source-analysis tests
+  and the HTTP handler cursor/version handoff test passed.
+- The tagged PostgreSQL test
+  `TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes` passed against the
+  designated isolated loopback database. Its real parser/client/correlator
+  fixture verifies fragment-to-fragment include and resultMap extends/nested
+  relations with exact source ranges, plus a 110-edge continuation whose next
+  page reads cross-file target evidence without reusing the main-file cursor.
+  No database credentials were read from another container or conversation.
 - The focused `internal/handler` route test passed: `relation_cursor` and
   `version_id` reach the scoped source read, and the response remains
   `private, no-store`.
 - The broad Windows Go package run had unrelated environment failures involving
   `/bin/bash`, symlink privileges, file-URI schema validation, and frontend
-  capability parsing. Frontend component tests were not executable because
-  `frontend/node_modules` is absent and registry access is restricted; no
-  dependencies were installed.
+  capability parsing. The worker did not run frontend component tests; the
+  `KnowledgeChunksList` test mount now supplies its required `$t` global, and
+  root is running the approved read-only frontend verification separately.
 
 These results cover parser, source paging, scoped Agent evidence, and static
 correlator behavior, not every T10 acceptance criterion. Frontend component
-tests remain to be run in an environment with the project dependencies.
+tests and type-check remain to be recorded from root's isolated dependency
+environment.
 
 ## Integration handoff
 

@@ -32,6 +32,21 @@ type mapperDocument struct {
 	sql        []types.ParsedSourceFact
 }
 
+type sourceReference struct {
+	owner                factOwner
+	relationKind         string
+	targetNS             string
+	targetName           string
+	targets              []factOwner
+	sourceNamespaceCount int
+	namespaceCount       int
+	ownerCount           int
+	fromKey              string
+	label                string
+	cycleSource          string
+	cycleTarget          string
+}
+
 // CorrelateSourceFacts performs snapshot-local identity correlation only. It
 // intentionally contains no Java/XML/SQL parsing and never infers a target
 // file from a basename or a generated diagnostic.
@@ -42,6 +57,7 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 	sqlFragmentsByKey := map[string][]factOwner{}
 	methods := []factOwner{}
 	methodCounts := map[string]int{}
+	references := []factOwner{}
 	var relations []types.SourceCodeRelation
 
 	for _, member := range members {
@@ -79,6 +95,8 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 				doc.sql = append(doc.sql, fact)
 				key := relationLookupKey(doc.namespace, fact.Name)
 				sqlFragmentsByKey[key] = append(sqlFragmentsByKey[key], factOwner{member, fact})
+			case "mybatis_include", "mybatis_result_map_reference":
+				references = append(references, factOwner{member, fact})
 			case "sql_table":
 				kind := "table_access"
 				relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, kind, member, fact, tableAccessFromKey(fact), nil, factKey(fact), factDeterminacy(fact), tableAccessReason(fact)))
@@ -109,19 +127,104 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 						doc.namespace+"."+statement.Name, targets, len(documents[ns]), "resultMap"))
 				}
 			}
-			for _, owner := range doc.member.Facts {
-				if owner.Kind != "mybatis_include" {
-					continue
+		}
+	}
+
+	resolvedReferences := make([]sourceReference, 0, len(references))
+	cycleGraph := map[string][]string{}
+	for _, ref := range references {
+		fact := ref.fact
+		targetNS, targetName := fact.TargetNamespace, fact.TargetName
+		if targetNS == "" {
+			targetNS, targetName = referenceTarget(fact.Namespace, fact.Name)
+		}
+		resolution := sourceReference{
+			owner: ref, targetNS: targetNS, targetName: targetName,
+			sourceNamespaceCount: len(documents[fact.Namespace]),
+			namespaceCount:       len(documents[targetNS]), ownerCount: -1, fromKey: referenceFromKey(fact),
+		}
+		if fact.Kind == "mybatis_include" {
+			resolution.relationKind, resolution.label = "include", "SQL include"
+			resolution.targets = sqlFragmentsByKey[relationLookupKey(targetNS, targetName)]
+			ownerName := fact.OwnerName
+			if ownerName == "" {
+				ownerName = fact.StatementID
+			}
+			switch fact.OwnerKind {
+			case "mybatis_statement":
+				resolution.ownerCount = len(statementsByKey[relationLookupKey(fact.Namespace, ownerName)])
+			case "mybatis_sql_fragment":
+				resolution.ownerCount = len(sqlFragmentsByKey[relationLookupKey(fact.Namespace, ownerName)])
+			}
+			if fact.OwnerKind == "mybatis_sql_fragment" && fact.OwnerName != "" {
+				sourceKey := relationLookupKey(fact.Namespace, fact.OwnerName)
+				if len(documents[fact.Namespace]) == 1 && len(sqlFragmentsByKey[sourceKey]) == 1 &&
+					len(resolution.targets) == 1 && !fact.Dynamic {
+					resolution.cycleSource = referenceCycleNode("include", fact.Namespace, fact.OwnerName)
+					resolution.cycleTarget = referenceCycleNode("include", targetNS, targetName)
+					cycleGraph[resolution.cycleSource] = append(cycleGraph[resolution.cycleSource], resolution.cycleTarget)
 				}
-				ns, name := owner.TargetNamespace, owner.TargetName
-				if ns == "" {
-					ns, name = referenceTarget(doc.namespace, owner.Name)
+			}
+		} else {
+			resolution.relationKind, resolution.label = "result_map", "resultMap"
+			resolution.targets = resultMapsByKey[relationLookupKey(targetNS, targetName)]
+			if fact.OwnerKind == "mybatis_result_map" {
+				resolution.ownerCount = len(resultMapsByKey[relationLookupKey(fact.Namespace, fact.OwnerName)])
+			}
+			if fact.OwnerKind == "mybatis_result_map" && fact.OwnerName != "" {
+				sourceKey := relationLookupKey(fact.Namespace, fact.OwnerName)
+				if len(documents[fact.Namespace]) == 1 && len(resultMapsByKey[sourceKey]) == 1 &&
+					len(resolution.targets) == 1 && !fact.Dynamic {
+					resolution.cycleSource = referenceCycleNode("result_map", fact.Namespace, fact.OwnerName)
+					resolution.cycleTarget = referenceCycleNode("result_map", targetNS, targetName)
+					cycleGraph[resolution.cycleSource] = append(cycleGraph[resolution.cycleSource], resolution.cycleTarget)
 				}
-				targets := sqlFragmentsByKey[relationLookupKey(ns, name)]
-				relations = append(relations, resolveFactRelation(tenant, sourceID, snapshotID, "include", factOwner{doc.member, owner},
-					doc.namespace+"."+owner.Name, targets, len(documents[ns]), "SQL include"))
 			}
 		}
+		resolvedReferences = append(resolvedReferences, resolution)
+	}
+	for _, ref := range resolvedReferences {
+		fact := ref.owner.fact
+		if fact.Dynamic {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, ref.relationKind,
+				ref.owner.member, fact, ref.fromKey, nil, "", "uncertain", "MyBatis reference contains a dynamic identifier"))
+			continue
+		}
+		ownerName := fact.OwnerName
+		if ownerName == "" {
+			ownerName = fact.StatementID
+		}
+		if fact.Namespace == "" || ref.targetNS == "" || ref.targetName == "" || (ownerName == "" && fact.OwnerKind != "") {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, ref.relationKind,
+				ref.owner.member, fact, ref.fromKey, nil, "", "uncertain", "MyBatis reference has a missing namespace or ID"))
+			continue
+		}
+		if ref.sourceNamespaceCount != 1 {
+			reason := "MyBatis source namespace is missing"
+			if ref.sourceNamespaceCount > 1 {
+				reason = "MyBatis source namespace is ambiguous"
+			}
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, ref.relationKind,
+				ref.owner.member, fact, ref.fromKey, nil, "", "uncertain", reason))
+			continue
+		}
+		if ref.ownerCount == 0 {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, ref.relationKind,
+				ref.owner.member, fact, ref.fromKey, nil, "", "uncertain", "MyBatis reference owner is missing"))
+			continue
+		}
+		if ref.ownerCount > 1 {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, ref.relationKind,
+				ref.owner.member, fact, ref.fromKey, nil, "", "uncertain", "MyBatis reference owner is duplicated"))
+			continue
+		}
+		relation := resolveFactRelation(tenant, sourceID, snapshotID, ref.relationKind,
+			ref.owner, ref.fromKey, ref.targets, ref.namespaceCount, ref.label)
+		if relation.Determinacy == "certain" && ref.cycleSource != "" && hasReferencePath(cycleGraph, ref.cycleTarget, ref.cycleSource) {
+			relation = sourceFactRelation(tenant, sourceID, snapshotID, ref.relationKind,
+				ref.owner.member, fact, ref.fromKey, nil, "", "uncertain", "cyclic MyBatis references are not resolved")
+		}
+		relations = append(relations, relation)
 	}
 
 	sort.SliceStable(relations, func(i, j int) bool {
@@ -130,6 +233,46 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 			fmt.Sprintf("%s|%s|%09d|%s|%s", b.FromPath, b.Kind, rangeStart(b.FromRange), b.ToPath, b.ToKey)
 	})
 	return relations
+}
+
+func referenceFromKey(fact types.ParsedSourceFact) string {
+	owner := fact.OwnerName
+	if owner == "" {
+		owner = fact.StatementID
+	}
+	if owner == "" {
+		return fact.Namespace + "." + fact.Name
+	}
+	if fact.ReferenceKind == "" {
+		return fact.Namespace + "." + owner + " -> " + fact.Name
+	}
+	return fact.Namespace + "." + owner + " -> " + fact.ReferenceKind + " " + fact.Name
+}
+
+func referenceCycleNode(kind, namespace, name string) string {
+	return kind + "\x00" + relationLookupKey(namespace, name)
+}
+
+func hasReferencePath(graph map[string][]string, from, target string) bool {
+	if from == "" || target == "" {
+		return false
+	}
+	stack := []string{from}
+	visited := map[string]bool{}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		node := stack[last]
+		stack = stack[:last]
+		if node == target {
+			return true
+		}
+		if visited[node] {
+			continue
+		}
+		visited[node] = true
+		stack = append(stack, graph[node]...)
+	}
+	return false
 }
 
 func relationLookupKey(namespace, name string) string {

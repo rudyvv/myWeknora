@@ -41,7 +41,7 @@ def load_runtime(cache):
         grammar = cache / relative
         if grammar.resolve().parent != (cache / expected).resolve() or any(p.is_symlink() for p in [grammar, grammar.parent, grammar.parent.parent, grammar.parent.parent.parent]) or hashlib.sha256(grammar.read_bytes()).hexdigest() != entry['grammar_sha256']:
             raise RuntimeError('grammar checksum mismatch')
-        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-9-' + entry['grammar_sha256']
+        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-10-' + entry['grammar_sha256']
     pack.configure(pack.PackConfig(cache_dir=str(cache)))
     for language in versions:
         # Only already verified libraries can reach the language registry.
@@ -53,9 +53,9 @@ def runtime_version(versions):
     """One stable process version binds the full verified grammar set and rules."""
     if not versions:
         return ''
-    processing = {'grammars': versions, 'sqlglot': version('sqlglot'), 'xml_rules': 'mybatis-expat-rules-1'}
+    processing = {'grammars': versions, 'sqlglot': version('sqlglot'), 'xml_rules': 'mybatis-expat-rules-2'}
     fingerprint = hashlib.sha256(json.dumps(processing, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    return 'source-pack-' + PACK_VERSION + '-rules-9-' + fingerprint[:32]
+    return 'source-pack-' + PACK_VERSION + '-rules-10-' + fingerprint[:32]
 
 
 def parse_source(raw, max_bytes, parser_version, language, path):

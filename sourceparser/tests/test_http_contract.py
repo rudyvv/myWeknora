@@ -245,6 +245,41 @@ class JavaHTTPContract(unittest.TestCase):
             span = fact['range']
             self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), fact['text'])
 
+    def test_mybatis_fragment_and_result_map_references_keep_owner_and_exact_range(self):
+        raw = (b'<mapper namespace="demo.M">'
+               b'<sql id="outer"><include refid="inner"/></sql>'
+               b'<sql id="dynamic"><include refid="${prefix}"/></sql>'
+               b'<sql id="inner">SELECT id FROM records</sql>'
+               b'<resultMap id="Base"/>'
+               b'<resultMap id="Derived" extends="Base">'
+               b'<association property="child" resultMap="Base"/>'
+               b'<collection property="items" resultMap="Base"/>'
+               b'</resultMap>'
+               b'<select id="find" resultMap="Derived"><include refid="outer"/></select>'
+               b'</mapper>')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/mapper.xml', 'language': 'mybatis-xml',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        references = [f for f in result['facts'] if f['kind'] in ('mybatis_include', 'mybatis_result_map_reference')]
+        self.assertCountEqual(
+            [(f['kind'], f.get('owner_kind'), f.get('owner_name'), f.get('reference_kind'), f.get('name'))
+             for f in references],
+            [('mybatis_include', 'mybatis_sql_fragment', 'outer', 'include', 'inner'),
+             ('mybatis_include', 'mybatis_statement', 'find', 'include', 'outer'),
+             ('mybatis_include', 'mybatis_sql_fragment', 'dynamic', 'include', '${prefix}'),
+             ('mybatis_result_map_reference', 'mybatis_result_map', 'Derived', 'extends', 'Base'),
+             ('mybatis_result_map_reference', 'mybatis_result_map', 'Derived', 'association', 'Base'),
+             ('mybatis_result_map_reference', 'mybatis_result_map', 'Derived', 'collection', 'Base')],
+        )
+        for fact in references:
+            span = fact['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), fact['text'])
+        dynamic = next(f for f in references if f['name'] == '${prefix}')
+        self.assertTrue(dynamic['dynamic'])
+        self.assertIn('mybatis_reference_dynamic', [d['code'] for d in result['diagnostics']])
+
     def test_mybatis_rejects_external_dtd_but_accepts_standard_identifier_offline(self):
         raw = b'<!DOCTYPE mapper SYSTEM "https://attacker.invalid/evil.dtd"><mapper namespace="x"/>'
         status, response = self.request('/v1/parse', {

@@ -63,7 +63,8 @@ func readSourceAnalysis(ctx context.Context, knowledge interfaces.KnowledgeServi
 			key := sourceVersionKey{relation.ToFileID, relation.ToVersionID}
 			target, ok := targetFiles[key]
 			if !ok {
-				target, err = knowledge.GetSourceFile(ctx, relation.ToFileID, relation.ToVersionID)
+				targetCtx := source.WithoutRelationCursor(ctx)
+				target, err = knowledge.GetSourceFile(targetCtx, relation.ToFileID, relation.ToVersionID)
 				if err != nil {
 					return nil, err
 				}

@@ -41,6 +41,7 @@ test('Agent knowledge tool UI displays bounded source facts, diagnostics and pin
       relations_truncated: false,
     },
   } }) })
+  ;(app.config.globalProperties as any).$t = () => 'No matching chunks'
   app.mount(host)
   try {
     for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
