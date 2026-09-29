@@ -20,6 +20,10 @@ MYBATIS_PROVIDER_ANNOTATIONS = {"SelectProvider", "InsertProvider", "UpdateProvi
 MYBATIS_ANNOTATION_PREFIX = "org.apache.ibatis.annotations."
 
 
+class UnsafeMyBatisXML(ValueError):
+    """An explicit DTD/entity policy rejection, never eligible for text fallback."""
+
+
 def _source_range(raw, start, end, newlines):
     start = max(0, min(start, len(raw)))
     end = max(start, min(end, len(raw)))
@@ -30,6 +34,25 @@ def _source_range(raw, start, end, newlines):
         "start_line": bisect_left(newlines, start) + 1,
         "end_line": bisect_left(newlines, last) + 1,
     }
+
+
+def _xml_error_range(raw, error_byte, newlines):
+    """Point at the offending markup token or UTF-8 code point in original bytes."""
+    position = max(0, min(error_byte, len(raw)))
+    opening = raw.rfind(b"<", 0, position + 1)
+    closing = raw.rfind(b">", 0, position + 1)
+    token_end = raw.find(b">", position)
+    if opening > closing and token_end >= position:
+        return _source_range(raw, opening, token_end + 1, newlines)
+    if position == len(raw):
+        return _source_range(raw, position, position, newlines)
+
+    start = position
+    while start > 0 and raw[start] & 0xC0 == 0x80:
+        start -= 1
+    lead = raw[start]
+    width = 1 if lead < 0x80 else 2 if lead < 0xE0 else 3 if lead < 0xF0 else 4
+    return _source_range(raw, start, min(len(raw), start + width), newlines)
 
 
 def _tag_end(raw, start):
@@ -398,14 +421,19 @@ def parse_mybatis_xml(raw):
     element_count = 0
     newlines = [index for index, byte in enumerate(raw) if byte == 10]
     root = None
+    unsafe_document = False
 
     def start_doctype(name, system_id, public_id, has_internal_subset):
+        nonlocal unsafe_document
         if (name != "mapper" or public_id != MAPPER_PUBLIC_ID or system_id != MAPPER_SYSTEM_ID
                 or has_internal_subset):
-            raise ValueError("unsupported or unsafe XML document type")
+            unsafe_document = True
+            raise UnsafeMyBatisXML("unsupported or unsafe XML document type")
 
     def reject_external(*_args):
-        return 0
+        nonlocal unsafe_document
+        unsafe_document = True
+        raise UnsafeMyBatisXML("external XML entities are not allowed")
 
     def start_element(name, attrs):
         nonlocal root, element_count
@@ -446,7 +474,17 @@ def parse_mybatis_xml(raw):
     parser.CharacterDataHandler = char_data
     try:
         parser.Parse(raw, True)
-    except (expat.ExpatError, ValueError, IndexError):
+    except UnsafeMyBatisXML:
+        raise ValueError("invalid or unsafe MyBatis XML") from None
+    except expat.ExpatError:
+        if unsafe_document:
+            raise ValueError("invalid or unsafe MyBatis XML") from None
+        return {"quality": "text_fallback", "facts": [], "diagnostics": [{
+            "code": "mybatis_xml_syntax_fallback",
+            "message": "MyBatis XML is malformed; source is retained as text",
+            "range": _xml_error_range(raw, parser.ErrorByteIndex, newlines),
+        }]}
+    except (ValueError, IndexError):
         raise ValueError("invalid or unsafe MyBatis XML") from None
     if root is None or root["name"] != "mapper":
         return {"quality": "text_fallback", "facts": [], "diagnostics": [{

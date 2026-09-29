@@ -343,6 +343,67 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.Error(t, err, "the empty current publication must not expose a removed source file")
 }
 
+func TestMalformedMyBatisXMLFallsBackAndPublishesReadableSnapshot(t *testing.T) {
+	const path = "src/mapper/BrokenMapper.xml"
+	raw := []byte(`<mapper namespace="demo.M"><select id="x">SELECT * FROM t</mapper>`)
+	f := newJavaSourceFixture(t, map[string][]byte{path: raw})
+	unsafeXML := []byte(`<!DOCTYPE mapper SYSTEM "https://attacker.invalid/evil.dtd"><mapper namespace="demo.Unsafe"/>`)
+	_, err := source.ParseFile(f.ctx, os.Getenv("SOURCE_PARSER_URL"), "src/mapper/Unsafe.xml", unsafeXML)
+	require.Error(t, err, "explicitly forbidden external DTDs must remain rejected, not downgraded")
+	f.parseCount.Store(0)
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)),
+		"readable malformed XML must fall back instead of aborting snapshot publication")
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+	require.EqualValues(t, 2, f.parseCount.Load(), "both the malformed mapper and ordinary Java file reach the parser HTTP endpoint")
+
+	var file types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, path).Take(&file).Error)
+	view, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(raw), view.Content, "the published source read preserves the exact original bytes")
+	require.Equal(t, "text_fallback", view.Quality)
+	var facts []types.ParsedSourceFact
+	require.NoError(t, json.Unmarshal(view.Facts, &facts))
+	require.Empty(t, facts, "unreliable XML structure must not create structural facts")
+	var diagnostics []types.ParsedSourceDiagnostic
+	require.NoError(t, json.Unmarshal(view.Diagnostics, &diagnostics))
+	var syntaxDiagnostic *types.ParsedSourceDiagnostic
+	for index := range diagnostics {
+		if diagnostics[index].Code == "mybatis_xml_syntax_fallback" {
+			syntaxDiagnostic = &diagnostics[index]
+			break
+		}
+	}
+	require.NotNil(t, syntaxDiagnostic, "the fallback quality must include an actionable parse diagnostic")
+	require.Equal(t, "</mapper>", string(raw[syntaxDiagnostic.Range.StartByte:syntaxDiagnostic.Range.EndByte]),
+		"diagnostic coordinates must point to the original mismatched closing tag")
+
+	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
+		QueryText: "SELECT", MatchCount: 20, DisableVectorMatch: true,
+	})
+	require.NoError(t, err)
+	foundIndexedFallback := false
+	for _, hit := range hits {
+		var evidence struct {
+			Source types.SourceEvidence `json:"source"`
+		}
+		if json.Unmarshal(hit.ChunkMetadata, &evidence) == nil && evidence.Source.Path == path && strings.Contains(hit.Content, "SELECT * FROM t") {
+			foundIndexedFallback = true
+			break
+		}
+	}
+	require.True(t, foundIndexedFallback, "fallback text must be persisted in the published keyword index")
+}
+
 type relationStageFailure struct {
 	interfaces.SourceSnapshotRepository
 }
