@@ -183,6 +183,19 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertFalse(any(f['kind'] == 'sql_table' for f in result['facts']))
         self.assertIn('java_mapper_annotation_identity_unknown', [d['code'] for d in result['diagnostics']])
 
+    def test_member_annotation_type_shadows_imported_mybatis_short_name(self):
+        raw = (b'import org.apache.ibatis.annotations.Select; class Outer { '
+               b'@interface Select { String value(); } interface M { '
+               b'@Select("SELECT * FROM false_table") Object find(); } }')
+        status, result = self.request('/v1/parse', {
+            'path': 'Outer.java', 'language': 'java', 'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        self.assertFalse(any(f['kind'] == 'java_annotation_sql' for f in result['facts']))
+        self.assertFalse(any(f['kind'] == 'sql_table' for f in result['facts']))
+        self.assertIn('java_mapper_annotation_identity_shadowed', [d['code'] for d in result['diagnostics']])
+
     def test_nested_mapper_namespace_preserves_enclosing_binary_type(self):
         raw = (b'package p; class Outer { interface M { String Q="SELECT * FROM nested_table"; '
                b'@org.apache.ibatis.annotations.Select(Q) Object find(); } }')

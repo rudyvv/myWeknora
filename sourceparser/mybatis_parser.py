@@ -92,10 +92,14 @@ def extract_java_facts(raw, tree, path):
             break
         stack.extend(reversed(node.named_children))
 
-    imports = {}
+    imports, declared_types = {}, {}
     stack = [root]
     while stack:
         node = stack.pop()
+        if node.type in JAVA_TYPES:
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                declared_types.setdefault(text(name_node), []).append(node)
         if node.type == "import_declaration":
             name_node = next((child for child in node.named_children
                               if child.type in ("identifier", "scoped_identifier")), None)
@@ -142,6 +146,11 @@ def extract_java_facts(raw, tree, path):
         if name.startswith(MYBATIS_ANNOTATION_PREFIX):
             return name[len(MYBATIS_ANNOTATION_PREFIX):]
         if "." in name:
+            return "unrelated"
+        if declared_types.get(name):
+            diagnostics.append({"code": "java_mapper_annotation_identity_shadowed",
+                                "message": "A source-declared type shadows the short mapper annotation name",
+                                "range": output_range})
             return "unrelated"
         imports_for_name = imports.get(name, [])
         canonical = MYBATIS_ANNOTATION_PREFIX + name
