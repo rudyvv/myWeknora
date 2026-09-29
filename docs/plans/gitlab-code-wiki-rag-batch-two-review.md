@@ -61,6 +61,21 @@ Parser 返回局部静态事实、精确区间与诊断，Go 做 hash/range 核�
 
 ## 修复与后续验收
 
-三个实现对话已并行恢复。T05 补环境验证可只读复用 integration frontend/node_modules 与既有 PG 容器，测试 DSN 在进程内读取该专用容器配置，禁止打印或写入文档。各测试独立 schema，容器不重启/删除；共享 grammar 只读。
+三个实现对话已并行恢复。数据库路线已按用户后续明确选择更新：不读取旧容器凭据，统一使用总协调创建的独立 `weknora-source-batch-two-test` / `127.0.0.1:57521` / `source_test`；已知临时 fixture DSN 只注入测试进程。各测试独立 schema，容器不重启/删除；共享 grammar 只读。前端依赖可只读复用 integration frontend/node_modules。
 
 总协调收到新冻结 commit 后以本轮原提交为增量复核范围，分别更新两轴 finding 状态，并核对原 base 到最终提交的完整要求。通过后集成，执行跨票公开验证及必要完整检查，再更新 GitHub。当前记录是首轮审查/修复派发，三票仍待验收。
+
+## 第二轮复验
+
+两个 reviewer 继续采用 GPT-6 Sol / high，分别审查冻结提交；下列记录不包含 worker 此后未提交的改动。
+
+| Ticket | 冻结提交 | Standards | Spec |
+| --- | --- | --- | --- |
+| T05 | `f6e1ac63c3f19fffb49ed188b92aa98de3db89d5` | 0 文档违反，1 判断性 P3：组件测试加载器重复 | 1 项 P2：完整 readiness 检查提前于旧发布查询，使临时 parser/index 故障的日志遗漏仍保留的旧发布 |
+| T08 | `11f36eca9ee1346549eb68ab018a644fa67ed3e7` | 0 新增文档违反，1 判断性 P3：import 别名归一化局部重复 | 1 项 P1：Python 提取语义变化仍使用旧 rules-v3 fingerprint，同提交可复用缺少 import 的旧 artifact |
+
+T05 原有三项 Spec 问题已修复，专用新库中七项真实故障/非线性提交及历史证据测试通过。新发现要求先执行 snapshot repository 的窄 nil guard，再查询旧发布并记录状态，最后检查 parser/index 能力；查询结果须区分已有发布、确无发布和未能确认。增加先成功发布再发生 parser readiness 故障的公开回归，并保留原文阅读验证。组件测试加载器可随同修复提取。
+
+T08 原有深递归、imports 和降级验收问题已修复；26 项 parser HTTP 测试、真实 PostgreSQL 公开同步/检索/固定阅读及质量 UI 已执行。新发现要求 Python 提取规则独立升为 v4，四种原有 grammar 的规则保持 v3；health、parse 与 artifact key 使用同一有效版本。补同内容、同提交的旧 artifact 注入回归，确认重新解析并发布 import。局部重复是非阻断建议；它没有造成错误行为或违反文档规则，总协调接受保留，避免在两种 import 语法之间增加无必要的抽象。
+
+T05/T08 修复已分别派发，正在针对性执行与等待新冻结提交。T10 正在按上述架构完成真实 parser、同步、原子发布与权限读取接入；解析模块测试通过不能代替整票验收。三项 Issue 保持未关闭。
