@@ -19,6 +19,7 @@ var listKnowledgeChunksTool = BaseTool{
 ## Use After grep_chunks or knowledge_search:
 - **FAQ hit** (type faq): list_knowledge_chunks(faq_id="cN") — reads that one FAQ chunk with answers from metadata.
 - **Document hit**: list_knowledge_chunks(knowledge_id="dN") — pages through all chunks.
+- **Repository source**: pass relation_cursor from the previous response to continue source relations.
 
 ## Parameters (provide exactly one id target):
 - faq_id (optional): Short cN ID for an FAQ chunk from grep_chunks / knowledge_search.
@@ -55,6 +56,10 @@ Full chunk content. FAQ entries include <faq> with <answer> from metadata.`,
       "description": "Start position when using knowledge_id (default 0)",
       "default": 0,
       "minimum": 0
+    },
+    "relation_cursor": {
+      "type": "string",
+      "description": "Opaque continuation token for repository source relations returned by the previous page"
     }
   }
 }`),
@@ -62,11 +67,12 @@ Full chunk content. FAQ entries include <faq> with <answer> from metadata.`,
 
 // ListKnowledgeChunksInput defines the input parameters for list knowledge chunks tool
 type ListKnowledgeChunksInput struct {
-	KnowledgeID string `json:"knowledge_id,omitempty"`
-	FAQID       string `json:"faq_id,omitempty"`
-	ChunkID     string `json:"chunk_id,omitempty"`
-	Limit       int    `json:"limit"`
-	Offset      int    `json:"offset"`
+	KnowledgeID    string `json:"knowledge_id,omitempty"`
+	FAQID          string `json:"faq_id,omitempty"`
+	ChunkID        string `json:"chunk_id,omitempty"`
+	Limit          int    `json:"limit"`
+	Offset         int    `json:"offset"`
+	RelationCursor string `json:"relation_cursor,omitempty"`
 }
 
 // ListKnowledgeChunksTool retrieves chunk snapshots for a specific knowledge document.
@@ -107,7 +113,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 		chunkID = strings.TrimSpace(input.ChunkID)
 	}
 	if chunkID != "" {
-		return t.executeByChunkID(ctx, chunkID)
+		return t.executeByChunkID(ctx, chunkID, input.RelationCursor)
 	}
 
 	knowledgeID := strings.TrimSpace(input.KnowledgeID)
@@ -210,6 +216,11 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	knowledgeTitle := t.lookupKnowledgeTitle(ctx, knowledgeID)
 
 	output := t.buildOutput(knowledgeID, knowledgeTitle, totalChunks, fetched, chunks)
+	sourceAnalysis, err := t.sourceAnalysisForChunks(ctx, knowledgeID, input.RelationCursor, chunks)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("failed to read source analysis: %v", err)}, err
+	}
+	output = appendSourceAnalysis(output, sourceAnalysis)
 
 	formattedChunks := make([]map[string]interface{}, 0, len(chunks))
 	for idx, c := range chunks {
@@ -259,24 +270,28 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 		formattedChunks = append(formattedChunks, chunkData)
 	}
 
+	data := map[string]interface{}{
+		"display_type":    "knowledge_chunks_list",
+		"knowledge_id":    knowledgeID,
+		"knowledge_title": knowledgeTitle,
+		"total_chunks":    totalChunks,
+		"fetched_chunks":  fetched,
+		"page":            pagination.Page,
+		"page_size":       pagination.PageSize,
+		"chunks":          formattedChunks,
+	}
+	if sourceAnalysis != nil {
+		data["source_analysis"] = sourceAnalysis
+	}
 	return &types.ToolResult{
 		Success: true,
 		Output:  output,
-		Data: map[string]interface{}{
-			"display_type":    "knowledge_chunks_list",
-			"knowledge_id":    knowledgeID,
-			"knowledge_title": knowledgeTitle,
-			"total_chunks":    totalChunks,
-			"fetched_chunks":  fetched,
-			"page":            pagination.Page,
-			"page_size":       pagination.PageSize,
-			"chunks":          formattedChunks,
-		},
+		Data:    data,
 	}, nil
 }
 
 // executeByChunkID loads one chunk by faq_id / chunk_id (FAQ entry or any chunk).
-func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID string) (*types.ToolResult, error) {
+func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID, relationCursor string) (*types.ToolResult, error) {
 	chunk, err := authorizeChunkInSearchTargets(
 		ctx, t.searchTargets, chunkID, t.chunkService, t.knowledgeService,
 	)
@@ -300,6 +315,11 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 
 	knowledgeTitle := t.lookupKnowledgeTitle(ctx, chunk.KnowledgeID)
 	output := t.buildOutput(chunk.KnowledgeID, knowledgeTitle, 1, 1, chunks)
+	sourceAnalysis, err := t.sourceAnalysisForChunks(ctx, chunk.KnowledgeID, relationCursor, chunks)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("failed to read source analysis: %v", err)}, err
+	}
+	output = appendSourceAnalysis(output, sourceAnalysis)
 
 	formattedChunks := []map[string]interface{}{
 		{
@@ -331,12 +351,34 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 	if q := faqStandardQuestion(chunk); q != "" {
 		data["faq_question"] = q
 	}
+	if sourceAnalysis != nil {
+		data["source_analysis"] = sourceAnalysis
+	}
 
 	return &types.ToolResult{
 		Success: true,
 		Output:  output,
 		Data:    data,
 	}, nil
+}
+
+func (t *ListKnowledgeChunksTool) sourceAnalysisForChunks(ctx context.Context, knowledgeID, relationCursor string, chunks []*types.Chunk) (map[string]interface{}, error) {
+	if t.knowledgeService == nil || !source.HasReadScope(ctx) {
+		return nil, nil
+	}
+	knowledge, err := authorizeKnowledgeInSearchTargets(ctx, t.searchTargets, knowledgeID, t.knowledgeService)
+	if err != nil || knowledge == nil || knowledge.Type != types.KnowledgeTypeSource {
+		return nil, nil
+	}
+	for _, chunk := range chunks {
+		if chunk == nil || chunk.KnowledgeID != knowledgeID {
+			continue
+		}
+		if evidence := source.Evidence(chunk.Metadata); evidence != nil {
+			return readSourceAnalysis(ctx, t.knowledgeService, knowledgeID, evidence, relationCursor)
+		}
+	}
+	return nil, nil
 }
 
 // lookupKnowledgeTitle looks up the title of a knowledge document

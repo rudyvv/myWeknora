@@ -177,7 +177,7 @@ class ScriptHTTPContract(unittest.TestCase):
         status, health = self.request('/health')
         self.assertEqual(status, 200, health)
         self.assertEqual(health['languages'], ['java', 'javascript', 'mybatis-xml', 'tsx', 'typescript'])
-        self.assertIn('rules-8', health['parser_version'])
+        self.assertIn('rules-9', health['parser_version'])
 
     def test_legacy_java_cache_stays_ready_but_changed_script_grammar_cannot_advertise_readiness(self):
         cache = Path(os.environ['SOURCE_PARSER_CACHE'])

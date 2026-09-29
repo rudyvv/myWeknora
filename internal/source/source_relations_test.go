@@ -87,3 +87,41 @@ func TestCorrelateSourceFactsLeavesDuplicateMapperNamespaceUnresolved(t *testing
 	}
 	t.Fatal("mapper relation not produced")
 }
+
+func TestCorrelateDoesNotInferMapperCallsFromNamesOrSimpleTypes(t *testing.T) {
+	java := SourceRelationMember{Path: "Mapper.java", FileID: "jf", VersionID: "jv", Facts: []types.ParsedSourceFact{
+		relationFact("java_mapper_method", "find", "demo.PushScheduleMapper", 1, 8),
+		relationFact("java_mapper_method", "overloaded", "demo.PushScheduleMapper", 9, 18),
+		relationFact("java_mapper_method", "overloaded", "demo.PushScheduleMapper", 19, 29),
+		{Kind: "java_field", Name: "otherMapper", TypeName: "unrelated.PushScheduleMapper", Quality: "structural"},
+		{Kind: "java_field", Name: "mapper", TypeName: "demo.PushScheduleMapper", Quality: "structural"},
+		{Kind: "java_mapper_call", Name: "find", Receiver: "otherMapper", Quality: "structural"},
+		{Kind: "java_mapper_call", Name: "find", Receiver: "service.mapper", Quality: "structural"},
+		{Kind: "java_mapper_call", Name: "find", Receiver: "mapper", Quality: "structural"},
+		{Kind: "java_mapper_call", Name: "find", Receiver: "mapper", Quality: "structural"},
+		{Kind: "java_mapper_call", Name: "overloaded", Receiver: "mapper", Quality: "structural"},
+	}}
+	xml := SourceRelationMember{Path: "Mapper.xml", FileID: "xf", VersionID: "xv", Facts: []types.ParsedSourceFact{
+		relationFact("mybatis_mapper", "", "demo.PushScheduleMapper", 0, 40),
+		relationFact("mybatis_statement", "find", "demo.PushScheduleMapper", 10, 20),
+		relationFact("mybatis_statement", "overloaded", "demo.PushScheduleMapper", 21, 30),
+	}}
+	relations := CorrelateSourceFacts(1, "source", "snapshot", []SourceRelationMember{java, xml})
+	var verifiedMethodEdge, overloadedMethodEdge *types.SourceCodeRelation
+	for i := range relations {
+		if relations[i].Kind == "mapper_call" {
+			t.Fatalf("lexical receiver/name was promoted to a mapper-call edge: %#v", relations[i])
+		}
+		if relations[i].Kind == "mapper_statement" && relations[i].FromKey == "demo.PushScheduleMapper#find" {
+			verifiedMethodEdge = &relations[i]
+		} else if relations[i].Kind == "mapper_statement" && relations[i].FromKey == "demo.PushScheduleMapper#overloaded" {
+			overloadedMethodEdge = &relations[i]
+		}
+	}
+	if verifiedMethodEdge == nil || verifiedMethodEdge.FromKey != "demo.PushScheduleMapper#find" || verifiedMethodEdge.Determinacy != "certain" || verifiedMethodEdge.ToFileID != "xf" {
+		t.Fatalf("verified interface method to XML statement edge was lost: %#v", verifiedMethodEdge)
+	}
+	if overloadedMethodEdge == nil || overloadedMethodEdge.Determinacy != "uncertain" || overloadedMethodEdge.ToFileID != "" {
+		t.Fatalf("overloaded interface method became a readable source relation: %#v", overloadedMethodEdge)
+	}
+}

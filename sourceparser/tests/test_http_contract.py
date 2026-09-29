@@ -116,7 +116,7 @@ class JavaHTTPContract(unittest.TestCase):
             self.assertEqual(status, 400, response)
             self.assertNotIn('class Broken', json.dumps(response))
 
-    def test_java_ast_emits_mapper_facts_and_ignores_comment_lookalikes(self):
+    def test_java_ast_emits_mapper_method_facts_without_unverified_call_bindings(self):
         raw = (b'package /* Mapper package */ demo;\r\npublic interface PushScheduleMapper {\r\n'
                b'  // String fake();\r\n  Schedule findById(Long id);\r\n}\r\n'
                b'class Service { PushScheduleMapper mapper; void run() { mapper.findById(1L); } }\r\n')
@@ -128,9 +128,8 @@ class JavaHTTPContract(unittest.TestCase):
         methods = [f for f in result['facts'] if f['kind'] == 'java_mapper_method']
         self.assertEqual([f['name'] for f in methods], ['findById'])
         self.assertEqual(methods[0]['namespace'], 'demo.PushScheduleMapper')
-        calls = [f for f in result['facts'] if f['kind'] == 'java_mapper_call']
-        self.assertEqual([(f['receiver'], f['name']) for f in calls], [('mapper', 'findById')])
-        for fact in methods + calls:
+        self.assertFalse(any(f['kind'] in ('java_field', 'java_mapper_call') for f in result['facts']))
+        for fact in methods:
             span = fact['range']
             self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), fact['text'])
 
@@ -280,6 +279,8 @@ class JavaHTTPContract(unittest.TestCase):
                b'<delete id="deleteUsing">DELETE FROM o USING orders o JOIN customers c ON o.id=c.id</delete>'
                b'<delete id="deleteMulti">DELETE o,c FROM orders o JOIN customers c ON o.id=c.id</delete>'
                b'<update id="updateJoin">UPDATE orders o JOIN customers c ON o.id=c.id SET o.x=1</update>'
+               b'<update id="updateDerivedJoin">UPDATE orders o JOIN (SELECT * FROM customers) c '
+               b'ON o.id=c.id SET o.x=1</update>'
                b'<select id="query">WITH active AS (SELECT * FROM base_table) '
                b'SELECT * FROM active a JOIN JSON_TABLE(a.value, \'$\' COLUMNS(id INT PATH \'$.id\')) jt ON 1=1</select>'
                b'<update id="qualifiedDml">WITH orders AS (SELECT * FROM staging) UPDATE db.orders '
@@ -300,7 +301,8 @@ class JavaHTTPContract(unittest.TestCase):
                                        ('delete', 'old_schedule'), ('deleteUsing', 'orders'),
                                        ('deleteUsing', 'customers'), ('deleteMulti', 'orders'),
                                        ('deleteMulti', 'customers'), ('updateJoin', 'orders'),
-                                       ('updateJoin', 'customers'), ('query', 'base_table'),
+                                       ('updateJoin', 'customers'), ('updateDerivedJoin', 'orders'),
+                                       ('updateDerivedJoin', 'customers'), ('query', 'base_table'),
                                        ('qualifiedDml', 'db.orders'), ('qualifiedDml', 'staging'),
                                        ('cteTableReference', 'target'), ('cteTableReference', 'db.c'),
                                        ('nestedCteScope', 'target'), ('nestedCteScope', 'real_a'),

@@ -86,7 +86,7 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 			return nil, fmt.Errorf("source parser exceeded its fact or diagnostic limit")
 		}
 		allowedFacts := map[string]bool{
-			"java_mapper_method": true, "java_field": true, "java_mapper_call": true,
+			"java_mapper_method":  true,
 			"java_annotation_sql": true, "mybatis_mapper": true, "mybatis_statement": true,
 			"mybatis_result_map": true, "mybatis_sql_fragment": true, "mybatis_include": true,
 			"sql_table": true,

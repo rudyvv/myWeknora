@@ -3,14 +3,32 @@ import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import type { AuditLog, AuditOutcome, ListAuditLogResponse } from '@/api/tenant/audit-log';
 
 export interface SourceRange { start_byte: number; end_byte: number; start_line: number; end_line: number }
+export interface SourceFact {
+  kind: string; name?: string; qualified_name?: string; signature?: string; namespace?: string; statement_type?: string; statement_id?: string;
+  method_name?: string; receiver?: string; type_name?: string; result_map_refs?: string[]; include_refs?: string[];
+  target_namespace?: string; target_name?: string; owner_kind?: string; dynamic?: boolean;
+  certainty?: string; quality: string; range: SourceRange; text?: string; sql?: string;
+}
+export interface SourceDiagnostic { code: string; message: string; range?: SourceRange }
+export interface SourceCodeRelation {
+  id: string; kind: string; from_file_id: string; from_version_id: string; from_path: string; from_key: string;
+  from_range: SourceRange; to_file_id: string; to_version_id: string; to_path: string; to_key: string;
+  to_range: SourceRange; determinacy: string; quality: string; resolution_reason?: string;
+}
 export interface SourceFileView {
   knowledge_id: string; snapshot_id: string; file_version_id: string; project_id: string;
   commit_sha: string; repository_url: string; path: string; sha256: string; encoding: string;
   quality: string; parser_version: string; content: string;
   symbols: Array<{ kind: string; name: string; qualified_name: string; signature: string; range: SourceRange }>;
+  facts: SourceFact[]; diagnostics: SourceDiagnostic[]; relations: SourceCodeRelation[];
+  relations_truncated: boolean; relations_next_cursor?: string;
 }
-export function getSourceFile(id: string, versionID?: string): Promise<{ data: SourceFileView }> {
-  return get(`/api/v1/knowledge/${encodeURIComponent(id)}/source${versionID ? `?version_id=${encodeURIComponent(versionID)}` : ''}`) as unknown as Promise<{ data: SourceFileView }>;
+export function getSourceFile(id: string, versionID?: string, relationCursor?: string): Promise<{ data: SourceFileView }> {
+  const query = new URLSearchParams();
+  if (versionID) query.set('version_id', versionID);
+  if (relationCursor) query.set('relation_cursor', relationCursor);
+  const qs = query.toString();
+  return get(`/api/v1/knowledge/${encodeURIComponent(id)}/source${qs ? `?${qs}` : ''}`) as unknown as Promise<{ data: SourceFileView }>;
 }
 
 export type KnowledgeBaseActivity = AuditLog;

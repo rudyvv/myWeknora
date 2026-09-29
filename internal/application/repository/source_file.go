@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/Tencent/WeKnora/internal/source"
@@ -55,7 +57,7 @@ func (r *knowledgeRepository) readPublishedSourceFile(ctx context.Context, tenan
 	}
 	file.Content = string(file.RawContent)
 	if source.HasReadScope(ctx) {
-		file.Relations, err = r.readVisibleSourceRelations(ctx, tenant, &file)
+		file.Relations, file.RelationsTruncated, file.RelationsNextCursor, err = r.readVisibleSourceRelations(ctx, tenant, &file)
 		if err != nil {
 			return nil, err
 		}
@@ -63,7 +65,20 @@ func (r *knowledgeRepository) readPublishedSourceFile(ctx context.Context, tenan
 	return &file, nil
 }
 
-func (r *knowledgeRepository) readVisibleSourceRelations(ctx context.Context, tenant uint64, file *types.SourceFileView) ([]types.SourceCodeRelation, error) {
+const sourceRelationPageSize = 100
+
+type sourceRelationCursor struct {
+	SnapshotID    string `json:"s"`
+	FileID        string `json:"f"`
+	VersionID     string `json:"v"`
+	FromPath      string `json:"p"`
+	FromStartByte int64  `json:"b"`
+	Kind          string `json:"k"`
+	ToKey         string `json:"t"`
+	ID            string `json:"i"`
+}
+
+func (r *knowledgeRepository) readVisibleSourceRelations(ctx context.Context, tenant uint64, file *types.SourceFileView) ([]types.SourceCodeRelation, bool, string, error) {
 	var relations []types.SourceCodeRelation
 	query := r.db.WithContext(ctx).Table("source_code_relations r").Select("r.*").
 		Joins(`JOIN source_snapshots rs ON rs.id=r.snapshot_id AND rs.tenant_id=r.tenant_id AND rs.data_source_id=r.data_source_id AND rs.state='published'`).
@@ -81,6 +96,42 @@ func (r *knowledgeRepository) readVisibleSourceRelations(ctx context.Context, te
 		Where("(r.to_file_id='' OR (tm.source_file_id IS NOT NULL AND tv.id IS NOT NULL AND tf.id IS NOT NULL AND tk.id IS NOT NULL))").
 		Where(source.SnapshotSQL(ctx, "r.snapshot_id", "r.data_source_id", "r.from_file_id")).
 		Where("(r.to_file_id='' OR " + source.SnapshotSQL(ctx, "r.snapshot_id", "r.data_source_id", "r.to_file_id") + ")")
-	err := query.Order("r.from_path, r.kind, r.to_key").Limit(500).Find(&relations).Error
-	return relations, err
+	cursorToken := source.RelationCursorFromContext(ctx)
+	if cursorToken != "" {
+		var cursor sourceRelationCursor
+		if len(cursorToken) > 4096 {
+			return nil, false, "", fmt.Errorf("invalid source relation cursor")
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(cursorToken)
+		if err != nil || json.Unmarshal(decoded, &cursor) != nil || cursor.ID == "" ||
+			cursor.SnapshotID != file.SnapshotID || cursor.FileID != file.KnowledgeID || cursor.VersionID != file.FileVersionID {
+			return nil, false, "", fmt.Errorf("invalid source relation cursor")
+		}
+		query = query.Where(`(r.from_path, COALESCE(NULLIF(r.from_range->>'start_byte','')::bigint,0), r.kind, r.to_key, r.id) > (?, ?, ?, ?, ?)`,
+			cursor.FromPath, cursor.FromStartByte, cursor.Kind, cursor.ToKey, cursor.ID)
+	}
+	pageSize := source.RelationPageSizeFromContext(ctx, sourceRelationPageSize)
+	err := query.Order("r.from_path, COALESCE(NULLIF(r.from_range->>'start_byte','')::bigint,0), r.kind, r.to_key, r.id").Limit(pageSize + 1).Find(&relations).Error
+	if err != nil {
+		return nil, false, "", err
+	}
+	truncated := len(relations) > pageSize
+	if truncated {
+		relations = relations[:pageSize]
+		last := relations[len(relations)-1]
+		var location struct {
+			StartByte int64 `json:"start_byte"`
+		}
+		if err := json.Unmarshal(last.FromRange, &location); err != nil {
+			return nil, false, "", fmt.Errorf("invalid source relation range: %w", err)
+		}
+		next := sourceRelationCursor{SnapshotID: file.SnapshotID, FileID: file.KnowledgeID, VersionID: file.FileVersionID,
+			FromPath: last.FromPath, FromStartByte: location.StartByte, Kind: last.Kind, ToKey: last.ToKey, ID: last.ID}
+		encoded, err := json.Marshal(next)
+		if err != nil {
+			return nil, false, "", err
+		}
+		return relations, true, base64.RawURLEncoding.EncodeToString(encoded), nil
+	}
+	return relations, false, "", nil
 }

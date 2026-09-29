@@ -301,6 +301,25 @@ export interface KnowledgeChunksListData {
     faq_question?: string;
     faq_id?: string;
     single_chunk?: boolean;
+    source_analysis?: {
+        knowledge_id: string;
+        snapshot_id: string;
+        file_version_id: string;
+        sha256: string;
+        path: string;
+        quality: string;
+        parser_version: string;
+        facts: Array<Record<string, any>>;
+        facts_truncated: boolean;
+        diagnostics: Array<{ code: string; message: string; range?: { start_line: number; end_line: number } }>;
+        diagnostics_truncated: boolean;
+        relations: Array<Record<string, any> & {
+            kind: string; determinacy: string; quality: string; resolution_reason?: string;
+            target_evidence?: { knowledge_id: string; file_version_id: string; sha256: string; path: string; range: { start_line: number; end_line: number }; snippet: string; snippet_truncated: boolean };
+        }>;
+        relations_truncated: boolean;
+        relations_next_cursor?: string;
+    };
 }
 
 // Wiki write page data

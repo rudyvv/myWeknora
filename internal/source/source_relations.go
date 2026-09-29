@@ -42,8 +42,6 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 	sqlFragmentsByKey := map[string][]factOwner{}
 	methods := []factOwner{}
 	methodCounts := map[string]int{}
-	fields := map[string][]factOwner{}
-	calls := []factOwner{}
 	var relations []types.SourceCodeRelation
 
 	for _, member := range members {
@@ -59,10 +57,6 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 			case "java_mapper_method":
 				methods = append(methods, factOwner{member, fact})
 				methodCounts[fact.Namespace+"#"+fact.Name]++
-			case "java_field":
-				fields[member.FileID] = append(fields[member.FileID], factOwner{member, fact})
-			case "java_mapper_call":
-				calls = append(calls, factOwner{member, fact})
 			}
 		}
 		for _, fact := range member.Facts {
@@ -127,44 +121,6 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 				relations = append(relations, resolveFactRelation(tenant, sourceID, snapshotID, "include", factOwner{doc.member, owner},
 					doc.namespace+"."+owner.Name, targets, len(documents[ns]), "SQL include"))
 			}
-		}
-	}
-
-	mapperTypes := map[string][]string{}
-	for _, owner := range methods {
-		parts := strings.Split(owner.fact.Namespace, ".")
-		if len(parts) > 0 && parts[len(parts)-1] != "" {
-			simple := parts[len(parts)-1]
-			if nested := strings.LastIndex(simple, "$"); nested >= 0 {
-				simple = simple[nested+1:]
-			}
-			mapperTypes[simple] = appendUnique(mapperTypes[simple], owner.fact.Namespace)
-		}
-	}
-	for _, call := range calls {
-		for _, field := range fields[call.member.FileID] {
-			if !receiverMatchesField(call.fact.Receiver, field.fact.Name) {
-				continue
-			}
-			typeName := simpleTypeName(field.fact.TypeName)
-			namespaces := mapperTypes[typeName]
-			if len(namespaces) == 0 {
-				continue
-			}
-			candidates := []factOwner{}
-			key := ""
-			if len(namespaces) == 1 {
-				key = namespaces[0] + "#" + call.fact.Name
-				candidates = statementsByKey[relationLookupKey(namespaces[0], call.fact.Name)]
-			} else {
-				key = call.fact.Receiver + "#" + call.fact.Name
-			}
-			count := 0
-			if len(namespaces) == 1 {
-				count = len(documents[namespaces[0]])
-			}
-			relations = append(relations, resolveFactRelation(tenant, sourceID, snapshotID, "mapper_call", call, key, candidates,
-				count, "mapper call"))
 		}
 	}
 
@@ -250,28 +206,6 @@ func tableAccessReason(fact types.ParsedSourceFact) string {
 		return "SQL table access is branch-dependent or contains a dynamic identifier"
 	}
 	return ""
-}
-
-func simpleTypeName(typeName string) string {
-	if angle := strings.IndexByte(typeName, '<'); angle >= 0 {
-		typeName = typeName[:angle]
-	}
-	typeName = strings.TrimSpace(strings.TrimSuffix(typeName, "[]"))
-	parts := strings.Split(typeName, ".")
-	return parts[len(parts)-1]
-}
-
-func receiverMatchesField(receiver, field string) bool {
-	return receiver == field || strings.HasSuffix(receiver, "."+field)
-}
-
-func appendUnique(values []string, value string) []string {
-	for _, existing := range values {
-		if existing == value {
-			return values
-		}
-	}
-	return append(values, value)
 }
 
 func rangeStart(raw types.JSON) int {

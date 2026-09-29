@@ -263,32 +263,6 @@ def extract_java_facts(raw, tree, path):
                 facts.extend({"kind": "sql_table", **values, "range": annotation_range, "quality": "structural"}
                              for values in _sql_table_fact_values(table_names, mapper_namespace, method_name,
                                                                   "java_annotation", sql_dynamic))
-        elif node.type in ("field_declaration", "constant_declaration"):
-            type_node = node.child_by_field_name("type")
-            if type_node is not None:
-                type_name = raw[type_node.start_byte:type_node.end_byte].decode("utf-8")
-                for child in node.named_children:
-                    if child.type == "variable_declarator":
-                        name_node = child.child_by_field_name("name")
-                        if name_node is not None:
-                            start, end = child.start_byte, child.end_byte
-                            facts.append({
-                                "kind": "java_field", "name": raw[name_node.start_byte:name_node.end_byte].decode("utf-8"),
-                                "type_name": type_name, "range": _source_range(raw, start, end, newlines),
-                                "text": raw[start:end].decode("utf-8"), "quality": "structural",
-                            })
-        elif node.type == "method_invocation":
-            name_node = node.child_by_field_name("name")
-            receiver_node = node.child_by_field_name("object")
-            if name_node is not None and receiver_node is not None:
-                start, end = node.start_byte, node.end_byte
-                facts.append({
-                    "kind": "java_mapper_call",
-                    "name": raw[name_node.start_byte:name_node.end_byte].decode("utf-8"),
-                    "receiver": raw[receiver_node.start_byte:receiver_node.end_byte].decode("utf-8"),
-                    "range": _source_range(raw, start, end, newlines),
-                    "text": raw[start:end].decode("utf-8"), "quality": "structural",
-                })
         stack.extend(reversed(node.named_children))
         if len(facts) > MAX_FACTS:
             raise ValueError("Java fact limit exceeded")
@@ -335,52 +309,55 @@ def _tables(sql):
         parts = [table.catalog, table.db, table.name]
         return ".".join(part for part in parts if part)
 
+    def is_cte_reference(table):
+        if table.db or table.catalog:
+            return False
+        name = table.name.casefold()
+        current = table.parent
+        while current is not None:
+            with_clause = current.args.get("with_") if hasattr(current, "args") else None
+            if isinstance(with_clause, exp.With):
+                for cte in with_clause.expressions:
+                    if cte.alias_or_name.casefold() != name:
+                        continue
+                    ancestor = table
+                    inside_own_definition = False
+                    while ancestor is not None and ancestor is not current:
+                        if ancestor is cte:
+                            inside_own_definition = True
+                            break
+                        ancestor = ancestor.parent
+                    if inside_own_definition and not with_clause.args.get("recursive"):
+                        continue
+                    return True
+            current = current.parent
+        return False
+
     for statement in parse_sql(sql, read="mysql"):
         if statement is None:
             continue
         if statement.key in ("insert", "update", "delete", "merge"):
-            root_with = statement.args.get("with_")
-            cte_names = {cte.alias_or_name.casefold() for cte in root_with.expressions} if isinstance(root_with, exp.With) else set()
             using_sources = statement.args.get("using")
-            if statement.key == "delete" and using_sources:
-                # MySQL `DELETE FROM alias USING physical_source ...`: the
-                # `this` table is a target alias, not an entity table.
-                sources = using_sources if isinstance(using_sources, list) else [using_sources]
-            else:
-                source = statement.args.get("this")
-                if isinstance(source, exp.Schema):
-                    source = source.this
-                sources = [source] if source is not None else []
             seen = set()
-            for source_index, source in enumerate(sources):
-                if source is None:
+            delete_target_aliases = set()
+            if statement.key == "delete":
+                targets = statement.args.get("tables") or []
+                delete_target_aliases.update(targets)
+                if using_sources:
+                    target = statement.args.get("this")
+                    if isinstance(target, exp.Table):
+                        delete_target_aliases.add(target)
+            # DML roots are not consistently traversed by SQLGlot's Scope
+            # walker (notably UPDATE ... JOIN (SELECT ...)). Walk real Table
+            # AST nodes so derived-query sources are included, while applying
+            # CTE visibility at each node's lexical ancestors.
+            for table in statement.find_all(exp.Table):
+                if table in delete_target_aliases or not physical_table(table) or is_cte_reference(table):
                     continue
-                root_table = source.this if isinstance(source, exp.Schema) else source
-                candidates = []
-                if isinstance(root_table, exp.Table):
-                    candidates.append((root_table, source_index == 0 and statement.key in ("insert", "update", "delete", "merge") and not (statement.key == "delete" and using_sources)))
-                    for join in root_table.args.get("joins") or []:
-                        joined = join.this
-                        if isinstance(joined, exp.Table):
-                            candidates.append((joined, False))
-                for table, is_target in candidates:
-                    cte_reference = (not is_target and not table.db and not table.catalog and table.name.casefold() in cte_names)
-                    if not physical_table(table) or cte_reference:
-                        continue
-                    name = physical_name(table)
-                    if name and name not in seen:
-                        seen.add(name)
-                        names.append(name)
-            # Some SQLGlot DML forms expose additional source scopes (for
-            # nested selects). CTE aliases and derived scopes never become
-            # physical tables themselves.
-            for scope in traverse_scope(statement):
-                for source_value in scope.sources.values():
-                    if physical_table(source_value):
-                        name = physical_name(source_value)
-                        if name and name not in seen:
-                            seen.add(name)
-                            names.append(name)
+                name = physical_name(table)
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
             continue
         for scope in traverse_scope(statement):
             for source in scope.sources.values():

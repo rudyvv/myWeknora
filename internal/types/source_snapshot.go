@@ -194,26 +194,28 @@ type SourceReadLease struct {
 
 // SourceFileView is a single published, fixed-commit read of the complete file.
 type SourceFileView struct {
-	FileSize        int64                `json:"file_size"`
-	DataSourceID    string               `json:"data_source_id"`
-	KnowledgeBaseID string               `json:"-"`
-	KnowledgeID     string               `json:"knowledge_id"`
-	SnapshotID      string               `json:"snapshot_id"`
-	FileVersionID   string               `json:"file_version_id"`
-	ProjectID       string               `json:"project_id"`
-	CommitSHA       string               `json:"commit_sha"`
-	RepositoryURL   string               `json:"repository_url"`
-	Path            string               `json:"path"`
-	SHA256          string               `json:"sha256"`
-	Encoding        string               `json:"encoding"`
-	Quality         string               `json:"quality"`
-	ParserVersion   string               `json:"parser_version"`
-	Content         string               `json:"content" gorm:"-"`
-	RawContent      []byte               `json:"-"`
-	Symbols         JSON                 `json:"symbols"`
-	Facts           JSON                 `json:"facts"`
-	Diagnostics     JSON                 `json:"diagnostics"`
-	Relations       []SourceCodeRelation `json:"relations,omitempty" gorm:"-"`
+	FileSize            int64                `json:"file_size"`
+	DataSourceID        string               `json:"data_source_id"`
+	KnowledgeBaseID     string               `json:"-"`
+	KnowledgeID         string               `json:"knowledge_id"`
+	SnapshotID          string               `json:"snapshot_id"`
+	FileVersionID       string               `json:"file_version_id"`
+	ProjectID           string               `json:"project_id"`
+	CommitSHA           string               `json:"commit_sha"`
+	RepositoryURL       string               `json:"repository_url"`
+	Path                string               `json:"path"`
+	SHA256              string               `json:"sha256"`
+	Encoding            string               `json:"encoding"`
+	Quality             string               `json:"quality"`
+	ParserVersion       string               `json:"parser_version"`
+	Content             string               `json:"content" gorm:"-"`
+	RawContent          []byte               `json:"-"`
+	Symbols             JSON                 `json:"symbols"`
+	Facts               JSON                 `json:"facts"`
+	Diagnostics         JSON                 `json:"diagnostics"`
+	Relations           []SourceCodeRelation `json:"relations,omitempty" gorm:"-"`
+	RelationsTruncated  bool                 `json:"relations_truncated" gorm:"-"`
+	RelationsNextCursor string               `json:"relations_next_cursor,omitempty" gorm:"-"`
 }
 
 type SourceParsedArtifact struct {

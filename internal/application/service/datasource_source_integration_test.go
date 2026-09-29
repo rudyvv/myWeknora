@@ -28,6 +28,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/datasource/connector/gitlab"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
@@ -170,6 +171,90 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, linked.Relations)
 	require.Contains(t, linked.Relations, mapperRelation)
+	toolArgs, err := json.Marshal(map[string]any{"knowledge_id": javaFile.ID, "limit": 1})
+	require.NoError(t, err)
+	toolResult, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, toolArgs)
+	require.NoError(t, err)
+	require.True(t, toolResult.Success, toolResult.Error)
+	analysis, ok := toolResult.Data["source_analysis"].(map[string]interface{})
+	require.True(t, ok, "Agent chunk reads inside the existing question scope expose source facts and relations")
+	require.Equal(t, javaView.FileVersionID, analysis["file_version_id"])
+	require.NotEmpty(t, analysis["facts"])
+	var targetEvidence map[string]interface{}
+	for _, raw := range analysis["relations"].([]map[string]interface{}) {
+		if raw["kind"] == "mapper_statement" {
+			targetEvidence, _ = raw["target_evidence"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, targetEvidence)
+	require.Equal(t, xmlFile.ID, targetEvidence["knowledge_id"])
+	require.Equal(t, xmlVersion.ID, targetEvidence["file_version_id"])
+	require.Equal(t, xmlVersion.SHA256, targetEvidence["sha256"])
+	require.Equal(t, xmlFile.Path, targetEvidence["path"])
+	require.Contains(t, targetEvidence["snippet"], "getPushSchedule")
+	require.Contains(t, toolResult.Output, "<source_analysis>")
+
+	probeRelations := make([]types.SourceCodeRelation, 110)
+	probeIDs := make(map[string]bool, len(probeRelations))
+	for i := range probeRelations {
+		probeRelations[i] = types.SourceCodeRelation{
+			ID: uuid.NewString(), TenantID: 1, DataSourceID: f.ds.ID, SnapshotID: snapshot.ID,
+			Kind: "pagination_probe", FromFileID: javaFile.ID, FromVersionID: javaView.FileVersionID,
+			FromPath: javaFile.Path, FromKey: fmt.Sprintf("probe-%03d", i),
+			FromRange: types.JSON(fmt.Sprintf(`{"start_byte":%d,"end_byte":%d,"start_line":1,"end_line":1}`, i, i+1)),
+			ToKey:     fmt.Sprintf("probe-%03d", i), ToRange: types.JSON(`null`),
+			Determinacy: "certain", Quality: "structural", Context: types.JSON(`[]`),
+		}
+		probeIDs[probeRelations[i].ID] = true
+	}
+	require.NoError(t, f.db.Create(&probeRelations).Error)
+	agentFirstArgs, _ := json.Marshal(map[string]any{"knowledge_id": javaFile.ID, "limit": 1})
+	agentFirst, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, agentFirstArgs)
+	require.NoError(t, err)
+	firstAnalysis := agentFirst.Data["source_analysis"].(map[string]interface{})
+	firstAgentRelations := firstAnalysis["relations"].([]map[string]interface{})
+	require.Len(t, firstAgentRelations, 20, "Agent evidence pages stay within a small output budget")
+	require.True(t, firstAnalysis["relations_truncated"].(bool))
+	agentCursor := firstAnalysis["relations_next_cursor"].(string)
+	agentNextArgs, _ := json.Marshal(map[string]any{"knowledge_id": javaFile.ID, "limit": 1, "relation_cursor": agentCursor})
+	agentNext, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, agentNextArgs)
+	require.NoError(t, err)
+	nextAnalysis := agentNext.Data["source_analysis"].(map[string]interface{})
+	nextAgentRelations := nextAnalysis["relations"].([]map[string]interface{})
+	require.Len(t, nextAgentRelations, 20)
+	firstAgentIDs := map[string]bool{}
+	for _, relation := range firstAgentRelations {
+		firstAgentIDs[relation["id"].(string)] = true
+	}
+	for _, relation := range nextAgentRelations {
+		require.False(t, firstAgentIDs[relation["id"].(string)], "Agent relation cursor advances without repeating edges")
+	}
+	firstPage, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.Len(t, firstPage.Relations, 100)
+	require.True(t, firstPage.RelationsTruncated)
+	require.NotEmpty(t, firstPage.RelationsNextCursor)
+	secondCtx := source.WithRelationCursor(pinned, firstPage.RelationsNextCursor)
+	secondPage, err := f.knowledge.GetSourceFile(secondCtx, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.False(t, secondPage.RelationsTruncated)
+	require.Empty(t, secondPage.RelationsNextCursor)
+	seenProbeIDs := make(map[string]bool, len(probeIDs))
+	for _, relation := range append(firstPage.Relations, secondPage.Relations...) {
+		if probeIDs[relation.ID] {
+			require.False(t, seenProbeIDs[relation.ID], "keyset pagination must not repeat relations")
+			seenProbeIDs[relation.ID] = true
+		}
+	}
+	require.Len(t, seenProbeIDs, len(probeIDs), "continuation must return every relation after the first 100")
+	_, err = f.knowledge.GetSourceFile(source.WithRelationCursor(pinned, firstPage.RelationsNextCursor), xmlFile.ID, xmlVersion.ID)
+	require.ErrorContains(t, err, "invalid source relation cursor", "cursor is bound to one exact snapshot/file/version")
 	xmlView, err := f.knowledge.GetSourceFile(pinned, xmlFile.ID)
 	require.NoError(t, err)
 	require.Equal(t, string(files["src/mapper/PushScheduleMapper.xml"]), xmlView.Content)
