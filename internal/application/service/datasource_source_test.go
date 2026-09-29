@@ -25,6 +25,14 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestSourceParseArtifactKeyChangesWithParserVersionAndIsDeterministic(t *testing.T) {
+	raw := []byte("from pkg.booking import helper\n")
+	oldRulesKey := sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-3-old", "settings-v1")
+	newRulesKey := sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1")
+	require.NotEqual(t, oldRulesKey, newRulesKey)
+	require.Equal(t, newRulesKey, sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1"))
+}
+
 func TestUpdateDataSourceRejectsSourceModeWithoutSpecifiedBranch(t *testing.T) {
 	stored := &types.DataSource{ID: "source-one", TenantID: 1, KnowledgeBaseID: "kb-one", Type: types.ConnectorTypeGitLab,
 		Config: types.JSON(`{"type":"gitlab","settings":{"projects":[{"project_id":"123"}]}}`)}

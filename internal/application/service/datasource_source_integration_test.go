@@ -5,6 +5,7 @@ package service
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/datasource/connector/gitlab"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
@@ -84,12 +86,62 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	if !strings.Contains(string(lock), `"python"`) {
 		t.Skip("SOURCE_PARSER_CACHE does not include the locked Python grammar")
 	}
-	raw := []byte("@router.post(\"/预约\")\r\nclass ReservationService:\r\n    @trace\r\n    async def reserve_booking(self, 名称: str) -> str:\r\n        return f\"预约 {名称}\"\r\n")
+	raw := []byte("from pkg.booking import helper as booking_helper\r\n@router.post(\"/预约\")\r\nclass ReservationService:\r\n    @trace\r\n    async def reserve_booking(self, 名称: str) -> str:\r\n        return f\"预约 {名称}\"\r\n")
 	brokenRaw := []byte("async def broken(:\r\n    return \"degraded_python_marker 中文😀\"\r\n")
 	f := newJavaSourceFixture(t, map[string][]byte{
 		"src/reservation.py":  raw,
 		"src/syntax_error.py": brokenRaw,
 	})
+	parserVersion, err := source.ParserVersion(f.ctx, os.Getenv("SOURCE_PARSER_URL"))
+	require.NoError(t, err)
+	require.Contains(t, parserVersion, "-rules-4-")
+	config, err := f.ds.ParseConfig()
+	require.NoError(t, err)
+	_, rulesVersion, err := datasource.ParseSourceSettings(config)
+	require.NoError(t, err)
+	var parserLock struct {
+		PackVersion string `json:"pack_version"`
+		Grammars    map[string]struct {
+			GrammarSHA256 string `json:"grammar_sha256"`
+		} `json:"grammars"`
+	}
+	require.NoError(t, json.Unmarshal(lock, &parserLock))
+	legacyLanguageVersions := make(map[string]string, len(parserLock.Grammars))
+	for language, grammar := range parserLock.Grammars {
+		legacyLanguageVersions[language] = fmt.Sprintf("%s-pack-%s-rules-3-%s", language, parserLock.PackVersion, grammar.GrammarSHA256)
+	}
+	legacyVersionsJSON, err := json.Marshal(legacyLanguageVersions)
+	require.NoError(t, err)
+	legacyFingerprint := sha256.Sum256(legacyVersionsJSON)
+	legacyParserVersion := fmt.Sprintf("source-pack-%s-rules-3-%x", parserLock.PackVersion, legacyFingerprint[:16])
+	require.NotEqual(t, parserVersion, legacyParserVersion)
+	legacyArtifactKey := sourceParseArtifactKey("src/reservation.py", raw, legacyParserVersion, rulesVersion)
+	currentArtifactKey := sourceParseArtifactKey("src/reservation.py", raw, parserVersion, rulesVersion)
+	require.NotEqual(t, legacyArtifactKey, currentArtifactKey, "Python extraction-rule changes must invalidate same-SHA parse artifacts")
+	stale, err := source.ParseFile(f.ctx, os.Getenv("SOURCE_PARSER_URL"), "src/reservation.py", raw)
+	require.NoError(t, err)
+	importNames := map[string]bool{}
+	keptSymbols := stale.Symbols[:0]
+	for _, symbol := range stale.Symbols {
+		if symbol.Kind == "import" {
+			importNames[symbol.QualifiedName] = true
+			continue
+		}
+		keptSymbols = append(keptSymbols, symbol)
+	}
+	stale.Symbols = keptSymbols
+	for i := range stale.Chunks {
+		kept := stale.Chunks[i].Symbols[:0]
+		for _, name := range stale.Chunks[i].Symbols {
+			if !importNames[name] {
+				kept = append(kept, name)
+			}
+		}
+		stale.Chunks[i].Symbols = kept
+	}
+	stale.ParserVersion = legacyParserVersion
+	require.NoError(t, f.service.sourceSnapshots.SaveParsedArtifact(f.ctx, f.ds.TenantID, f.ds.ID, legacyArtifactKey, stale))
+	parseCountBeforeSync := f.parseCount.Load()
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
 	require.NoError(t, err)
 	require.True(t, preview.CanSync)
@@ -99,6 +151,19 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
 	require.NoError(t, err)
 	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	require.Greater(t, f.parseCount.Load(), parseCountBeforeSync, "the stale same-SHA artifact must not be reused")
+	rebuilt, err := f.service.sourceSnapshots.GetParsedArtifact(f.ctx, f.ds.TenantID, f.ds.ID, currentArtifactKey)
+	require.NoError(t, err)
+	require.NotNil(t, rebuilt, "the current rules version must persist a rebuilt parse artifact")
+	require.Equal(t, parserVersion, rebuilt.ParserVersion)
+	hasImport := false
+	for _, symbol := range rebuilt.Symbols {
+		if symbol.Kind == "import" && symbol.QualifiedName == "src/reservation.py.pkg.booking:helper" {
+			hasImport = true
+			break
+		}
+	}
+	require.True(t, hasImport, "the rebuilt artifact must include the new Python import symbol")
 
 	var hit *types.SearchResult
 	for _, params := range []types.SearchParams{
@@ -130,6 +195,7 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	require.Equal(t, raw, []byte(view.Content))
 	require.Equal(t, "src/reservation.py", view.Path)
 	require.Contains(t, string(view.Symbols), "src/reservation.py.ReservationService.reserve_booking")
+	require.Contains(t, string(view.Symbols), "src/reservation.py.pkg.booking:helper", "the public read must expose the rebuilt Python import symbol")
 
 	var degradedHit *types.SearchResult
 	for _, params := range []types.SearchParams{

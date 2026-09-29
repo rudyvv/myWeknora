@@ -179,7 +179,8 @@ class ScriptHTTPContract(unittest.TestCase):
         lock = json.loads((Path(os.environ['SOURCE_PARSER_CACHE']) / 'grammar.lock.json').read_text(encoding='utf-8'))
         expected = sorted(lock.get('grammars', {'java': lock}))
         self.assertEqual(health['languages'], expected)
-        self.assertIn('rules-3', health['parser_version'])
+        expected_rules = 'rules-4' if 'python' in expected else 'rules-3'
+        self.assertIn(expected_rules, health['parser_version'])
 
     def test_legacy_java_cache_stays_ready_but_changed_script_grammar_cannot_advertise_readiness(self):
         cache = Path(os.environ['SOURCE_PARSER_CACHE'])
@@ -205,6 +206,19 @@ class ScriptHTTPContract(unittest.TestCase):
                 process.stderr.close()
         with tempfile.TemporaryDirectory(prefix='source-grammar-contract-') as directory:
             destination = Path(directory)
+            four_language = destination / 'four-language'
+            four_language_lock = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
+            four_language_lock['grammars'] = {language: dict(lock['grammars'][language])
+                                                for language in ('java', 'javascript', 'typescript', 'tsx')}
+            for entry in four_language_lock['grammars'].values():
+                grammar = four_language / entry['grammar']
+                grammar.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(cache / entry['grammar'], grammar)
+            (four_language / 'grammar.lock.json').write_text(json.dumps(four_language_lock), encoding='utf-8')
+            status, health = health_for(four_language)
+            self.assertEqual(status, 200, health)
+            self.assertEqual(health['languages'], ['java', 'javascript', 'tsx', 'typescript'])
+            self.assertIn('rules-3', health['parser_version'])
             legacy = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             legacy.update(lock['grammars']['java'])
             grammar = destination / legacy['grammar']

@@ -9,6 +9,7 @@ import tree_sitter_language_pack as pack
 
 PACK_VERSION = '1.19.0'
 LANGUAGES = ('java', 'javascript', 'typescript', 'tsx', 'python')
+RULES_VERSIONS = {'java': 3, 'javascript': 3, 'typescript': 3, 'tsx': 3, 'python': 4}
 BUNDLES = {
     'linux-x86_64': '86995c25a95d59a1235276c8bdfc5156f7ffb1db1d53653c9e58a60e92d4346e',
     'linux-aarch64': '4e0cf38459547f10fd2c0f33c783a9c92e744baf2c591453d59233d15d0ab2de',
@@ -38,7 +39,8 @@ def load_runtime(cache):
         grammar = cache / relative
         if grammar.resolve().parent != (cache / expected).resolve() or any(p.is_symlink() for p in [grammar, grammar.parent, grammar.parent.parent, grammar.parent.parent.parent]) or hashlib.sha256(grammar.read_bytes()).hexdigest() != entry['grammar_sha256']:
             raise RuntimeError('grammar checksum mismatch')
-        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-3-' + entry['grammar_sha256']
+        rules_version = RULES_VERSIONS[language]
+        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-' + str(rules_version) + '-' + entry['grammar_sha256']
     pack.configure(pack.PackConfig(cache_dir=str(cache)))
     for language in versions:
         # Only already verified libraries can reach the language registry.
@@ -47,11 +49,12 @@ def load_runtime(cache):
 
 
 def runtime_version(versions):
-    """One stable process version binds the full verified grammar set and rules."""
+    """One stable process version binds the full verified grammar set and extraction rules."""
     if not versions:
         return ''
     fingerprint = hashlib.sha256(json.dumps(versions, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    return 'source-pack-' + PACK_VERSION + '-rules-3-' + fingerprint[:32]
+    rules_version = max(RULES_VERSIONS[language] for language in versions)
+    return 'source-pack-' + PACK_VERSION + '-rules-' + str(rules_version) + '-' + fingerprint[:32]
 
 
 def parse_source(raw, max_bytes, parser_version, language, path):
