@@ -65,3 +65,8 @@ GitLab 外链通过公共 `source.GitLabBlobURL` helper 对每个路径段 PathE
 根任务待补跨分支公开 case：Generate → T04 真实 DataSource 排除全部文件 → 成功完整空 publication → 按旧 file + 当前 tag 范围读取 Wiki revision 原文；通用 reader 拒绝旧 version；clear 优先。本分支基点没有 T04 空发布能力，当前受控过滤历史用例保留，不把未跑的交叉用例计为已通过。
 
 T14 未包含 T15 全仓 skeleton、T16 增量重生成、T17 长期预算 scheduler、T18 完整 history GC。大模块超过文件 / 字节预算时要求选更小模块；此处的初始 evidence owner FK 保护不替代后续 GC / clear 工作流。内部真实模型质量、私有 GitLab 端到端与代表仓库规模验收仍属于后续工作。
+
+
+## 根分支集成复验
+
+已以 `aaf7cb58` 合入功能分支，最终 `22456cf6` 去重固定 GitLab URL，并将历史故障 fixture 替换为真实 Preview / DataSource.exclude_paths 更新 / 同步完整空发布。三项交叉测试 PASS 52.031 秒；完整 Source 公开回归 PASS 401.699 秒。两处集成新增 hunk 的 Standards / Spec 复审均 0 项。全仓 Go/前端一次检查与实际失败详见 [首批集成验证](gitlab-code-wiki-rag-batch-one-validation.md)，不沿用本分支“待集成”作为最终状态。GitHub 关闭待记录推送。

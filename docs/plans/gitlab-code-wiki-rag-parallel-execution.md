@@ -31,9 +31,9 @@
 
 | 工作目录 | 分支 | 当前范围 |
 | --- | --- | --- |
-| `C:/Users/28211/.codex/worktrees/source-incremental/WeKnora` | `codex/source-incremental` | T04 实施中 |
-| `C:/Users/28211/.codex/worktrees/source-languages/WeKnora` | `codex/source-languages` | T07 实施中 |
-| `C:/Users/28211/.codex/worktrees/source-wiki/WeKnora` | `codex/source-wiki` | T14 实施中 |
+| `C:/Users/28211/.codex/worktrees/source-incremental/WeKnora` | `codex/source-incremental` | T04 已审查、集成 |
+| `C:/Users/28211/.codex/worktrees/source-languages/WeKnora` | `codex/source-languages` | T07 已审查、集成 |
+| `C:/Users/28211/.codex/worktrees/source-wiki/WeKnora` | `codex/source-wiki` | T14 已审查、集成 |
 | `C:/Users/28211/.codex/worktrees/source-integration/WeKnora` | `codex/gitlab-code-wiki-rag` | 当前任务的审查/集成目录 |
 
 原目录已切至 `main`，保留该状态。三项仅在各自 worktree 实施；未通过验收的分支不标记完成。每线执行相关模块和公开集成，三分支集成后的全仓 Go/前端测试统一各执行一次，避免重复已知 Windows 环境失败与资源竞争。
@@ -47,3 +47,10 @@ T04 实现提交 `3b47cf5d`（独立分支）/`dbfb6530`（集成）；T07 实�
 三个共享文件的冲突保留 A 产物复用及完整空发布、B 每语言健康检查/ParseFile 路由和双方真实 Git/model fixture。合并两轴复核均 0 项；重复完整版本复用、最后文件排除后完整空发布、JS/TS 双索引与固定原文这三项公开交叉测试通过（29.564 秒）。仅两份 CRLF 坐标语料设置 cr-at-eol 及既有空白规则，保持原始字节；默认 staged diff 检查通过。
 
 两条独立分支已推送。T14 仍在实施验收，尚未审查、集成或关闭；三分支后的全仓 Go/前端套件仍待统一执行。完整项目/真实模型/大仓库性能尚未验收。
+
+
+## 首批完整集成收尾
+
+T14 独立提交 `bd7a43ac` 已推送，以 `aaf7cb58` 合入功能分支；其必要 shared fixture hunk 自动保留 A/B 版本，没有新冲突。最终 `22456cf6` 共用 GitLabBlobURL 并使用真实 T04 空发布验证旧 Wiki 修订。T14 完整及最后集成新增两轴审查均 0 项剩余。三项交叉公开测试 PASS 52.031 秒；完整 Source 服务/工具/HTTP 用例 PASS 401.699 秒。Go vet/格式/服务端构建与 frontend typecheck/Vite build 均通过。
+
+全仓 Go 仍有 24 项失败（5 包），完整 TS/mjs 前端 915 项中通过 910 / 失败 5；未独立在基点重跑，不宣称全仓全绿或全部证明基线。详细失败、测试命令与限额见 [首批集成验证](gitlab-code-wiki-rag-batch-one-validation.md)。GitHub 三票将在验证记录推送后统一关闭；原 22 项中其余未实现票保持 open，父 Spec 保持 open。当前所有实现进程结束，三个实现 worktree 可在准备下一分支和基点后复用；语言 grammar cache 保留以供既有流程，下一语言使用独立 cache，避免覆盖本次验证集合。
