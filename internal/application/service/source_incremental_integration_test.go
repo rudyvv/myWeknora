@@ -173,21 +173,104 @@ func TestSourceForcePushReconcilesAgainstTheCompleteManifest(t *testing.T) {
 	newSHA := f.forcePush()
 	syncSourceFixture(t, f)
 	current := latestIncrementalRun(t, f)
+	newMember := sourceMember(t, current, "src/ForcePushed.java")
 
 	require.NotEqual(t, old.Snapshot.CommitSHA, newSHA)
 	require.Equal(t, newSHA, current.Snapshot.CommitSHA)
 	require.Equal(t, "published", current.Snapshot.State)
 	require.Equal(t, 2, current.Snapshot.DeletedCount, "the unrelated history must still account for both old source files")
-	require.NotEmpty(t, sourceMember(t, current, "src/ForcePushed.java"))
+	require.Equal(t, "parsed", newMember.Status)
 	for _, query := range []string{"getPushSchedule", "oldForcePushToken"} {
-		hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: query, QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10})
+		hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: query, MatchCount: 10, DisableVectorMatch: true})
 		require.NoError(t, err)
-		require.Empty(t, hits, "old manifest content must not remain searchable after force-push publication")
+		require.Empty(t, hits, "old identifiers must disappear from the keyword index after force-push publication")
 	}
-	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "forcePushToken", QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10})
+	for _, queryMode := range []struct {
+		name                 string
+		disableKeywordsMatch bool
+		disableVectorMatch   bool
+	}{
+		{name: "bm25", disableVectorMatch: true},
+		{name: "vector", disableKeywordsMatch: true},
+		{name: "hybrid"},
+	} {
+		t.Run(queryMode.name, func(t *testing.T) {
+			hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
+				QueryText: "oldForcePushToken", QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10,
+				DisableKeywordsMatch: queryMode.disableKeywordsMatch, DisableVectorMatch: queryMode.disableVectorMatch,
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, hits, "the fixture's shared vector is expected to retrieve the sole current source member")
+			for _, hit := range hits {
+				require.Equal(t, newMember.SourceFileID, hit.KnowledgeID)
+				require.Equal(t, newSHA, hit.Metadata["commit_sha"])
+				require.Equal(t, current.Snapshot.ID, hit.Metadata["source_snapshot_id"])
+				var metadata struct {
+					Source types.SourceEvidence `json:"source"`
+				}
+				require.NoError(t, json.Unmarshal(hit.ChunkMetadata, &metadata))
+				require.Equal(t, newMember.FileVersionID, metadata.Source.FileVersionID)
+				require.Equal(t, newSHA, metadata.Source.CommitSHA)
+			}
+		})
+	}
+}
+
+func TestSourceRunRecordsPipelineUnavailableWhenSnapshotRepositoryIsMissing(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	log := &types.SyncLog{DataSourceID: f.ds.ID, TenantID: 1, Status: types.SyncLogStatusRunning, StartedAt: time.Now().UTC()}
+	require.NoError(t, f.service.syncLogRepo.Create(f.ctx, log))
+	f.service.sourceSnapshots = nil
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
 	require.NoError(t, err)
-	require.Len(t, hits, 1)
-	require.Equal(t, newSHA, hits[0].Metadata["commit_sha"])
+	var processErr error
+	require.NotPanics(t, func() {
+		processErr = f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload))
+	})
+	require.ErrorContains(t, processErr, "source ingestion pipeline is not available")
+	failed, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusFailed, failed.Status)
+	var result types.SyncResult
+	require.NoError(t, json.Unmarshal(failed.Result, &result))
+	require.NotNil(t, result.Source)
+	require.Equal(t, "failed", result.Source.Snapshot.State)
+	require.Contains(t, result.Source.Snapshot.Error, "source ingestion pipeline is not available")
+}
+
+func TestSourceWikiEvidenceRemainsReadableAfterForcePushAndGitUnavailable(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	old := latestIncrementalRun(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"})
+	require.NoError(t, err)
+	require.Equal(t, "ready", attempt.Status)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.NoError(t, err)
+	require.Len(t, page.SourceProvenance.Evidence, 1)
+	oldEvidence := page.SourceProvenance.Evidence[0]
+	require.Equal(t, old.Snapshot.CommitSHA, oldEvidence.CommitSHA)
+
+	newSHA := f.forcePush()
+	syncSourceFixture(t, f)
+	current := latestIncrementalRun(t, f)
+	require.Equal(t, newSHA, current.Snapshot.CommitSHA)
+	require.Equal(t, 2, current.Snapshot.DeletedCount)
+	// The API and Git transport no longer offer the previous branch state. A
+	// saved Wiki evidence read must use its retained database file version.
+	f.gitlabBranchMissing = true
+	f.gitTransportUnavailable = true
+	retained, err := generator.ReadEvidence(f.ctx, f.kb.ID, page.Slug, 0, oldEvidence.ID)
+	require.NoError(t, err)
+	require.Equal(t, oldEvidence.FileVersionID, retained.FileVersionID)
+	require.Equal(t, old.Snapshot.CommitSHA, retained.CommitSHA)
+	require.Contains(t, retained.Content, "预约")
 }
 
 func TestSourceRemoteFailuresKeepPublishedVersionAndExposeLastSuccess(t *testing.T) {

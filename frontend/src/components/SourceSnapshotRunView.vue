@@ -9,18 +9,24 @@ const page = ref(0)
 const fileID = ref('')
 const versionID = ref('')
 const pageSize = 50
-const labels: Record<string, string> = { fetching: '正在获取固定提交', parsing: '正在解析源码', indexing: '正在建立双索引', ready: '准备发布', published: '已发布', failed: '发布失败（已保留当前发布）' }
+const labels: Record<string, string> = { fetching: '正在获取固定提交', parsing: '正在解析源码', indexing: '正在建立双索引', ready: '准备发布', published: '已发布' }
 const detectedSHA = computed(() => props.result.snapshot.detected_commit_sha || props.result.snapshot.commit_sha)
 const targetSHA = computed(() => props.result.snapshot.target_commit_sha || props.result.snapshot.commit_sha)
 const publishedSHA = computed(() => props.result.snapshot.state === "published" ? props.result.snapshot.commit_sha : props.result.snapshot.previous_commit_sha)
 const lastSuccessfulAt = computed(() => props.result.snapshot.last_successful_published_at || props.result.snapshot.published_at || props.result.snapshot.previous_published_at)
+const statusLabel = computed(() => {
+  if (props.result.snapshot.state === 'failed') {
+    return publishedSHA.value ? '发布失败（已保留当前发布）' : '首次发布失败（尚无可用发布）'
+  }
+  return labels[props.result.snapshot.state] || props.result.snapshot.state
+})
 const filtered = computed(() => props.result.members.filter(member => member.path.toLowerCase().includes(filter.value.toLowerCase())))
 const members = computed(() => filtered.value.slice(page.value * pageSize, (page.value + 1) * pageSize))
 </script>
 
 <template>
   <section class="source-run" aria-label="源码同步详情">
-    <strong role="status">{{ labels[result.snapshot.state] || result.snapshot.state }}</strong>
+    <strong role="status">{{ statusLabel }}</strong>
     <p class="commit">检测 HEAD：{{ detectedSHA || '未能检测（请检查分支或凭据）' }}</p>
     <p class="commit">处理目标：{{ targetSHA || '未建立目标（本次未开始扫描）' }}</p>
     <p class="commit">当前发布 SHA：{{ publishedSHA || '尚未发布' }}</p>

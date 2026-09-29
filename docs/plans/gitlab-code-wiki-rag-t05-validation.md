@@ -15,26 +15,30 @@ Base: `3adaa587d16651a6d48f123d73c1e5cceaf75271`
 
 | Acceptance item | Evidence | Status |
 | --- | --- | --- |
-| Non-ancestor/old-reference/compare failure reconciles with deletion | `TestSourceForcePushReconcilesAgainstTheCompleteManifest`; local Git orphan history is served through the controlled GitLab transport. | Added; PG execution blocked by fixture credentials in this session. |
-| Branch/token/fetch failure retains current publication | `TestSourceRemoteFailuresKeepPublishedVersionAndExposeLastSuccess`; controlled branch 404, token 401, and Git transport 502. | Added; PG execution blocked by fixture credentials in this session. |
-| UI distinguishes failure, current publication, target, and last success | `frontend/src/components/SourceSnapshotRunView.test.ts` failure-state case. | Added; frontend runtime test unavailable because this checkout has no `node_modules/tsx`. |
-| Partial work cannot publish or infer deletion | Existing T04/T05-adjacent source integration coverage for parser/vector/keyword failure retains old publication; source-mode `ReadGit` returns no complete manifest on fetch/scan error and publication requires complete member/index counts. | Code path and existing coverage retained; full PG execution pending. |
-| Public sync/query behavior with real Git and controlled GitLab errors | New source integration tests use local Git object history, controlled GitLab HTTP, and real parser/model/search boundaries. | Pending approved fixture DSN. |
+| Non-ancestor/old-reference/compare failure reconciles with deletion | `TestSourceForcePushReconcilesAgainstTheCompleteManifest`; local Git force-push removes the old branch history, then keyword, vector, and hybrid searches are checked against the sole new source member and its snapshot/file-version/SHA. | Added; integration test compiles, PG execution pending an approved DSN. |
+| Branch/token/fetch failure retains current publication | `TestSourceRemoteFailuresKeepPublishedVersionAndExposeLastSuccess`; controlled branch 404, token 401, and Git transport 502. | Added; integration test compiles, PG execution pending an approved DSN. |
+| UI distinguishes first failure from a retained publication | `frontend/src/components/SourceSnapshotRunView.test.ts` checks both an unsuccessful later run (including detected/target SHA and last-success state) and a first-ever failure with no retained-publication claim. | PASS: 3 component tests. |
+| Missing snapshot repository fails safely and records the run | `TestProcessSourceSyncRecordsPipelineUnavailableWhenSnapshotRepositoryIsMissing`; the full `ProcessSync` variant is also covered by `TestSourceRunRecordsPipelineUnavailableWhenSnapshotRepositoryIsMissing`. | Unit test PASS; integration test compiles, PG execution pending an approved DSN. |
+| Partial work cannot publish or infer deletion | `TestSourceUpdateKeepsPublishedVersionDuringParsingAndVectorFailure` and `TestSourceUpdateKeywordFailureRetainsPreviousCompletePublication`; source-mode `ReadGit` returns no complete manifest on fetch/scan error and publication requires complete member/index counts. | Existing integration coverage retained; PG execution pending. |
+| Previously published Wiki evidence remains readable without Git access | `TestSourceWikiEvidenceRemainsReadableAfterForcePushAndGitUnavailable` resolves a saved evidence version after force-push and Git/API transport loss. `TestSourceWikiHistoricalFilteredFileRetainsScopeAndClearWins` covers historical file scope and clear precedence. | Added/identified; integration execution pending an approved DSN. |
+| Public sync/query behavior with real Git and controlled GitLab errors | Integration tests use local Git object history, controlled GitLab HTTP, and real parser/model/search boundaries. | Compile check PASS; execution pending an approved DSN. |
 
 ## Commands
 
 Green:
 
 - `go test ./internal/datasource/connector/gitlab -run 'TestConnector|TestFetch|TestTree|TestProjectPath|TestRaw|TestGitlabFilePath|TestIsSupported' -count=1` — PASS.
-- `go test ./internal/application/service -run 'TestManualSyncDoesNotSendSourceModeThroughDocumentIngestion' -count=1 -v` with a worktree-local `GOCACHE` — PASS.
-- `gofmt -w internal/types/source_snapshot.go internal/application/service/datasource_source_sync.go internal/application/service/datasource_source_integration_test.go internal/application/service/source_incremental_integration_test.go` — PASS.
+- `go test ./internal/application/service -run 'TestProcessSourceSyncRecordsPipelineUnavailableWhenSnapshotRepositoryIsMissing|TestManualSyncDoesNotSendSourceModeThroughDocumentIngestion' -count=1` with a worktree-local `GOCACHE` — PASS.
+- `go test -p 1 ./internal/application/service -tags=integration -run '^$' -count=1` with a worktree-local `GOCACHE` — PASS (integration package compiles; no tests executed).
+- `node --import tsx --test src/components/SourceSnapshotRunView.test.ts` from `frontend/`, using an existing read-only dependency tree — PASS (3 tests).
+- `gofmt -w internal/types/source_snapshot.go internal/application/service/datasource_source_sync.go internal/application/service/datasource_source_integration_test.go internal/application/service/source_incremental_integration_test.go internal/application/service/datasource_service_test.go` — PASS.
 - `git diff --check` — PASS.
 
 Red / environment failures:
 
 - First Go attempts without a worktree-local cache failed because the Windows user Go cache was access-denied; rerunning with `GOCACHE` inside this worktree passed the targeted packages.
-- `go test ./internal/application/service -tags=integration -run 'TestSourceForcePushReconcilesAgainstTheCompleteManifest|TestSourceRemoteFailuresKeepPublishedVersionAndExposeLastSuccess' -count=1 -v` compiled and started, but the shared PostgreSQL fixture rejected the non-secret fallback DSN with password authentication failure. No container was restarted or changed.
-- `node --import tsx --test frontend/src/components/SourceSnapshotRunView.test.ts` could not start because `node_modules/tsx` is absent. No dependency installation was attempted.
+- An initial PostgreSQL attempt using the non-secret fallback DSN failed authentication. A subsequent attempt to read the shared test container's password from Docker metadata was denied by the approval reviewer as credential probing. No credentials were printed, and the container was not restarted or changed. Actual PostgreSQL integration execution therefore requires the DSN through an approved environment/authentication route.
+- The frontend test initially could not resolve dependencies from the repository root; rerunning from `frontend/` with the existing dependency tree passed. No dependency installation or modification was performed.
 
 ## Scope and limits
 

@@ -49,7 +49,7 @@ test('run details expose complete manifest and permit code reading only after pu
     assert.equal(Array.from(host.querySelectorAll('button')).find(b => b.textContent?.includes('src/Service.java')), undefined)
     result.snapshot.state = 'published'
     await nextTick()
-    assert.ok(host.textContent?.includes('已发布 SHA：' + 'a'.repeat(40)))
+    assert.ok(host.textContent?.includes('当前发布 SHA：' + 'a'.repeat(40)))
     const read = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('src/Service.java'))
     assert.ok(read)
     read.click()
@@ -85,6 +85,37 @@ test('failed source runs explain that the last complete publication remains acti
     assert.ok(host.textContent?.includes('发布失败（已保留当前发布）'))
     assert.ok(host.textContent?.includes('当前发布 SHA：' + 'b'.repeat(40)))
     assert.ok(host.textContent?.includes('最后成功发布：2026-09-29T01:02:03Z'))
+    assert.ok(host.textContent?.includes('检测 HEAD：未能检测（请检查分支或凭据）'))
+    assert.ok(host.textContent?.includes('处理目标：未建立目标（本次未开始扫描）'))
     assert.ok(host.textContent?.includes('GitLab branch is unavailable'))
+  } finally { app.unmount(); host.remove() }
+})
+
+test('first failed source publication does not claim that a version was retained', async () => {
+  const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
+  const { descriptor } = parse(readFileSync(componentPath, 'utf8'), { filename: componentPath })
+  const compiled = ts.transpileModule(compileScript(descriptor, { id: componentPath, inlineTemplate: true }).content,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const module = { exports: {} as any }
+  new Function('require', 'module', 'exports', compiled)((name: string) => {
+    if (name.endsWith('.vue')) return { __esModule: true, default: {} }
+    return require(name)
+  }, module, module.exports)
+  const host = document.createElement('div')
+  document.body.append(host)
+  const result = reactive({ snapshot: {
+    id: 'first-failed-run', state: 'failed', commit_sha: '', detected_commit_sha: '', target_commit_sha: '',
+    project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: false,
+    member_count: 0, file_count: 0, chunk_count: 0, error: 'branch does not exist'
+  }, members: [] })
+  const app = createApp({ render: () => h(module.exports.default, { result }) })
+  app.mount(host)
+  try {
+    await nextTick()
+    assert.ok(host.textContent?.includes('首次发布失败（尚无可用发布）'))
+    assert.ok(host.textContent?.includes('当前发布 SHA：尚未发布'))
+    assert.ok(host.textContent?.includes('最后成功发布：尚无成功发布'))
+    assert.ok(host.textContent?.includes('branch does not exist'))
+    assert.ok(!host.textContent?.includes('已保留当前发布'))
   } finally { app.unmount(); host.remove() }
 })

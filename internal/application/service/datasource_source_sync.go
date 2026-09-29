@@ -65,6 +65,9 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			s.updateSyncRunResult(context.WithoutCancel(ctx), ds, log, result, data, types.SyncLogStatusFailed, snapshot.Error, wasPaused)
 		}
 	}()
+	if err := s.checkSourceSyncReady(ctx, kb, config); err != nil {
+		return err
+	}
 	// Read the current publication before resolving the remote branch. Branch,
 	// token and Git transport failures can happen before a candidate snapshot is
 	// created; the failed run must still identify the version that remains
@@ -78,9 +81,6 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		snapshot.PreviousCommitSHA = previous.Snapshot.CommitSHA
 		snapshot.PreviousPublishedAt = previous.Snapshot.PublishedAt
 		snapshot.LastSuccessfulPublishedAt = previous.Snapshot.PublishedAt
-	}
-	if err := s.checkSourceSyncReady(ctx, kb, config); err != nil {
-		return err
 	}
 	rules, version, err := datasource.ParseSourceSettings(config)
 	if err != nil {

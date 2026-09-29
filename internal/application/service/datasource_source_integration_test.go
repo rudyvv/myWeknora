@@ -639,6 +639,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 		git("add", ".")
 		git("commit", "-m", "Force-pushed unrelated history")
 		sha = git("rev-parse", "HEAD")
+		git("branch", "-f", "main", sha)
+		git("checkout", "main")
+		git("branch", "-D", "force-push")
 		return sha
 	}
 	var gitlabServer *httptest.Server

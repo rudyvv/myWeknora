@@ -58,6 +58,39 @@ func TestProcessSyncCancelsWhenKnowledgeBaseDeleted(t *testing.T) {
 	require.NotNil(t, updated.FinishedAt)
 }
 
+func TestProcessSourceSyncRecordsPipelineUnavailableWhenSnapshotRepositoryIsMissing(t *testing.T) {
+	ds := &types.DataSource{
+		ID:              "source-without-snapshot-repository",
+		TenantID:        1,
+		KnowledgeBaseID: "kb-1",
+		Status:          types.DataSourceStatusActive,
+	}
+	log := &types.SyncLog{
+		ID:           "sync-log-1",
+		DataSourceID: ds.ID,
+		TenantID:     ds.TenantID,
+		Status:       types.SyncLogStatusRunning,
+	}
+	syncLogs := &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{log.ID: log}}
+	svc := &DataSourceService{
+		dsRepo:      newKBDeleteDSRepo("kb-1", ds),
+		syncLogRepo: syncLogs,
+	}
+
+	err := svc.processSourceSync(context.Background(), ds, log, &types.KnowledgeBase{ID: "kb-1"}, nil, nil, false)
+
+	require.ErrorIs(t, err, datasource.ErrSourcePipelineUnavailable)
+	assert.Equal(t, types.SyncLogStatusFailed, log.Status)
+	assert.Equal(t, datasource.ErrSourcePipelineUnavailable.Error(), log.ErrorMessage)
+	require.NotEmpty(t, log.Result)
+	var result types.SyncResult
+	require.NoError(t, json.Unmarshal(log.Result, &result))
+	require.NotNil(t, result.Source)
+	require.NotNil(t, result.Source.Snapshot)
+	assert.Equal(t, "failed", result.Source.Snapshot.State)
+	assert.Equal(t, datasource.ErrSourcePipelineUnavailable.Error(), result.Source.Snapshot.Error)
+}
+
 type processSyncKBService struct {
 	getErr error
 	kb     *types.KnowledgeBase
