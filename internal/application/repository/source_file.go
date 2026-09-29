@@ -53,6 +53,9 @@ func (r *knowledgeRepository) readPublishedSourceFile(ctx context.Context, tenan
 	if hex.EncodeToString(hash[:]) != file.SHA256 {
 		return nil, fmt.Errorf("stored source file checksum mismatch")
 	}
+	if err := enrichSFCReferences(ctx, r.db, &file); err != nil {
+		return nil, err
+	}
 	file.Content = string(file.RawContent)
 	return &file, nil
 }

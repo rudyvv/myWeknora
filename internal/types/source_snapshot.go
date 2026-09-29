@@ -15,6 +15,17 @@ type SourceContext struct {
 	Range SourceRange `json:"range"`
 }
 
+// SourceRegion identifies a Vue single-file component block without claiming
+// that templates, styles, or custom blocks were compiled or executed.
+type SourceRegion struct {
+	Kind           string `json:"kind"`
+	Language       string `json:"language,omitempty"`
+	Quality        string `json:"quality"`
+	ExternalSource string `json:"external_source,omitempty"`
+	ExternalStatus string `json:"external_status,omitempty"`
+	ResolvedPath   string `json:"resolved_path,omitempty"`
+}
+
 type SourceSymbol struct {
 	Kind           string          `json:"kind"`
 	Name           string          `json:"name"`
@@ -23,6 +34,7 @@ type SourceSymbol struct {
 	SignatureRange SourceRange     `json:"signature_range"`
 	Range          SourceRange     `json:"range"`
 	Annotations    []SourceContext `json:"annotations"`
+	Region         *SourceRegion   `json:"region,omitempty"`
 }
 
 type ParsedSourceChunk struct {
@@ -31,6 +43,7 @@ type ParsedSourceChunk struct {
 	Quality string          `json:"quality"`
 	Symbols []string        `json:"symbols"`
 	Context []SourceContext `json:"context"`
+	Region  *SourceRegion   `json:"region,omitempty"`
 }
 
 type ParsedSourceFile struct {
@@ -159,6 +172,7 @@ type SourceEvidence struct {
 	Quality       string          `json:"quality"`
 	GitLabURL     string          `json:"gitlab_url"`
 	Context       []SourceContext `json:"context"`
+	Region        *SourceRegion   `json:"region,omitempty"`
 }
 
 type SourceReadLease struct {

@@ -118,6 +118,9 @@ func ReadSourceWikiEvidence(ctx context.Context, db *gorm.DB, pageID string, rev
 	if hex.EncodeToString(hash[:]) != e.TextSHA256 || e.Range.StartLine != 1+strings.Count(string(file.RawContent[:e.Range.StartByte]), "\n") || e.Range.EndLine != 1+strings.Count(string(file.RawContent[:e.Range.EndByte-1]), "\n") {
 		return nil, fmt.Errorf("registered evidence coordinates mismatch")
 	}
+	if err := enrichSFCReferences(ctx, db, &file); err != nil {
+		return nil, err
+	}
 	file.Content = string(file.RawContent)
 	return &file, nil
 }

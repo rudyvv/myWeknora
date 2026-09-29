@@ -606,8 +606,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	dsn := os.Getenv("SOURCE_TEST_POSTGRES_DSN")
 	python := os.Getenv("SOURCE_TEST_PYTHON")
 	cache := os.Getenv("SOURCE_PARSER_CACHE")
-	if dsn == "" || python == "" || cache == "" {
-		t.Fatal("integration requires SOURCE_TEST_POSTGRES_DSN, SOURCE_TEST_PYTHON and prefetched SOURCE_PARSER_CACHE")
+	externalParserURL := strings.TrimSpace(os.Getenv("SOURCE_TEST_PARSER_URL"))
+	if dsn == "" || cache == "" || (python == "" && externalParserURL == "") {
+		t.Fatal("integration requires SOURCE_TEST_POSTGRES_DSN, a parser runtime and prefetched SOURCE_PARSER_CACHE")
 	}
 	address, err := url.Parse(dsn)
 	require.NoError(t, err)
@@ -650,33 +651,53 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	incrementalMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000104_source_incremental_artifacts.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(incrementalMigration)).Error)
-	parser := exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
-	parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
-	stdout, err := parser.StdoutPipe()
-	require.NoError(t, err)
-	parser.Stderr = os.Stderr
-	require.NoError(t, parser.Start())
-	t.Cleanup(func() { _ = parser.Process.Kill(); _ = parser.Wait() })
-	startup := make(chan string, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		if scanner.Scan() {
-			startup <- scanner.Text()
-		} else {
-			startup <- ""
+	var parserAddress *url.URL
+	var parser *exec.Cmd
+	if externalParserURL != "" {
+		parserAddress, err = url.Parse(externalParserURL)
+		require.NoError(t, err)
+		require.Equal(t, "http", parserAddress.Scheme)
+		require.Contains(t, []string{"127.0.0.1", "::1", "localhost"}, parserAddress.Hostname())
+		healthClient := &http.Client{Timeout: 5 * time.Second}
+		response, healthErr := healthClient.Get(strings.TrimRight(externalParserURL, "/") + "/health")
+		require.NoError(t, healthErr)
+		var health struct {
+			Ready     bool     `json:"ready"`
+			Languages []string `json:"languages"`
 		}
-	}()
-	var ready struct {
-		Port int `json:"port"`
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&health))
+		require.NoError(t, response.Body.Close())
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.True(t, health.Ready)
+	} else {
+		parser = exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
+		parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
+		stdout, pipeErr := parser.StdoutPipe()
+		require.NoError(t, pipeErr)
+		parser.Stderr = os.Stderr
+		require.NoError(t, parser.Start())
+		t.Cleanup(func() { _ = parser.Process.Kill(); _ = parser.Wait() })
+		startup := make(chan string, 1)
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			if scanner.Scan() {
+				startup <- scanner.Text()
+			} else {
+				startup <- ""
+			}
+		}()
+		var ready struct {
+			Port int `json:"port"`
+		}
+		select {
+		case line := <-startup:
+			require.NoError(t, json.Unmarshal([]byte(line), &ready))
+		case <-time.After(10 * time.Second):
+			t.Fatal("real source parser did not start")
+		}
+		parserAddress, err = url.Parse(fmt.Sprintf("http://127.0.0.1:%d", ready.Port))
+		require.NoError(t, err)
 	}
-	select {
-	case line := <-startup:
-		require.NoError(t, json.Unmarshal([]byte(line), &ready))
-	case <-time.After(10 * time.Second):
-		t.Fatal("real Java parser did not start")
-	}
-	parserAddress, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", ready.Port))
-	require.NoError(t, err)
 	forward := httputil.NewSingleHostReverseProxy(parserAddress)
 	parserProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/parse" {

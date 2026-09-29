@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { readSourceWikiEvidence } from '@/api/wiki'
 import { getSourceFile, type SourceFileView, type SourceRange } from '@/api/knowledge-base'
+import SourceRegionBadge from '@/components/SourceRegionBadge.vue'
 
 const props = defineProps<{ knowledgeId: string; fileVersionId?: string; wikiEvidence?: { kbId: string; slug: string; id: string; version: number; commitSHA: string }; evidenceRange?: SourceRange }>()
 const file = ref<SourceFileView | null>(null)
@@ -12,6 +13,10 @@ const symbolQuery = ref('')
 const selected = ref<SourceRange | null>(null)
 let requestGeneration = 0
 const pageSize = 200
+const qualityText: Record<string, string> = {
+  structural: '结构解析', syntax_error: '存在语法错误', degraded: '部分内容未解析',
+  text_fallback: '保留原文', unknown_preprocess: '预处理器未解析',
+}
 const lines = computed(() => file.value?.content.split('\n') || [])
 const visibleLines = computed(() => lines.value.slice(page.value * pageSize, (page.value + 1) * pageSize))
 const symbols = computed(() => (file.value?.symbols || []).filter(s => s.qualified_name.toLowerCase().includes(symbolQuery.value.toLowerCase())).slice(0, 50))
@@ -57,7 +62,7 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
         <strong>{{ file.path }}</strong>
         <span>仓库：{{ file.repository_url }} · 项目 {{ file.project_id }}</span>
         <span>提交：<code>{{ file.commit_sha }}</code></span>
-        <span>解析：{{ file.quality === 'structural' ? '结构解析' : '存在语法错误' }} · {{ file.encoding }}</span>
+        <span>解析：{{ qualityText[file.quality] || '质量未标明' }} · {{ file.encoding }}</span>
         <span>由 GitLab 同步管理，原文只读。</span>
         <a v-if="gitlabURL" :href="gitlabURL" target="_blank" rel="noopener noreferrer">在 GitLab 查看此版本</a>
       </div>
@@ -65,6 +70,7 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
         <input v-model="symbolQuery" aria-label="搜索源码符号" placeholder="搜索类或方法" />
         <button v-for="symbol in symbols" :key="`${symbol.qualified_name}:${symbol.range.start_byte}`" type="button" @click="selectSymbol(symbol.range)">
           {{ symbol.qualified_name }} · L{{ symbol.range.start_line }}–{{ symbol.range.end_line }}
+          <SourceRegionBadge v-if="symbol.region" :region="symbol.region" />
         </button>
       </div>
       <nav aria-label="源码行分页">

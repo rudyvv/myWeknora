@@ -3,11 +3,16 @@ import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import type { AuditLog, AuditOutcome, ListAuditLogResponse } from '@/api/tenant/audit-log';
 
 export interface SourceRange { start_byte: number; end_byte: number; start_line: number; end_line: number }
+export interface SourceRegion {
+  kind: 'template' | 'script' | 'style' | 'custom'; language?: string;
+  quality: 'structural' | 'syntax_error' | 'degraded' | 'text_fallback' | 'unknown_preprocess';
+  external_source?: string; external_status?: 'unchecked' | 'rejected' | 'resolved'; resolved_path?: string;
+}
 export interface SourceFileView {
   knowledge_id: string; snapshot_id: string; file_version_id: string; project_id: string;
   commit_sha: string; repository_url: string; path: string; sha256: string; encoding: string;
   quality: string; parser_version: string; content: string;
-  symbols: Array<{ kind: string; name: string; qualified_name: string; signature: string; range: SourceRange }>;
+  symbols: Array<{ kind: string; name: string; qualified_name: string; signature: string; range: SourceRange; region?: SourceRegion }>;
 }
 export function getSourceFile(id: string, versionID?: string): Promise<{ data: SourceFileView }> {
   return get(`/api/v1/knowledge/${encodeURIComponent(id)}/source${versionID ? `?version_id=${encodeURIComponent(versionID)}` : ''}`) as unknown as Promise<{ data: SourceFileView }>;
