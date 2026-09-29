@@ -126,6 +126,195 @@ func TestSourceSchedulerRecoversPendingManualTriggerAfterRestart(t *testing.T) {
 	}
 }
 
+func TestSourceSchedulerRepairsConfigFenceAfterDatasourceWriteCrash(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+	oldLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, oldLog.Status)
+
+	control := repository.NewSyncLogRepository(f.db).(interfaces.SourceSyncControlRepository)
+	newConfig := *f.ds
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(newConfig.Config, &config))
+	settings := config["settings"].(map[string]any)
+	settings["crash_window_probe"] = true
+	newConfig.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	// This is the committed pre-write fence in UpdateDataSource. The process
+	// dies before the separate datasource repository transaction persists B.
+	require.NoError(t, control.AdvanceSourceConfig(f.ctx, &newConfig, true))
+	canceled, err := f.service.GetSyncLog(f.ctx, oldLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, canceled.Status)
+
+	var before struct {
+		ConfigGeneration int64   `gorm:"column:config_generation"`
+		ActiveSyncLogID  *string `gorm:"column:active_sync_log_id"`
+		PendingSyncLogID *string `gorm:"column:pending_sync_log_id"`
+	}
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).Take(&before).Error)
+	require.Nil(t, before.ActiveSyncLogID)
+	require.Nil(t, before.PendingSyncLogID)
+
+	recoveredTasks := make(chan *asynq.Task, 1)
+	scheduler := datasource.NewScheduler(
+		repository.NewDataSourceRepository(f.db),
+		repository.NewSyncLogRepository(f.db),
+		sourceTestTaskEnqueuer{tasks: recoveredTasks},
+		f.service.sourceSnapshots,
+	)
+	require.NoError(t, scheduler.Start(f.ctx))
+	defer scheduler.Stop()
+	select {
+	case task := <-recoveredTasks:
+		t.Fatalf("startup must not resurrect the canceled trigger: %s", task.Type())
+	default:
+	}
+
+	// Startup reconciliation must restore coordinator state from persisted A,
+	// allowing the next manual trigger to register under the current config.
+	newLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err, "restart must repair a committed pre-write fence with no trigger pointers")
+	require.NotEqual(t, oldLog.ID, newLog.ID)
+	require.Equal(t, types.SyncLogStatusQueued, newLog.Status)
+	var after struct {
+		ConfigGeneration int64 `gorm:"column:config_generation"`
+	}
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).Take(&after).Error)
+	require.Greater(t, after.ConfigGeneration, before.ConfigGeneration, "reconciliation must advance, never roll back, the generation")
+}
+
+func TestSourceSchedulerReconciliationPreservesDisabledFence(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+	oldLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+
+	disabled := *f.ds
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(disabled.Config, &config))
+	config["settings"].(map[string]any)["content_mode"] = "document"
+	disabled.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	control := repository.NewSyncLogRepository(f.db).(interfaces.SourceSyncControlRepository)
+	require.NoError(t, control.AdvanceSourceConfig(f.ctx, &disabled, false))
+	require.NoError(t, repository.NewDataSourceRepository(f.db).Update(f.ctx, &disabled))
+	canceled, err := f.service.GetSyncLog(f.ctx, oldLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, canceled.Status)
+
+	var before struct {
+		ConfigGeneration  int64   `gorm:"column:config_generation"`
+		ConfigFingerprint string  `gorm:"column:config_fingerprint"`
+		ActiveSyncLogID   *string `gorm:"column:active_sync_log_id"`
+		PendingSyncLogID  *string `gorm:"column:pending_sync_log_id"`
+	}
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).Take(&before).Error)
+	require.True(t, strings.HasPrefix(before.ConfigFingerprint, "disabled:"))
+	require.Nil(t, before.ActiveSyncLogID)
+	require.Nil(t, before.PendingSyncLogID)
+
+	dispatches, err := control.RecoverAllSourceTriggers(f.ctx)
+	require.NoError(t, err)
+	require.Empty(t, dispatches, "reconciling every coordinator row must not re-enable a document-mode datasource")
+	var after struct {
+		ConfigGeneration  int64  `gorm:"column:config_generation"`
+		ConfigFingerprint string `gorm:"column:config_fingerprint"`
+	}
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).Take(&after).Error)
+	require.Equal(t, before.ConfigGeneration, after.ConfigGeneration)
+	require.Equal(t, before.ConfigFingerprint, after.ConfigFingerprint)
+}
+
+func TestSourceSchedulerReconciliationDoesNotReviveDeletedOrCredentialClearedSources(t *testing.T) {
+	for _, scenario := range []string{"deleted source", "cleared credentials"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newJavaSourceFixture(t)
+			f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+			log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+			require.NoError(t, err)
+			require.Equal(t, types.SyncLogStatusQueued, log.Status)
+
+			switch scenario {
+			case "deleted source":
+				require.NoError(t, f.service.DeleteDataSource(f.ctx, f.ds.ID))
+			case "cleared credentials":
+				require.NoError(t, f.service.ClearDataSourceCredentials(f.ctx, f.ds.ID))
+			}
+			canceled, err := f.service.GetSyncLog(f.ctx, log.ID)
+			require.NoError(t, err)
+			require.Equal(t, types.SyncLogStatusCanceled, canceled.Status)
+
+			dispatches, err := repository.NewSyncLogRepository(f.db).(interfaces.SourceSyncControlRepository).
+				RecoverAllSourceTriggers(f.ctx)
+			require.NoError(t, err)
+			require.Empty(t, dispatches, "startup reconciliation must preserve deletion and credential-clear fences")
+		})
+	}
+}
+
+func TestSourceSchedulerReconciliationSerializesWithConfigUpdate(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+	oldLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+
+	updated := *f.ds
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(updated.Config, &config))
+	config["settings"].(map[string]any)["concurrent_reconcile_probe"] = true
+	updated.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	control := repository.NewSyncLogRepository(f.db).(interfaces.SourceSyncControlRepository)
+	// Leave the exact durable mismatch produced by the pre-write fence.
+	require.NoError(t, control.AdvanceSourceConfig(f.ctx, &updated, true))
+	canceled, err := f.service.GetSyncLog(f.ctx, oldLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, canceled.Status)
+
+	ctx, cancel := context.WithTimeout(f.ctx, 15*time.Second)
+	defer cancel()
+	updateDone := make(chan error, 1)
+	go func() {
+		if updateErr := control.AdvanceSourceConfig(ctx, &updated, true); updateErr != nil {
+			updateDone <- updateErr
+			return
+		}
+		dsRepo := repository.NewDataSourceRepository(f.db)
+		if updateErr := dsRepo.Update(ctx, &updated); updateErr != nil {
+			updateDone <- updateErr
+			return
+		}
+		updateDone <- control.AdvanceSourceConfig(ctx, &updated, true)
+	}()
+	recoveryDone := make(chan error, 1)
+	go func() {
+		_, recoveryErr := control.RecoverAllSourceTriggers(ctx)
+		recoveryDone <- recoveryErr
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-updateDone:
+			require.NoError(t, err, "the config update must complete without a lock cycle")
+			updateDone = nil
+		case err := <-recoveryDone:
+			require.NoError(t, err, "reconciliation must serialize with the config update")
+			recoveryDone = nil
+		case <-ctx.Done():
+			t.Fatal("config update and reconciliation deadlocked")
+		}
+	}
+
+	stored, err := f.service.GetDataSource(ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.JSONEq(t, string(updated.Config), string(stored.Config))
+	newLog, err := f.service.ManualSync(ctx, f.ds.ID)
+	require.NoError(t, err, "the persisted latest config must be registerable after both transactions finish")
+	require.NotEqual(t, oldLog.ID, newLog.ID)
+	require.Equal(t, types.SyncLogStatusQueued, newLog.Status)
+}
+
 func TestSourceManualTriggersSerializeAndCatchUpToLatestCommit(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	f.parseStarted = make(chan struct{}, 1)

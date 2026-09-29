@@ -144,6 +144,44 @@ func (r *SyncLogRepository) invalidateSourceGeneration(tx *gorm.DB, state *sourc
 	})
 }
 
+func sourceModeEnabled(ds *types.DataSource) bool {
+	if ds == nil {
+		return false
+	}
+	config, err := ds.ParseConfig()
+	if err != nil || config == nil {
+		return false
+	}
+	mode, ok := config.Settings["content_mode"].(string)
+	return ok && mode == "source"
+}
+
+func (r *SyncLogRepository) invalidateDisabledSourceGeneration(tx *gorm.DB, state *sourceSyncStateRow, ds *types.DataSource) error {
+	fingerprint := "disabled:" + sourceConfigFingerprint(ds)
+	if state.ConfigFingerprint == fingerprint && derefSourceID(state.ActiveSyncLogID) == "" &&
+		derefSourceID(state.PendingSyncLogID) == "" && state.LeaseOwner == nil && state.LeaseExpiresAt == nil {
+		return nil
+	}
+	if err := cancelSourceRunTx(tx, derefSourceID(state.ActiveSyncLogID), "source mode was disabled; this run was fenced off"); err != nil {
+		return err
+	}
+	if pending := derefSourceID(state.PendingSyncLogID); pending != derefSourceID(state.ActiveSyncLogID) {
+		if err := cancelSourceRunTx(tx, pending, "source mode was disabled; this trigger was canceled"); err != nil {
+			return err
+		}
+	}
+	state.ConfigGeneration++
+	state.FencingToken++
+	state.ConfigFingerprint = fingerprint
+	state.LeaseOwner, state.LeaseExpiresAt = nil, nil
+	state.ActiveSyncLogID, state.PendingSyncLogID, state.PendingTrigger = nil, nil, ""
+	return sourceStateUpdate(tx, state, map[string]any{
+		"config_generation": state.ConfigGeneration, "config_fingerprint": fingerprint,
+		"fencing_token": state.FencingToken, "lease_owner": nil, "lease_expires_at": nil,
+		"active_sync_log_id": nil, "pending_sync_log_id": nil, "pending_trigger": "",
+	})
+}
+
 // RegisterSourceTrigger atomically records the visible queued run and makes it
 // either the next dispatch or the one latest pending catch-up trigger.
 func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types.DataSource, log *types.SyncLog, trigger string) (bool, int64, error) {
@@ -214,28 +252,7 @@ func (r *SyncLogRepository) AdvanceSourceConfig(ctx context.Context, ds *types.D
 			return err
 		}
 		if !enabled {
-			fingerprint := "disabled:" + sourceConfigFingerprint(ds)
-			if state.ConfigFingerprint == fingerprint {
-				return nil
-			}
-			if err := cancelSourceRunTx(tx, derefSourceID(state.ActiveSyncLogID), "source mode was disabled; this run was fenced off"); err != nil {
-				return err
-			}
-			if pending := derefSourceID(state.PendingSyncLogID); pending != derefSourceID(state.ActiveSyncLogID) {
-				if err := cancelSourceRunTx(tx, pending, "source mode was disabled; this trigger was canceled"); err != nil {
-					return err
-				}
-			}
-			state.ConfigGeneration++
-			state.FencingToken++
-			state.ConfigFingerprint = fingerprint
-			state.LeaseOwner, state.LeaseExpiresAt = nil, nil
-			state.ActiveSyncLogID, state.PendingSyncLogID, state.PendingTrigger = nil, nil, ""
-			return sourceStateUpdate(tx, state, map[string]any{
-				"config_generation": state.ConfigGeneration, "config_fingerprint": fingerprint,
-				"fencing_token": state.FencingToken, "lease_owner": nil, "lease_expires_at": nil,
-				"active_sync_log_id": nil, "pending_sync_log_id": nil, "pending_trigger": "",
-			})
+			return r.invalidateDisabledSourceGeneration(tx, state, ds)
 		}
 		return r.invalidateSourceGeneration(tx, state, ds)
 	})
@@ -501,16 +518,16 @@ func pendingDispatchTx(tx *gorm.DB, state *sourceSyncStateRow) (*types.SourceSyn
 	return &types.SourceSyncDispatch{SyncLog: &log, Trigger: state.PendingTrigger, DeliveryGeneration: state.PendingDeliveryGeneration}, nil
 }
 
-// RecoverAllSourceTriggers recovers durable source work independently of the
-// datasource's cron status. Error and paused sources may still own queued
-// retry work, while only active sources are returned by FindActive for cron.
+// RecoverAllSourceTriggers reconciles every datasource with coordinator state,
+// then recovers durable source work independently of cron eligibility. The
+// full scan also repairs config fences committed before a datasource write
+// whose process crashed before the second transaction.
 func (r *SyncLogRepository) RecoverAllSourceTriggers(ctx context.Context) ([]types.SourceSyncDispatch, error) {
 	var sources []types.DataSource
 	if err := r.db.WithContext(ctx).Model(&types.DataSource{}).
 		Joins(`JOIN source_sync_states AS source_state
 			ON source_state.data_source_id = data_sources.id
 			AND source_state.tenant_id = data_sources.tenant_id`).
-		Where("(source_state.active_sync_log_id IS NOT NULL OR source_state.pending_sync_log_id IS NOT NULL)").
 		Order("data_sources.id ASC").Find(&sources).Error; err != nil {
 		return nil, err
 	}
@@ -583,11 +600,19 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 		if err != nil {
 			return err
 		}
-		if !sourceStateMatchesPersistedDataSource(&state, current) {
+		// The caller may have loaded a stale datasource before a concurrent
+		// update. Such a snapshot must never rewrite the current coordinator.
+		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) {
 			return errSourceConfigurationNotCurrent
 		}
-		if err := r.invalidateSourceGeneration(tx, &state, current); err != nil {
-			return err
+		if !sourceModeEnabled(current) {
+			return r.invalidateDisabledSourceGeneration(tx, &state, current)
+		}
+		if !sourceStateMatchesPersistedDataSource(&state, current) {
+			// The datasource row is authoritative after a crash between the
+			// pre-write config fence and the separate datasource update. Reconcile
+			// by fencing/clearing old work; never recreate its canceled trigger.
+			return r.invalidateSourceGeneration(tx, &state, current)
 		}
 		activeID := derefSourceID(state.ActiveSyncLogID)
 		if activeID != "" && (state.LeaseExpiresAt == nil || !state.LeaseExpiresAt.After(time.Now().UTC())) {
