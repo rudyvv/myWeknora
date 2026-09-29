@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -108,6 +109,8 @@ type WikiScope struct {
 	KnowledgeBaseID string
 	KnowledgeIDs    []string
 	TagIDs          []string
+	SourceIDs       []string
+	targets         types.SearchTargets
 }
 
 // NewWikiScopesFromKBIDs is a convenience constructor for callers that only
@@ -147,7 +150,7 @@ func NewWikiScopesFromSearchTargets(searchTargets types.SearchTargets, wikiKBIDs
 		}
 		targetKnowledgeIDs, targetTagIDs := searchTargetScope(target)
 		wholeKB := searchTargetIsWholeKB(target)
-		if !wholeKB && len(targetKnowledgeIDs) == 0 && len(targetTagIDs) == 0 {
+		if !wholeKB && len(targetKnowledgeIDs) == 0 && len(targetTagIDs) == 0 && len(target.SourceIDs) == 0 {
 			// A malformed empty document target must not silently become
 			// whole-KB authorization.
 			continue
@@ -157,6 +160,13 @@ func NewWikiScopesFromSearchTargets(searchTargets types.SearchTargets, wikiKBIDs
 			scope = &accumulatedScope{WikiScope: WikiScope{KnowledgeBaseID: target.KnowledgeBaseID}}
 			byKB[target.KnowledgeBaseID] = scope
 		}
+		copyTarget := *target
+		copyTarget.KnowledgeIDs = append([]string(nil), target.KnowledgeIDs...)
+		copyTarget.TagIDs = append([]string(nil), target.TagIDs...)
+		copyTarget.ScopeTagIDs = append([]string(nil), target.ScopeTagIDs...)
+		copyTarget.SourceIDs = append([]string(nil), target.SourceIDs...)
+		scope.targets = append(scope.targets, &copyTarget)
+		scope.SourceIDs = append(scope.SourceIDs, target.SourceIDs...)
 		if wholeKB {
 			scope.unrestricted = true
 			continue
@@ -172,11 +182,12 @@ func NewWikiScopesFromSearchTargets(searchTargets types.SearchTargets, wikiKBIDs
 			continue
 		}
 		if scope.unrestricted {
-			scopes = append(scopes, WikiScope{KnowledgeBaseID: kbID})
+			scopes = append(scopes, WikiScope{KnowledgeBaseID: kbID, targets: scope.targets})
 			continue
 		}
 		scope.KnowledgeIDs = dedupNonEmptyStrings(scope.KnowledgeIDs)
 		scope.TagIDs = dedupNonEmptyStrings(scope.TagIDs)
+		scope.SourceIDs = dedupNonEmptyStrings(scope.SourceIDs)
 		scopes = append(scopes, scope.WikiScope)
 	}
 	return scopes
@@ -495,6 +506,13 @@ func seenLinkKey(kbID, slug string) string {
 }
 
 func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
+	ctx, release, scopeErr := beginWikiToolRead(ctx, t.wikiService, t.scopes)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer release()
+	ctx = source.WithWikiAnswerRead(ctx)
+
 	var params struct {
 		Slug  any `json:"slug"`
 		Slugs any `json:"slugs"`
@@ -810,6 +828,13 @@ Use this to find relevant wiki pages when you don't know the exact slug.`,
 }
 
 func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
+	ctx, release, scopeErr := beginWikiToolRead(ctx, t.wikiService, t.scopes)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer release()
+	ctx = source.WithWikiAnswerRead(ctx)
+
 	var params struct {
 		Query           any    `json:"query"`
 		Queries         any    `json:"queries"`

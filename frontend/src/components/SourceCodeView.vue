@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { readSourceWikiEvidence } from '@/api/wiki'
 import { getSourceFile, type SourceFileView, type SourceRange } from '@/api/knowledge-base'
 
-const props = defineProps<{ knowledgeId: string; fileVersionId?: string }>()
+const props = defineProps<{ knowledgeId: string; fileVersionId?: string; wikiEvidence?: { kbId: string; slug: string; id: string; version: number; commitSHA: string }; evidenceRange?: SourceRange }>()
 const file = ref<SourceFileView | null>(null)
 const loading = ref(false)
 const failed = ref(false)
@@ -27,7 +28,7 @@ function selectSymbol(range: SourceRange) {
   selected.value = range
   page.value = Math.floor((range.start_line - 1) / pageSize)
 }
-watch([() => props.knowledgeId, () => props.fileVersionId], async ([id, versionID]) => {
+watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvidence], async ([id, versionID]) => {
   const generation = ++requestGeneration
   file.value = null
   selected.value = null
@@ -36,10 +37,11 @@ watch([() => props.knowledgeId, () => props.fileVersionId], async ([id, versionI
   if (!id) return
   loading.value = true
   try {
-    const response = await getSourceFile(id, versionID)
+    const response: any = props.wikiEvidence ? await readSourceWikiEvidence(props.wikiEvidence.kbId, props.wikiEvidence.slug, props.wikiEvidence.id, props.wikiEvidence.version) : await getSourceFile(id as string, versionID as string | undefined)
     if (generation === requestGeneration) {
       if (versionID && response.data.file_version_id !== versionID) failed.value = true
-      else file.value = response.data
+      else if (props.wikiEvidence && response.data.commit_sha !== props.wikiEvidence.commitSHA) failed.value = true
+      else { file.value = response.data; if (props.evidenceRange) selectSymbol(props.evidenceRange) }
     }
   } catch { if (generation === requestGeneration) failed.value = true }
   finally { if (generation === requestGeneration) loading.value = false }

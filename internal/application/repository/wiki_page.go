@@ -22,12 +22,13 @@ var ErrWikiPageConflict = errors.New("wiki page version conflict")
 
 // wikiPageRepository implements the WikiPageRepository interface
 type wikiPageRepository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	sourceWiki bool
 }
 
 // NewWikiPageRepository creates a new wiki page repository
 func NewWikiPageRepository(db *gorm.DB) interfaces.WikiPageRepository {
-	return &wikiPageRepository{db: db}
+	return &wikiPageRepository{db: db, sourceWiki: db.Dialector.Name() == "postgres" && db.Migrator().HasTable("source_wiki_evidence_refs")}
 }
 
 func (r *wikiPageRepository) wikiDialect() string {
@@ -89,7 +90,15 @@ func (r *wikiPageRepository) wikiEmptyInLinksPredicate() string {
 
 // Create inserts a new wiki page record
 func (r *wikiPageRepository) Create(ctx context.Context, page *types.WikiPage) error {
-	return r.db.WithContext(ctx).Create(page).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(page).Error; err != nil {
+			return err
+		}
+		if r.sourceWiki {
+			return registerSourceWikiEvidence(tx, page, nil)
+		}
+		return nil
+	})
 }
 
 // Update updates an existing wiki page record with optimistic locking.
@@ -125,7 +134,22 @@ func (r *wikiPageRepository) UpdateWithRevision(
 				return err
 			}
 		}
-		return updateWikiPageRow(tx, page)
+		if r.sourceWiki && rev != nil && rev.SourceProvenance != nil {
+			old := &types.WikiPage{ID: rev.PageID, Version: rev.Version, SourceProvenance: rev.SourceProvenance}
+			if err := registerSourceWikiEvidence(tx, old, rev); err != nil {
+				return err
+			}
+		}
+		if err := updateWikiPageRow(tx, page); err != nil {
+			return err
+		}
+		if r.sourceWiki {
+			if err := tx.Where("page_id=? AND revision_id IS NULL", page.ID).Delete(&types.SourceWikiEvidenceRef{}).Error; err != nil {
+				return err
+			}
+			return registerSourceWikiEvidence(tx, page, nil)
+		}
+		return nil
 	})
 }
 
@@ -140,26 +164,27 @@ func updateWikiPageRow(db *gorm.DB, page *types.WikiPage) error {
 		Model(page).
 		Where("id = ? AND version = ?", page.ID, expectedVersion).
 		Updates(map[string]interface{}{
-			"title":            page.Title,
-			"content":          page.Content,
-			"summary":          page.Summary,
-			"page_type":        page.PageType,
-			"status":           page.Status,
-			"aliases":          page.Aliases,
-			"out_links":        page.OutLinks,
-			"source_refs":      page.SourceRefs,
-			"chunk_refs":       page.ChunkRefs,
-			"page_metadata":    page.PageMetadata,
-			"parent_slug":      page.ParentSlug,
-			"folder_id":        page.FolderID,
-			"category_path":    page.CategoryPath,
-			"wiki_path":        page.WikiPath,
-			"depth":            page.Depth,
-			"sort_order":       page.SortOrder,
-			"last_edit_source": page.LastEditSource,
-			"last_editor_id":   page.LastEditorID,
-			"version":          page.Version,
-			"updated_at":       page.UpdatedAt,
+			"title":             page.Title,
+			"content":           page.Content,
+			"summary":           page.Summary,
+			"page_type":         page.PageType,
+			"status":            page.Status,
+			"aliases":           page.Aliases,
+			"out_links":         page.OutLinks,
+			"source_refs":       page.SourceRefs,
+			"source_provenance": page.SourceProvenance,
+			"chunk_refs":        page.ChunkRefs,
+			"page_metadata":     page.PageMetadata,
+			"parent_slug":       page.ParentSlug,
+			"folder_id":         page.FolderID,
+			"category_path":     page.CategoryPath,
+			"wiki_path":         page.WikiPath,
+			"depth":             page.Depth,
+			"sort_order":        page.SortOrder,
+			"last_edit_source":  page.LastEditSource,
+			"last_editor_id":    page.LastEditorID,
+			"version":           page.Version,
+			"updated_at":        page.UpdatedAt,
 		})
 	if result.Error != nil {
 		page.Version = expectedVersion
@@ -181,13 +206,13 @@ func updateWikiPageRow(db *gorm.DB, page *types.WikiPage) error {
 // wikiRevisionListColumns is the projection for revision listings — every
 // column except the potentially multi-hundred-KB content body.
 const wikiRevisionListColumns = "id, tenant_id, knowledge_base_id, page_id, slug, version, " +
-	"title, page_type, status, summary, aliases, edit_source, editor_id, edited_at, created_at"
+	"title, page_type, status, summary, aliases, source_refs, chunk_refs, page_metadata, source_provenance, edit_source, editor_id, edited_at, created_at"
 
 // ListRevisions returns snapshots for a page newest-first, content omitted.
 func (r *wikiPageRepository) ListRevisions(
 	ctx context.Context, kbID string, pageID string, limit int, offset int,
 ) ([]*types.WikiPageRevision, int64, error) {
-	base := r.db.WithContext(ctx).Model(&types.WikiPageRevision{}).
+	base := r.readDB(ctx, "wiki_page_revisions").Model(&types.WikiPageRevision{}).
 		Where("knowledge_base_id = ? AND page_id = ?", kbID, pageID)
 
 	var total int64
@@ -212,7 +237,7 @@ func (r *wikiPageRepository) GetRevision(
 	ctx context.Context, kbID string, pageID string, version int,
 ) (*types.WikiPageRevision, error) {
 	var rev types.WikiPageRevision
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_page_revisions").
 		Where("knowledge_base_id = ? AND page_id = ? AND version = ?", kbID, pageID, version).
 		First(&rev).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -298,20 +323,21 @@ func (r *wikiPageRepository) UpdateMeta(ctx context.Context, page *types.WikiPag
 		Model(page).
 		Where("id = ?", page.ID).
 		Updates(map[string]interface{}{
-			"in_links":      page.InLinks,
-			"out_links":     page.OutLinks,
-			"aliases":       page.Aliases,
-			"status":        page.Status,
-			"source_refs":   page.SourceRefs,
-			"chunk_refs":    page.ChunkRefs,
-			"page_metadata": page.PageMetadata,
-			"parent_slug":   page.ParentSlug,
-			"folder_id":     page.FolderID,
-			"category_path": page.CategoryPath,
-			"wiki_path":     page.WikiPath,
-			"depth":         page.Depth,
-			"sort_order":    page.SortOrder,
-			"updated_at":    page.UpdatedAt,
+			"in_links":          page.InLinks,
+			"out_links":         page.OutLinks,
+			"aliases":           page.Aliases,
+			"status":            page.Status,
+			"source_refs":       page.SourceRefs,
+			"source_provenance": page.SourceProvenance,
+			"chunk_refs":        page.ChunkRefs,
+			"page_metadata":     page.PageMetadata,
+			"parent_slug":       page.ParentSlug,
+			"folder_id":         page.FolderID,
+			"category_path":     page.CategoryPath,
+			"wiki_path":         page.WikiPath,
+			"depth":             page.Depth,
+			"sort_order":        page.SortOrder,
+			"updated_at":        page.UpdatedAt,
 		})
 	if result.Error != nil {
 		return result.Error
@@ -325,7 +351,7 @@ func (r *wikiPageRepository) UpdateMeta(ctx context.Context, page *types.WikiPag
 // GetByID retrieves a wiki page by its unique ID
 func (r *wikiPageRepository) GetByID(ctx context.Context, id string) (*types.WikiPage, error) {
 	var page types.WikiPage
-	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&page).Error; err != nil {
+	if err := r.readDB(ctx, "wiki_pages").Where("id = ?", id).First(&page).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrWikiPageNotFound
 		}
@@ -337,7 +363,7 @@ func (r *wikiPageRepository) GetByID(ctx context.Context, id string) (*types.Wik
 // GetBySlug retrieves a wiki page by slug within a knowledge base
 func (r *wikiPageRepository) GetBySlug(ctx context.Context, kbID string, slug string) (*types.WikiPage, error) {
 	var page types.WikiPage
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
 		First(&page).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -350,7 +376,7 @@ func (r *wikiPageRepository) GetBySlug(ctx context.Context, kbID string, slug st
 
 // List retrieves wiki pages with filtering and pagination
 func (r *wikiPageRepository) List(ctx context.Context, req *types.WikiPageListRequest) ([]*types.WikiPage, int64, error) {
-	query := r.db.WithContext(ctx).Model(&types.WikiPage{}).
+	query := r.readDB(ctx, "wiki_pages").Model(&types.WikiPage{}).
 		Where("knowledge_base_id = ?", req.KnowledgeBaseID)
 
 	if pageTypes := types.SplitWikiPageTypes(req.PageType); len(pageTypes) == 1 {
@@ -429,7 +455,7 @@ func (r *wikiPageRepository) List(ctx context.Context, req *types.WikiPageListRe
 // ListByType retrieves all wiki pages of a given type within a knowledge base
 func (r *wikiPageRepository) ListByType(ctx context.Context, kbID string, pageType string) ([]*types.WikiPage, error) {
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Where("knowledge_base_id = ? AND page_type = ?", kbID, pageType).
 		Order("updated_at DESC").
 		Find(&pages).Error; err != nil {
@@ -464,7 +490,7 @@ func (r *wikiPageRepository) ListByTypeLight(
 		offset = 0
 	}
 
-	base := r.db.WithContext(ctx).
+	base := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Where("knowledge_base_id = ? AND page_type = ? AND status <> ?",
 			kbID, pageType, types.WikiPageStatusArchived)
@@ -519,8 +545,8 @@ func (r *wikiPageRepository) ListBySourceRef(ctx context.Context, kbID string, s
 	likePattern := "%" + escapeLikePattern(prefixStr) + "%"
 
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
-		Where("knowledge_base_id = ? AND (source_refs @> ?::jsonb OR source_refs::text LIKE ?)",
+	if err := r.readDB(ctx, "wiki_pages").
+		Where("knowledge_base_id = ? AND (source_refs::jsonb @> ?::jsonb OR source_refs::text LIKE ?)",
 			kbID,
 			string(needle),
 			likePattern,
@@ -556,9 +582,9 @@ func (r *wikiPageRepository) ListSlugsBySourceRef(ctx context.Context, kbID stri
 	likePattern := "%" + escapeLikePattern(prefixStr) + "%"
 
 	var slugs []string
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
-		Where("knowledge_base_id = ? AND (source_refs @> ?::jsonb OR source_refs::text LIKE ?)",
+		Where("knowledge_base_id = ? AND (source_refs::jsonb @> ?::jsonb OR source_refs::text LIKE ?)",
 			kbID,
 			string(needle),
 			likePattern,
@@ -586,7 +612,7 @@ func (r *wikiPageRepository) ListBySlugs(
 		return nil, nil
 	}
 	var rows []types.WikiPageLite
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Select("slug", "title", "page_type", "status", "aliases", "out_links").
 		Where("knowledge_base_id = ? AND slug IN ?", kbID, slugs).
@@ -759,7 +785,7 @@ WHERE knowledge_base_id = ? AND id = ? AND deleted_at IS NULL
 
 func (r *wikiPageRepository) CountPagesInFolder(ctx context.Context, kbID string, folderID string) (int64, error) {
 	var count int64
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Where("knowledge_base_id = ? AND folder_id = ? AND status <> ?",
 			kbID, folderID, types.WikiPageStatusArchived).
@@ -777,7 +803,7 @@ func (r *wikiPageRepository) CountPagesByFolder(
 		Cnt      int64
 	}
 	var rows []folderCount
-	q := r.db.WithContext(ctx).
+	q := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Select("folder_id, COUNT(*) as cnt").
 		Where("knowledge_base_id = ? AND status <> ?", kbID, types.WikiPageStatusArchived)
@@ -801,7 +827,7 @@ func (r *wikiPageRepository) ListPagesByFolderIDs(
 		return nil, nil
 	}
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Where("knowledge_base_id = ? AND folder_id IN ?", kbID, folderIDs).
 		Find(&pages).Error; err != nil {
 		return nil, err
@@ -840,7 +866,7 @@ func (r *wikiPageRepository) ListSummariesByKnowledgeIDs(
 		SourceRefs types.StringArray `gorm:"column:source_refs"`
 	}
 
-	q := r.db.WithContext(ctx).
+	q := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Select("content", "source_refs").
 		Where("knowledge_base_id = ? AND page_type = ? AND status <> ?",
@@ -859,7 +885,7 @@ func (r *wikiPageRepository) ListSummariesByKnowledgeIDs(
 		if err != nil {
 			return nil, fmt.Errorf("marshal kid needle: %w", err)
 		}
-		clauses = append(clauses, "source_refs @> ?::jsonb")
+		clauses = append(clauses, "source_refs::jsonb @> ?::jsonb")
 		args = append(args, string(needle))
 
 		prefix, err := json.Marshal(kid + "|")
@@ -927,7 +953,7 @@ func (r *wikiPageRepository) ExistsSlugs(
 		return nil, nil
 	}
 	var live []string
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Where("knowledge_base_id = ? AND slug IN ? AND status <> ?",
 			kbID, slugs, types.WikiPageStatusArchived).
@@ -952,7 +978,7 @@ func (r *wikiPageRepository) ListAllSlugs(
 	kbID string,
 ) ([]string, error) {
 	var slugs []string
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Where("knowledge_base_id = ? AND status <> ?", kbID, types.WikiPageStatusArchived).
 		Pluck("slug", &slugs).Error; err != nil {
@@ -981,7 +1007,7 @@ func (r *wikiPageRepository) ListPagesCursor(
 	if limit > 500 {
 		limit = 500
 	}
-	q := r.db.WithContext(ctx).
+	q := r.readDB(ctx, "wiki_pages").
 		Where("knowledge_base_id = ? AND status <> ?", kbID, types.WikiPageStatusArchived).
 		Order("id ASC").
 		Limit(limit)
@@ -1022,7 +1048,7 @@ func (r *wikiPageRepository) ListByTypeRecent(
 		limit = 1000
 	}
 	var entries []types.WikiIndexEntry
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Select("slug", "title", "summary").
 		Where("knowledge_base_id = ? AND page_type = ? AND status <> ?",
@@ -1069,7 +1095,7 @@ func (r *wikiPageRepository) FindSimilarPages(
 	q := strings.ToLower(strings.TrimSpace(query))
 
 	var rows []types.WikiPageLite
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Select("slug, title, page_type, status, aliases, out_links, similarity(lower(title), ?) AS sim", q).
 		Where("knowledge_base_id = ? AND page_type IN ? AND status <> ? AND lower(title) % ?",
@@ -1166,7 +1192,7 @@ func (r *wikiPageRepository) FindPagesByNormalizedTitles(
 		}
 		chunk := identities[start:end]
 		var rows []types.WikiPageLite
-		if err := r.db.WithContext(ctx).
+		if err := r.readDB(ctx, "wiki_pages").
 			Model(&types.WikiPage{}).
 			Select("slug, title, page_type, status, aliases, out_links").
 			Where("knowledge_base_id = ? AND page_type = ? AND status <> ? AND "+normSQL+" IN ?",
@@ -1187,7 +1213,7 @@ func (r *wikiPageRepository) FindPagesByNormalizedTitles(
 // ListAll retrieves all non-archived wiki pages in a knowledge base.
 func (r *wikiPageRepository) ListAll(ctx context.Context, kbID string) ([]*types.WikiPage, error) {
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Where("knowledge_base_id = ? AND status <> ?", kbID, types.WikiPageStatusArchived).
 		Order("page_type ASC, title ASC").
 		Find(&pages).Error; err != nil {
@@ -1210,7 +1236,7 @@ func (r *wikiPageRepository) ListRecentForSuggestions(
 		return nil, nil
 	}
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Where("tenant_id = ?", tenantID).
 		Where("knowledge_base_id IN ?", kbIDs).
 		Where("page_type <> ?", types.WikiPageTypeIndex).
@@ -1350,7 +1376,7 @@ func (r *wikiPageRepository) Search(ctx context.Context, kbID string, query stri
 		"ELSE 0 END AS match_rank"
 
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Select("*, "+rankExpr, query, query, query, query).
 		Where("knowledge_base_id = ? AND (title ~* ? OR content ~* ? OR summary ~* ? OR slug ~* ?)",
 			kbID, query, query, query, query).
@@ -1370,7 +1396,7 @@ func (r *wikiPageRepository) CountByType(ctx context.Context, kbID string) (map[
 		Count    int64
 	}
 	var results []result
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Select("page_type, count(*) as count").
 		Where("knowledge_base_id = ? AND status <> ?", kbID, types.WikiPageStatusArchived).
@@ -1389,7 +1415,7 @@ func (r *wikiPageRepository) CountByType(ctx context.Context, kbID string) (map[
 // CountOrphans returns the number of pages with no inbound links
 func (r *wikiPageRepository) CountOrphans(ctx context.Context, kbID string) (int64, error) {
 	var count int64
-	if err := r.db.WithContext(ctx).
+	if err := r.readDB(ctx, "wiki_pages").
 		Model(&types.WikiPage{}).
 		Where("knowledge_base_id = ? AND status <> ?", kbID, types.WikiPageStatusArchived).
 		Where(r.wikiEmptyInLinksPredicate()).

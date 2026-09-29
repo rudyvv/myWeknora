@@ -24,6 +24,7 @@ test('run details expose complete manifest and permit code reading only after pu
     const module = { exports: {} as any }
     new Function('require', 'module', 'exports', compiled)((name: string) => {
       if (name.endsWith('.vue')) return { __esModule: true, default: load(resolve(dirname(path), name)) }
+      if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence reader') } }
       if (name === '@/api/knowledge-base') return { async getSourceFile() { return { data: { file_version_id: 'version-one', path: 'src/Service.java', content: 'class Service {}', commit_sha: 'a'.repeat(40), quality: 'structural', symbols: [] } } } }
       return require(name)
     }, module, module.exports)

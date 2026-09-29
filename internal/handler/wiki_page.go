@@ -25,6 +25,7 @@ type WikiPageHandler struct {
 	lintService   *service.WikiLintService
 	auditService  interfaces.AuditLogService
 	memoryService interfaces.MemoryService
+	sourceWiki    interfaces.SourceWikiService
 }
 
 // NewWikiPageHandler creates a new wiki page handler
@@ -34,8 +35,14 @@ func NewWikiPageHandler(
 	lintService *service.WikiLintService,
 	auditService interfaces.AuditLogService,
 	memoryService interfaces.MemoryService,
+	sourceWiki ...interfaces.SourceWikiService,
 ) *WikiPageHandler {
+	var sourceService interfaces.SourceWikiService
+	if len(sourceWiki) > 0 {
+		sourceService = sourceWiki[0]
+	}
 	return &WikiPageHandler{
+		sourceWiki:    sourceService,
 		wikiService:   wikiService,
 		kbService:     kbService,
 		lintService:   lintService,

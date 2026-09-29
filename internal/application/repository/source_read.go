@@ -78,6 +78,19 @@ func (r *knowledgeRepository) AcquireSourceRead(ctx context.Context, targets typ
 			if err != nil {
 				return err
 			}
+			if tx.Migrator().HasTable("source_read_wiki_scopes") {
+				sourceIDs := target.SourceIDs
+				if sourceIDs == nil {
+					sourceIDs = []string{}
+				}
+				sourcesJSON, err := json.Marshal(sourceIDs)
+				if err != nil {
+					return err
+				}
+				if err := tx.Exec(`INSERT INTO source_read_wiki_scopes(lease_id,knowledge_base_id,tenant_id,source_ids,knowledge_ids,tag_ids) VALUES (?,?,?,?::jsonb,?::jsonb,?::jsonb)`, id, target.KnowledgeBaseID, target.TenantID, string(sourcesJSON), string(filesJSON), string(tagsJSON)).Error; err != nil {
+					return err
+				}
+			}
 			if len(target.SourceIDs) == 0 {
 				if err := tx.Exec(`INSERT INTO source_read_document_scopes(lease_id,knowledge_base_id,tenant_id,knowledge_ids,tag_ids) VALUES (?,?,?,?::jsonb,?::jsonb)`, id, target.KnowledgeBaseID, target.TenantID, string(filesJSON), string(tagsJSON)).Error; err != nil {
 					return err

@@ -236,7 +236,8 @@ type WikiPage struct {
 	// Format matches the legacy "<knowledge_id>|<doc_title>" convention used
 	// across the ingest pipeline, so retract / display code can split on `|`
 	// to recover the title. Document-level granularity.
-	SourceRefs StringArray `json:"source_refs" gorm:"type:json"`
+	SourceRefs       StringArray           `json:"source_refs" gorm:"type:json"`
+	SourceProvenance *SourceWikiProvenance `json:"source_provenance,omitempty" gorm:"type:jsonb"`
 	// ChunkRefs records the specific source-document chunks this page was
 	// built from — one UUID per cited chunk. Populated during ingest from
 	// the chunk-citation pass; refreshed wholesale whenever the page is
@@ -315,18 +316,22 @@ func NormalizeWikiEditSource(source string) string {
 // revertable. Rows are pruned per WikiRevisionPruneRequest to bound storage
 // on hot pipeline pages.
 type WikiPageRevision struct {
-	ID              string      `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID        uint64      `json:"tenant_id" gorm:"index"`
-	KnowledgeBaseID string      `json:"knowledge_base_id" gorm:"type:varchar(36);index:idx_wiki_page_revisions_kb_slug"`
-	PageID          string      `json:"page_id" gorm:"type:varchar(36);uniqueIndex:idx_wiki_page_revisions_page_version"`
-	Slug            string      `json:"slug" gorm:"type:varchar(255);index:idx_wiki_page_revisions_kb_slug"`
-	Version         int         `json:"version" gorm:"uniqueIndex:idx_wiki_page_revisions_page_version"`
-	Title           string      `json:"title" gorm:"type:varchar(512)"`
-	PageType        string      `json:"page_type" gorm:"type:varchar(32)"`
-	Status          string      `json:"status" gorm:"type:varchar(32)"`
-	Content         string      `json:"content,omitempty" gorm:"type:text"`
-	Summary         string      `json:"summary" gorm:"type:text"`
-	Aliases         StringArray `json:"aliases" gorm:"type:json"`
+	ID               string                `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID         uint64                `json:"tenant_id" gorm:"index"`
+	KnowledgeBaseID  string                `json:"knowledge_base_id" gorm:"type:varchar(36);index:idx_wiki_page_revisions_kb_slug"`
+	PageID           string                `json:"page_id" gorm:"type:varchar(36);uniqueIndex:idx_wiki_page_revisions_page_version"`
+	Slug             string                `json:"slug" gorm:"type:varchar(255);index:idx_wiki_page_revisions_kb_slug"`
+	Version          int                   `json:"version" gorm:"uniqueIndex:idx_wiki_page_revisions_page_version"`
+	Title            string                `json:"title" gorm:"type:varchar(512)"`
+	PageType         string                `json:"page_type" gorm:"type:varchar(32)"`
+	Status           string                `json:"status" gorm:"type:varchar(32)"`
+	Content          string                `json:"content,omitempty" gorm:"type:text"`
+	Summary          string                `json:"summary" gorm:"type:text"`
+	Aliases          StringArray           `json:"aliases" gorm:"type:json"`
+	SourceRefs       StringArray           `json:"source_refs,omitempty" gorm:"type:json"`
+	ChunkRefs        StringArray           `json:"chunk_refs,omitempty" gorm:"type:json"`
+	PageMetadata     JSON                  `json:"page_metadata,omitempty" gorm:"type:json"`
+	SourceProvenance *SourceWikiProvenance `json:"source_provenance,omitempty" gorm:"type:jsonb"`
 	// Author of THIS version (same semantics as WikiPage.LastEditSource).
 	EditSource string `json:"edit_source" gorm:"type:varchar(16);default:''"`
 	EditorID   string `json:"editor_id" gorm:"type:varchar(64);default:''"`

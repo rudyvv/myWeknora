@@ -25,7 +25,8 @@ export interface WikiPage {
   wiki_path?: string;
   depth?: number;
   sort_order?: number;
-  source_refs: string[];
+  source_provenance?: { source_id: string; module_path: string; state: string; applicable_snapshot_id: string; evidence: Array<{ id: string; knowledge_id: string; file_version_id: string; commit_sha: string; path: string; range: { start_line: number; end_line: number; start_byte: number; end_byte: number } }> };
+ source_refs: string[];
   in_links: string[];
   out_links: string[];
   page_metadata: Record<string, any>;
@@ -207,6 +208,8 @@ export function deleteWikiPage(kbId: string, slug: string) {
 // WikiPageRevision is one immutable snapshot of a superseded page version.
 // `content` is only populated when fetching a single revision.
 export interface WikiPageRevision {
+ source_refs?: string[];
+ source_provenance?: WikiPage["source_provenance"];
   id: string;
   tenant_id: number;
   knowledge_base_id: string;
@@ -350,4 +353,19 @@ export function updateWikiIssueStatus(kbId: string, issueId: string, status: str
 
 export function rebuildWikiLinks(kbId: string) {
   return post(`/api/v1/knowledgebase/${kbId}/wiki/rebuild-links`, {});
+}
+
+export interface SourceWikiAttempt {
+ id: string; source_id: string; module_path: string; title: string; slug: string;
+ status: string; reason: string; calls: number; tokens: number; repairs: number;
+}
+export function generateSourceWikiModule(kbId: string, request: { source_id: string; module_path: string; title: string }) {
+ return post(`/api/v1/knowledgebase/${kbId}/wiki/source/generate`, request, { timeout: 190000 });
+}
+export function listSourceWikiAttempts(kbId: string) {
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/attempts`);
+}
+export function readSourceWikiEvidence(kbId: string, slug: string, evidenceId: string, version = 0) {
+ const query = new URLSearchParams({ slug, evidence_id: evidenceId, version: String(version) });
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/evidence?${query}`);
 }

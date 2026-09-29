@@ -293,9 +293,12 @@ func RegisterKnowledgeTagRoutes(r *gin.RouterGroup, tagHandler *handler.TagHandl
 // :kb_id resolves directly to the owning KB so a Contributor who owns
 // the KB can manage its wiki, while a non-owner Contributor gets 403.
 func RegisterWikiPageRoutes(r *gin.RouterGroup, wikiHandler *handler.WikiPageHandler, g *rbacGuards) {
-	wiki := g.apiKeyGroup(r.Group("/knowledgebase/:kb_id/wiki"), apiKeyIngest(apiKeyFullAccess()))
+	wiki := g.apiKeyGroup(r.Group("/knowledgebase/:kb_id/wiki", wikiHandler.WikiReadScope), apiKeyIngest(apiKeyFullAccess()))
 	wikiRead := wiki.With(apiKeyRetrieve(apiKeyFullAccess()))
 	{
+		wikiRead.GET("/source/attempts", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.ListSourceWikiAttempts)
+		wikiRead.GET("/source/evidence", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.ReadSourceWikiEvidence)
+		wiki.POST("/source/generate", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), wikiHandler.GenerateSourceModule)
 		// Page CRUD
 		wikiRead.GET("/pages", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.ListPages)
 		wiki.POST("/pages", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), wikiHandler.CreatePage)

@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -68,6 +70,9 @@ func NewWikiPageService(
 
 // CreatePage creates a new wiki page
 func (s *wikiPageService) CreatePage(ctx context.Context, page *types.WikiPage) (*types.WikiPage, error) {
+	if page.SourceProvenance != nil && !isSourceWikiVerifiedWrite(ctx) {
+		return nil, errors.New("source provenance must be verified by the source Wiki service")
+	}
 	if page.ID == "" {
 		page.ID = uuid.New().String()
 	}
@@ -119,9 +124,40 @@ func (s *wikiPageService) CreatePage(ctx context.Context, page *types.WikiPage) 
 // nothing, etc.) still persist through `UpdateMeta` but leave `version`
 // untouched so consumers can treat a bump as a real edit signal.
 func (s *wikiPageService) UpdatePage(ctx context.Context, page *types.WikiPage) (*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: page.KnowledgeBaseID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	existing, err := s.repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
 	if err != nil {
 		return nil, fmt.Errorf("get existing page: %w", err)
+	}
+	if page.Version > 0 && page.Version != existing.Version {
+		return nil, repository.ErrWikiPageConflict
+	}
+	incomingSourceRefs := append(types.StringArray(nil), page.SourceRefs...)
+	if existing.SourceProvenance != nil && !isSourceWikiVerifiedWrite(ctx) {
+		provenance := *existing.SourceProvenance
+		if existing.Content != page.Content || existing.Title != page.Title || existing.Summary != page.Summary || !slices.Equal(existing.Aliases, page.Aliases) {
+			provenance.State = "unverified"
+		}
+		page.SourceProvenance = &provenance
+		page.SourceRefs = append(types.StringArray(nil), existing.SourceRefs...)
+		seen := map[string]bool{}
+		for _, ref := range page.SourceRefs {
+			seen[ref] = true
+		}
+		for _, ref := range incomingSourceRefs {
+			if !seen[ref] {
+				page.SourceRefs = append(page.SourceRefs, ref)
+				seen[ref] = true
+			}
+		}
+		page.ChunkRefs = append(types.StringArray(nil), existing.ChunkRefs...)
+	} else if existing.SourceProvenance == nil && page.SourceProvenance != nil && !isSourceWikiVerifiedWrite(ctx) {
+		return nil, errors.New("source provenance must be verified by the source Wiki service")
 	}
 	stripWikiPageInlineChunkCitations(page)
 
@@ -146,6 +182,7 @@ func (s *wikiPageService) UpdatePage(ctx context.Context, page *types.WikiPage) 
 	existing.PageType = page.PageType
 	existing.Aliases = append(types.StringArray(nil), page.Aliases...)
 	existing.SourceRefs = page.SourceRefs
+	existing.SourceProvenance = page.SourceProvenance
 	existing.ChunkRefs = page.ChunkRefs
 	existing.PageMetadata = page.PageMetadata
 	existing.ParentSlug = page.ParentSlug
@@ -198,6 +235,22 @@ func (s *wikiPageService) UpdatePage(ctx context.Context, page *types.WikiPage) 
 
 // UpdatePageMeta updates only metadata (status, source_refs) without version bump or link re-parse.
 func (s *wikiPageService) UpdatePageMeta(ctx context.Context, page *types.WikiPage) error {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: page.KnowledgeBaseID}})
+	if err != nil {
+		return err
+	}
+	defer release()
+	existing, err := s.repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	if err != nil {
+		return err
+	}
+	if existing.SourceProvenance != nil || page.SourceProvenance != nil {
+		old, _ := json.Marshal(existing.SourceProvenance)
+		next, _ := json.Marshal(page.SourceProvenance)
+		if !bytes.Equal(old, next) || !slices.Equal(existing.SourceRefs, page.SourceRefs) || !slices.Equal(existing.ChunkRefs, page.ChunkRefs) {
+			return errors.New("technical body sources require a versioned verified write")
+		}
+	}
 	normalizeWikiHierarchy(page)
 	page.UpdatedAt = time.Now()
 	return s.repo.UpdateMeta(ctx, page)
@@ -209,11 +262,23 @@ func (s *wikiPageService) UpdatePageMeta(ctx context.Context, page *types.WikiPa
 // in-link references on target pages are refreshed so link navigation stays
 // consistent — only the user-facing revision counter is preserved.
 func (s *wikiPageService) UpdateAutoLinkedContent(ctx context.Context, page *types.WikiPage) error {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: page.KnowledgeBaseID}})
+	if err != nil {
+		return err
+	}
+	defer release()
 	existing, err := s.repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
 	if err != nil {
 		return fmt.Errorf("get existing page: %w", err)
 	}
 
+	if existing.SourceProvenance != nil {
+		// Even automatic markup changes belong to a new technical body. Preserve
+		// its previous evidence owner and require revalidation before answering.
+		existing.Content = stripWikiInlineChunkCitations(page.Content)
+		_, err := s.UpdatePage(ctx, existing)
+		return err
+	}
 	oldOutLinks := existing.OutLinks
 
 	existing.Content = stripWikiInlineChunkCitations(page.Content)
@@ -236,22 +301,26 @@ func (s *wikiPageService) UpdateAutoLinkedContent(ctx context.Context, page *typ
 // not whoever is performing the write that supersedes it.
 func revisionFromPage(p *types.WikiPage) *types.WikiPageRevision {
 	return &types.WikiPageRevision{
-		ID:              uuid.New().String(),
-		TenantID:        p.TenantID,
-		KnowledgeBaseID: p.KnowledgeBaseID,
-		PageID:          p.ID,
-		Slug:            p.Slug,
-		Version:         p.Version,
-		Title:           p.Title,
-		PageType:        p.PageType,
-		Status:          p.Status,
-		Content:         p.Content,
-		Summary:         p.Summary,
-		Aliases:         append(types.StringArray(nil), p.Aliases...),
-		EditSource:      types.NormalizeWikiEditSource(p.LastEditSource),
-		EditorID:        p.LastEditorID,
-		EditedAt:        p.UpdatedAt,
-		CreatedAt:       time.Now(),
+		ID:               uuid.New().String(),
+		TenantID:         p.TenantID,
+		KnowledgeBaseID:  p.KnowledgeBaseID,
+		PageID:           p.ID,
+		Slug:             p.Slug,
+		Version:          p.Version,
+		Title:            p.Title,
+		PageType:         p.PageType,
+		Status:           p.Status,
+		Content:          p.Content,
+		Summary:          p.Summary,
+		Aliases:          append(types.StringArray(nil), p.Aliases...),
+		SourceRefs:       append(types.StringArray(nil), p.SourceRefs...),
+		ChunkRefs:        append(types.StringArray(nil), p.ChunkRefs...),
+		PageMetadata:     append(types.JSON(nil), p.PageMetadata...),
+		SourceProvenance: p.SourceProvenance,
+		EditSource:       types.NormalizeWikiEditSource(p.LastEditSource),
+		EditorID:         p.LastEditorID,
+		EditedAt:         p.UpdatedAt,
+		CreatedAt:        time.Now(),
 	}
 }
 
@@ -284,7 +353,13 @@ var ErrWikiRevertToCurrentVersion = errors.New("cannot revert to the current ver
 func (s *wikiPageService) ListRevisions(
 	ctx context.Context, kbID string, slug string, limit int, offset int,
 ) (*types.WikiPageRevisionListResponse, error) {
-	page, err := s.repo.GetBySlug(ctx, kbID, slug)
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	page, err := s.revisionOwnerIdentity(ctx, kbID, slug)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +378,13 @@ func (s *wikiPageService) ListRevisions(
 func (s *wikiPageService) GetRevision(
 	ctx context.Context, kbID string, slug string, version int,
 ) (*types.WikiPageRevision, error) {
-	page, err := s.repo.GetBySlug(ctx, kbID, slug)
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	page, err := s.revisionOwnerIdentity(ctx, kbID, slug)
 	if err != nil {
 		return nil, err
 	}
@@ -318,6 +399,12 @@ func (s *wikiPageService) GetRevision(
 func (s *wikiPageService) RevertPageToVersion(
 	ctx context.Context, kbID string, slug string, version int,
 ) (*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	page, err := s.repo.GetBySlug(ctx, kbID, slug)
 	if err != nil {
 		return nil, err
@@ -337,22 +424,61 @@ func (s *wikiPageService) RevertPageToVersion(
 	target.PageType = rev.PageType
 	target.Status = rev.Status
 	target.Aliases = append(types.StringArray(nil), rev.Aliases...)
+	if rev.SourceProvenance != nil || page.SourceProvenance != nil {
+		target.SourceRefs = append(types.StringArray(nil), rev.SourceRefs...)
+		target.ChunkRefs = append(types.StringArray(nil), rev.ChunkRefs...)
+		target.PageMetadata = append(types.JSON(nil), rev.PageMetadata...)
+		target.SourceProvenance = rev.SourceProvenance
+		ctx = sourceWikiVerifiedWrite(ctx)
+	}
 
 	return s.UpdatePage(types.WithWikiEditSource(ctx, types.WikiEditSourceRevert), &target)
 }
 
 // GetPageBySlug retrieves a wiki page by its slug
 func (s *wikiPageService) GetPageBySlug(ctx context.Context, kbID string, slug string) (*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	page, err := s.repo.GetBySlug(ctx, kbID, slug)
 	if err != nil {
 		return nil, err
 	}
 	stripWikiPageInlineChunkCitations(page)
+	if page.SourceProvenance != nil && page.SourceProvenance.State == "ready" {
+		if repo, ok := s.repo.(interfaces.WikiSourceApplicabilityRepository); ok {
+			applicable, err := repo.WikiSourceApplicable(ctx, page)
+			if err != nil {
+				return nil, err
+			}
+			if !applicable {
+				p := *page.SourceProvenance
+				p.State = "stale"
+				page.SourceProvenance = &p
+			}
+		}
+	}
 	return page, nil
 }
 
 // GetPageByID retrieves a wiki page by its ID
 func (s *wikiPageService) GetPageByID(ctx context.Context, id string) (*types.WikiPage, error) {
+	if repo, ok := s.repo.(interfaces.WikiRevisionIdentityRepository); ok {
+		identity, err := repo.GetWikiPageIdentityByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		pinned, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: identity.KnowledgeBaseID}})
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		ctx = pinned
+	}
+
 	page, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -363,6 +489,12 @@ func (s *wikiPageService) GetPageByID(ctx context.Context, id string) (*types.Wi
 
 // ListPages lists wiki pages with optional filtering and pagination
 func (s *wikiPageService) ListPages(ctx context.Context, req *types.WikiPageListRequest) (*types.WikiPageListResponse, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: req.KnowledgeBaseID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	pages, total, err := s.repo.List(ctx, req)
 	if err != nil {
 		return nil, err
@@ -424,6 +556,12 @@ func (s *wikiPageService) DeletePage(ctx context.Context, kbID string, slug stri
 
 // GetIndex returns the index page for a knowledge base
 func (s *wikiPageService) GetIndex(ctx context.Context, kbID string) (*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	page, err := s.repo.GetBySlug(ctx, kbID, "index")
 	if err != nil {
 		if errors.Is(err, repository.ErrWikiPageNotFound) {
@@ -470,6 +608,12 @@ func (s *wikiPageService) GetIndexView(
 	limit int,
 	cursor string,
 ) (*types.WikiIndexResponse, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	indexPage, err := s.GetIndex(ctx, kbID)
 	if err != nil {
 		return nil, fmt.Errorf("load index page: %w", err)
@@ -577,6 +721,11 @@ func (s *wikiPageService) GetGraph(ctx context.Context, req *types.WikiGraphRequ
 	if req == nil {
 		return nil, errors.New("wiki graph request is required")
 	}
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: req.KnowledgeBaseID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	pages, err := s.repo.ListAll(ctx, req.KnowledgeBaseID)
 	if err != nil {
@@ -811,6 +960,12 @@ func bfsEgoSlugs(
 
 // GetStats returns aggregate statistics about the wiki
 func (s *wikiPageService) GetStats(ctx context.Context, kbID string) (*types.WikiStats, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	counts, err := s.repo.CountByType(ctx, kbID)
 	if err != nil {
 		return nil, err
@@ -921,6 +1076,12 @@ func (s *wikiPageService) RebuildLinks(ctx context.Context, kbID string) error {
 
 // ListAllPages retrieves all non-archived wiki pages without pagination.
 func (s *wikiPageService) ListAllPages(ctx context.Context, kbID string) ([]*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListAll(ctx, kbID)
 }
 
@@ -928,6 +1089,12 @@ func (s *wikiPageService) ListAllPages(ctx context.Context, kbID string) ([]*typ
 // callers like intro regeneration can load only the page type they need
 // (summaries) instead of paying for the full ListAll scan.
 func (s *wikiPageService) ListByType(ctx context.Context, kbID string, pageType string) ([]*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListByType(ctx, kbID, pageType)
 }
 
@@ -935,6 +1102,12 @@ func (s *wikiPageService) ListByType(ctx context.Context, kbID string, pageType 
 // layers (delete flow, retract reconciliation) can re-query the current wiki
 // state without depending on a stale caller-captured slug list.
 func (s *wikiPageService) ListPagesBySourceRef(ctx context.Context, kbID string, knowledgeID string) ([]*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListBySourceRef(ctx, kbID, knowledgeID)
 }
 
@@ -943,6 +1116,12 @@ func (s *wikiPageService) ListPagesBySourceRef(ctx context.Context, kbID string,
 // 000041 — the wiki ingest pipeline uses it as a cheap "before" snapshot
 // when reconciling old vs new extraction sets.
 func (s *wikiPageService) ListSlugsBySourceRef(ctx context.Context, kbID string, knowledgeID string) ([]string, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListSlugsBySourceRef(ctx, kbID, knowledgeID)
 }
 
@@ -952,6 +1131,12 @@ func (s *wikiPageService) ListSlugsBySourceRef(ctx context.Context, kbID string,
 // pre-batch ListAllPages dump that historically pulled hundreds of MB
 // for KBs in the tens of thousands of pages.
 func (s *wikiPageService) ListBySlugs(ctx context.Context, kbID string, slugs []string) (map[string]*types.WikiPageLite, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListBySlugs(ctx, kbID, slugs)
 }
 
@@ -959,6 +1144,12 @@ func (s *wikiPageService) ListBySlugs(ctx context.Context, kbID string, slugs []
 // reparse branches of reduceSlugUpdates. Returns the content of each
 // surviving summary page keyed by its source knowledge id.
 func (s *wikiPageService) ListSummariesByKnowledgeIDs(ctx context.Context, kbID string, kids []string) (map[string]string, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListSummariesByKnowledgeIDs(ctx, kbID, kids)
 }
 
@@ -966,6 +1157,12 @@ func (s *wikiPageService) ListSummariesByKnowledgeIDs(ctx context.Context, kbID 
 // non-deleted) in the KB. Used by cleanDeadLinks to validate out-link
 // targets before stripping them.
 func (s *wikiPageService) ExistsSlugs(ctx context.Context, kbID string, slugs []string) (map[string]bool, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ExistsSlugs(ctx, kbID, slugs)
 }
 
@@ -973,52 +1170,106 @@ func (s *wikiPageService) ExistsSlugs(ctx context.Context, kbID string, slugs []
 // to compute the live-slug set without paying for ListAll's full row
 // materialization.
 func (s *wikiPageService) ListAllSlugs(ctx context.Context, kbID string) ([]string, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListAllSlugs(ctx, kbID)
 }
 
 // ListPagesCursor is the lint-side cursor pagination over wiki_pages.
 func (s *wikiPageService) ListPagesCursor(ctx context.Context, kbID string, cursor string, limit int) ([]*types.WikiPage, string, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
+
 	return s.repo.ListPagesCursor(ctx, kbID, cursor, limit)
 }
 
 // ListByTypeRecent caps the page count for first-time index intro
 // generation so the LLM prompt stays bounded on large KBs.
 func (s *wikiPageService) ListByTypeRecent(ctx context.Context, kbID string, pageType string, limit int) ([]types.WikiIndexEntry, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListByTypeRecent(ctx, kbID, pageType, limit)
 }
 
 // FindSimilarPages performs a pg_trgm similarity search; used by the
 // dedup pre-filter to surface candidate merge targets.
 func (s *wikiPageService) FindSimilarPages(ctx context.Context, kbID string, query string, pageTypes []string, limit int) ([]*types.WikiPageLite, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.FindSimilarPages(ctx, kbID, query, pageTypes, limit)
 }
 
 // FindPagesByNormalizedTitle looks up exact same-type title identities for
 // wiki ingest, independent of the trigram top-K used for semantic dedup.
 func (s *wikiPageService) FindPagesByNormalizedTitle(ctx context.Context, kbID, pageType, identity string) ([]*types.WikiPageLite, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.FindPagesByNormalizedTitle(ctx, kbID, pageType, identity)
 }
 
 // FindPagesByNormalizedTitles looks up several normalized title identities
 // in one query so wiki ingest does not seq-scan once per extracted item.
 func (s *wikiPageService) FindPagesByNormalizedTitles(ctx context.Context, kbID, pageType string, identities []string) ([]*types.WikiPageLite, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.FindPagesByNormalizedTitles(ctx, kbID, pageType, identities)
 }
 
 // ListDistinctCategoryPaths returns the existing wiki folder paths. Used by
 // wiki ingest's taxonomy planner to ground folder reuse.
 func (s *wikiPageService) ListDistinctCategoryPaths(ctx context.Context, kbID string, maxPaths int) ([][]string, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.ListDistinctCategoryPaths(ctx, kbID, maxPaths)
 }
 
 // CountByType is a service-layer pass-through over the repo. Used by
 // the index intro path to frame the LLM prompt's "showing N of M" hint.
 func (s *wikiPageService) CountByType(ctx context.Context, kbID string) (map[string]int64, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.CountByType(ctx, kbID)
 }
 
 // SearchPages performs full-text search over wiki pages
 func (s *wikiPageService) SearchPages(ctx context.Context, kbID string, query string, limit int) ([]*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	return s.repo.Search(ctx, kbID, query, limit)
 }
 
@@ -1421,6 +1672,12 @@ func (s *wikiPageService) GetFolder(ctx context.Context, kbID string, id string)
 func (s *wikiPageService) ListChildFolders(
 	ctx context.Context, kbID string, parentID string, pageTypes []string,
 ) ([]types.WikiFolderNode, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	all, err := s.repo.ListAllFolders(ctx, kbID)
 	if err != nil {
 		return nil, err
@@ -1434,6 +1691,25 @@ func (s *wikiPageService) ListChildFolders(
 		allDirect, err = s.repo.CountPagesByFolder(ctx, kbID, nil)
 		if err != nil {
 			return nil, err
+		}
+	}
+	// A source page hidden by the whole-page predicate must not reappear as
+	// an "empty" folder in the merged view. Presence is never returned as a
+	// count; it only excludes these containers while preserving real empties.
+	if len(pageTypes) > 1 && s.kbService != nil {
+		if presence, ok := s.repo.(interfaces.WikiFolderPresenceRepository); ok {
+			kb, err := s.kbService.GetKnowledgeBaseByIDOnly(ctx, kbID)
+			if err != nil {
+				return nil, err
+			}
+			occupied, err := presence.OccupiedWikiFolders(ctx, kbID, kb.TenantID)
+			if err != nil {
+				return nil, err
+			}
+			allDirect = make(map[string]int64, len(occupied))
+			for id := range occupied {
+				allDirect[id] = 1
+			}
 		}
 	}
 	recScoped := recursiveFolderCounts(all, scopedDirect)
@@ -1606,6 +1882,12 @@ func (s *wikiPageService) FindOrCreateFolderPath(
 func (s *wikiPageService) MovePage(
 	ctx context.Context, kbID string, slug string, folderID string,
 ) (*types.WikiPage, error) {
+	ctx, release, err := s.BeginWikiRead(ctx, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kbID}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	page, err := s.repo.GetBySlug(ctx, kbID, slug)
 	if err != nil {
 		return nil, err
