@@ -14,6 +14,10 @@ MAX_FACTS = 50_000
 DYNAMIC_TAGS = {"if", "choose", "when", "otherwise", "foreach", "where", "set", "trim", "bind"}
 MAPPER_PUBLIC_ID = "-//mybatis.org//DTD Mapper 3.0//EN"
 MAPPER_SYSTEM_ID = "http://mybatis.org/dtd/mybatis-3-mapper.dtd"
+JAVA_TYPES = {"class_declaration", "interface_declaration", "enum_declaration", "record_declaration", "annotation_type_declaration"}
+MYBATIS_SQL_ANNOTATIONS = {"Select", "Insert", "Update", "Delete"}
+MYBATIS_PROVIDER_ANNOTATIONS = {"SelectProvider", "InsertProvider", "UpdateProvider", "DeleteProvider"}
+MYBATIS_ANNOTATION_PREFIX = "org.apache.ibatis.annotations."
 
 
 def _source_range(raw, start, end, newlines):
@@ -47,6 +51,35 @@ def extract_java_facts(raw, tree, path):
     facts, diagnostics = [], []
     newlines = [index for index, byte in enumerate(raw) if byte == 10]
     root = tree.root_node
+    def text(node):
+        return raw[node.start_byte:node.end_byte].decode("utf-8")
+
+    def enclosing_type(node):
+        current = node.parent
+        while current is not None and current.type not in JAVA_TYPES:
+            current = current.parent
+        return current
+
+    def binary_type_name(node):
+        names = []
+        current = node
+        while current is not None:
+            if current.type in ("method_declaration", "constructor_declaration", "static_initializer", "block"):
+                diagnostics.append({"code": "java_nested_mapper_namespace_uncertain",
+                                    "message": "Local or anonymous mapper type has no stable source-derived MyBatis namespace",
+                                    "range": _source_range(raw, node.start_byte, node.end_byte, newlines)})
+                return ""
+            if current.type in JAVA_TYPES:
+                name_node = current.child_by_field_name("name")
+                if name_node is None:
+                    return ""
+                names.append(text(name_node))
+            current = current.parent
+        if not names:
+            return ""
+        names.reverse()
+        return (package + "." if package else "") + "$".join(names)
+
     package = ""
     stack = [root]
     while stack:
@@ -59,22 +92,71 @@ def extract_java_facts(raw, tree, path):
             break
         stack.extend(reversed(node.named_children))
 
+    imports = {}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "import_declaration":
+            name_node = next((child for child in node.named_children
+                              if child.type in ("identifier", "scoped_identifier")), None)
+            if name_node is not None:
+                imported = text(name_node)
+                short = imported.rsplit(".", 1)[-1]
+                imports.setdefault(short, []).append(imported)
+            elif any(child.type == "asterisk" for child in node.children):
+                prefix = next((text(child) for child in node.named_children if child.type in ("scoped_identifier", "identifier")), "")
+                imports.setdefault("*", []).append(prefix)
+        stack.extend(reversed(node.named_children))
+
     constants = {}
     stack = [root]
     while stack:
         node = stack.pop()
-        if node.type in ("field_declaration", "constant_declaration"):
-            modifiers = next((child for child in node.named_children if child.type == "modifiers"), None)
-            modifier_text = raw[modifiers.start_byte:modifiers.end_byte].decode("utf-8") if modifiers is not None else ""
-            if "static" in modifier_text and "final" in modifier_text:
-                for child in node.named_children:
-                    if child.type != "variable_declarator":
+        if node.type in JAVA_TYPES:
+            owner_constants = {}
+            body = node.child_by_field_name("body")
+            if body is not None:
+                for declaration in body.named_children:
+                    if declaration.type not in ("field_declaration", "constant_declaration"):
                         continue
-                    name_node, value_node = child.child_by_field_name("name"), child.child_by_field_name("value")
-                    value = _java_constant_value(raw, value_node, constants) if value_node is not None else None
-                    if name_node is not None and value is not None:
-                        constants[raw[name_node.start_byte:name_node.end_byte].decode("utf-8")] = value
+                    modifiers = next((child for child in declaration.named_children if child.type == "modifiers"), None)
+                    modifier_text = text(modifiers) if modifiers is not None else ""
+                    is_interface = node.type in ("interface_declaration", "annotation_type_declaration")
+                    if not is_interface and not ("static" in modifier_text and "final" in modifier_text):
+                        continue
+                    for declarator in declaration.named_children:
+                        if declarator.type != "variable_declarator":
+                            continue
+                        name_node, value_node = declarator.child_by_field_name("name"), declarator.child_by_field_name("value")
+                        value = _java_constant_value(raw, value_node, owner_constants) if value_node is not None else None
+                        if name_node is not None and isinstance(value, str):
+                            owner_constants[text(name_node)] = value
+            constants[node.id] = owner_constants
         stack.extend(reversed(node.named_children))
+
+    def annotation_identity(annotation, output_range):
+        name_node = annotation.child_by_field_name("name")
+        if name_node is None:
+            return "unresolved"
+        name = text(name_node)
+        if name.startswith(MYBATIS_ANNOTATION_PREFIX):
+            return name[len(MYBATIS_ANNOTATION_PREFIX):]
+        if "." in name:
+            return "unrelated"
+        imports_for_name = imports.get(name, [])
+        canonical = MYBATIS_ANNOTATION_PREFIX + name
+        if imports_for_name:
+            return name if imports_for_name == [canonical] else "unrelated"
+        if MYBATIS_ANNOTATION_PREFIX.rstrip(".") in imports.get("*", []):
+            diagnostics.append({"code": "java_mapper_annotation_identity_unknown",
+                                "message": "Wildcard imports do not uniquely identify a short mapper annotation",
+                                "range": output_range})
+            return "unresolved"
+        if name in MYBATIS_SQL_ANNOTATIONS | MYBATIS_PROVIDER_ANNOTATIONS:
+            diagnostics.append({"code": "java_mapper_annotation_identity_unknown",
+                                "message": "Mapper annotation identity is not resolved by an explicit MyBatis import or qualified name",
+                                "range": output_range})
+        return "unrelated"
 
     interfaces = {}
     stack = [root]
@@ -83,8 +165,9 @@ def extract_java_facts(raw, tree, path):
         if node.type == "interface_declaration":
             name_node = node.child_by_field_name("name")
             if name_node is not None:
-                simple = raw[name_node.start_byte:name_node.end_byte].decode("utf-8")
-                interfaces[node.id] = (node, (package + "." if package else "") + simple)
+                namespace = binary_type_name(node)
+                if namespace:
+                    interfaces[node.id] = (node, namespace)
         stack.extend(reversed(node.named_children))
 
     stack = [root]
@@ -111,11 +194,13 @@ def extract_java_facts(raw, tree, path):
             modifiers = next((child for child in node.named_children if child.type == "modifiers"), None)
             annotations = [] if modifiers is None else [child for child in modifiers.named_children if child.type == "annotation"]
             for annotation in annotations:
-                annotation_name_node = annotation.child_by_field_name("name")
-                annotation_name = raw[annotation_name_node.start_byte:annotation_name_node.end_byte].decode("utf-8") if annotation_name_node is not None else ""
-                if annotation_name not in ("Select", "Insert", "Update", "Delete"):
-                    if annotation_name in ("SelectProvider", "InsertProvider", "UpdateProvider", "DeleteProvider"):
-                        diagnostics.append({"code": "java_mapper_provider_dynamic", "message": "Provider SQL is not statically resolved", "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines)})
+                annotation_range = _source_range(raw, annotation.start_byte, annotation.end_byte, newlines)
+                annotation_name = annotation_identity(annotation, annotation_range)
+                if annotation_name == "unresolved":
+                    continue
+                if annotation_name not in MYBATIS_SQL_ANNOTATIONS:
+                    if annotation_name in MYBATIS_PROVIDER_ANNOTATIONS:
+                        diagnostics.append({"code": "java_mapper_provider_dynamic", "message": "Provider SQL is not statically resolved", "range": annotation_range})
                     continue
                 args = annotation.child_by_field_name("arguments")
                 values = [] if args is None else list(args.named_children)
@@ -125,7 +210,9 @@ def extract_java_facts(raw, tree, path):
                 for value in values:
                     if value.type == "element_value_pair":
                         value = value.child_by_field_name("value")
-                    constant = _java_constant_value(raw, value, constants) if value is not None else None
+                    owner = enclosing_type(node)
+                    owner_constants = constants.get(owner.id, {}) if owner is not None else {}
+                    constant = _java_constant_value(raw, value, owner_constants) if value is not None else None
                     if constant is None:
                         certain = False
                         break
@@ -138,7 +225,7 @@ def extract_java_facts(raw, tree, path):
                     continue
                 sql = " ".join(parts)
                 mapper_namespace = ""
-                owner_type = node.parent.parent if node.parent is not None and node.parent.type == "interface_body" else None
+                owner_type = enclosing_type(node)
                 if owner_type is not None and owner_type.type == "interface_declaration" and owner_type.id in interfaces:
                     mapper_namespace = interfaces[owner_type.id][1]
                 facts.append({"kind": "java_annotation_sql", "name": annotation_name,
@@ -206,6 +293,13 @@ def _java_constant_value(raw, node, constants=None):
     if node.type in ("array_initializer", "element_value_array_initializer"):
         values = [_java_constant_value(raw, child, constants) for child in node.named_children]
         return values if values and all(isinstance(value, str) for value in values) else None
+    if node.type == "binary_expression" and node.child_count == 3:
+        operator = node.child(1)
+        if operator is not None and raw[operator.start_byte:operator.end_byte] == b"+":
+            left = _java_constant_value(raw, node.child(0), constants)
+            right = _java_constant_value(raw, node.child(2), constants)
+            if isinstance(left, str) and isinstance(right, str):
+                return left + right
     return None
 
 
@@ -391,6 +485,9 @@ def parse_mybatis_xml(raw):
     for node in sql_nodes:
         ident = node["attrs"].get("id", "")
         sql = "".join(value for child in [node, *descendants(node)] for value in child["text"])
+        fragment_dynamic = any(child["name"] in DYNAMIC_TAGS for child in descendants(node))
+        if fragment_dynamic:
+            diagnostics.append({"code": "sql_fragment_dynamic", "message": "SQL fragment contains dynamic MyBatis branches", "range": node_range(node)})
         try:
             table_names, sql_dynamic = _sql_tables_and_diagnostics(sql)
         except Exception:
@@ -401,8 +498,16 @@ def parse_mybatis_xml(raw):
             if table_name == "__mybatis_dynamic_identifier__":
                 continue
             facts.append(node_fact("sql_table", node, name=table_name, namespace=namespace,
-                                   statement_id=ident, owner_kind="mybatis_sql_fragment", dynamic=sql_dynamic,
-                                   certainty="uncertain" if sql_dynamic else "certain"))
+                                   statement_id=ident, owner_kind="mybatis_sql_fragment", dynamic=fragment_dynamic or sql_dynamic,
+                                   certainty="uncertain" if fragment_dynamic or sql_dynamic else "certain"))
+
+    fragment_counts = {}
+    for node in sql_nodes:
+        ident = node["attrs"].get("id", "")
+        fragment_counts[ident] = fragment_counts.get(ident, 0) + 1
+    for ident, count in fragment_counts.items():
+        if ident and count > 1:
+            diagnostics.append({"code": "sql_fragment_id_duplicate", "message": "SQL fragment id is duplicated"})
 
     counts = {}
     for node in descendants(root):

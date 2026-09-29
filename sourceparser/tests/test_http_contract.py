@@ -136,7 +136,8 @@ class JavaHTTPContract(unittest.TestCase):
 
     def test_java_mapper_sql_annotations_use_ast_literals_and_known_constants(self):
         raw = (b'package demo; import org.apache.ibatis.annotations.Select; '
-               b'interface Mapper { static final String SQL = "SELECT * FROM schedule WHERE id=#{id}"; '
+               b'import org.apache.ibatis.annotations.SelectProvider; '
+               b'interface Mapper { String SQL = "SELECT * FROM schedule WHERE id=#{id}"; '
                b'@Select(SQL) Object find(); '
                b'@Select({"SELECT * FROM detail", " WHERE enabled=#{enabled}"}) Object list(); '
                b'@Select("SELECT * FROM " + table) Object dynamic(); '
@@ -153,6 +154,47 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertCountEqual(tables, [('find', 'schedule'), ('list', 'detail')])
         self.assertEqual([d['code'] for d in result['diagnostics']],
                          ['java_mapper_sql_dynamic', 'java_mapper_provider_dynamic'])
+
+    def test_java_constant_and_annotation_identity_are_lexically_scoped(self):
+        raw = (b'package demo; import org.apache.ibatis.annotations.Select; '
+               b'interface First { String SQL = "SELECT * FROM first_table"; @Select(SQL) Object find(); } '
+               b'interface Second { String SQL = "SELECT * FROM second_table"; @Select(SQL) Object find(); } '
+               b'interface Qualified { @org.apache.ibatis.annotations.Select("SELECT * FROM qualified_table") Object find(); } '
+               b'interface Unrelated { @demo.Select("SELECT * FROM not_mapper") Object find(); }')
+        status, result = self.request('/v1/parse', {
+            'path': 'Mapper.java', 'language': 'java', 'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        sql = [f['sql'] for f in result['facts'] if f['kind'] == 'java_annotation_sql']
+        self.assertCountEqual(sql, ['SELECT * FROM first_table', 'SELECT * FROM second_table',
+                                    'SELECT * FROM qualified_table'])
+        tables = [f['name'] for f in result['facts'] if f['kind'] == 'sql_table']
+        self.assertCountEqual(tables, ['first_table', 'second_table', 'qualified_table'])
+
+    def test_unresolved_short_annotation_is_not_treated_as_mybatis(self):
+        raw = b'package demo; interface Unknown { @Select("SELECT * FROM false_positive") Object find(); }'
+        status, result = self.request('/v1/parse', {
+            'path': 'Unknown.java', 'language': 'java', 'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        self.assertFalse(any(f['kind'] == 'java_annotation_sql' for f in result['facts']))
+        self.assertFalse(any(f['kind'] == 'sql_table' for f in result['facts']))
+        self.assertIn('java_mapper_annotation_identity_unknown', [d['code'] for d in result['diagnostics']])
+
+    def test_nested_mapper_namespace_preserves_enclosing_binary_type(self):
+        raw = (b'package p; class Outer { interface M { String Q="SELECT * FROM nested_table"; '
+               b'@org.apache.ibatis.annotations.Select(Q) Object find(); } }')
+        status, result = self.request('/v1/parse', {
+            'path': 'Outer.java', 'language': 'java', 'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        method = next(f for f in result['facts'] if f['kind'] == 'java_mapper_method')
+        self.assertEqual(method['namespace'], 'p.Outer$M')
+        sql = next(f for f in result['facts'] if f['kind'] == 'java_annotation_sql')
+        self.assertEqual(sql['namespace'], 'p.Outer$M')
 
     def test_mybatis_xml_uses_inert_standard_dtd_and_sqlglot_relations(self):
         raw = ('<?xml version="1.0"?>\r\n'
@@ -234,3 +276,20 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertEqual(sum(f['kind'] == 'mybatis_statement' for f in result['facts']), 1200)
         self.assertEqual(sum(f['kind'] == 'sql_table' for f in result['facts']), 1200)
         self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
+
+    def test_dynamic_or_duplicated_sql_fragments_are_not_certain(self):
+        raw = (b'<mapper namespace="demo.M"><sql id="frag"><if test="enabled">SELECT * FROM orders</if></sql>'
+               b'<sql id="dup">SELECT * FROM first_table</sql><sql id="dup">SELECT * FROM second_table</sql>'
+               b'<select id="query"><include refid="frag"/><include refid="dup"/></select></mapper>')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/mapper.xml', 'language': 'mybatis-xml',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        fragments = [f for f in result['facts'] if f['kind'] == 'sql_table']
+        self.assertEqual({f['name']: f['certainty'] for f in fragments},
+                         {'orders': 'uncertain', 'first_table': 'certain', 'second_table': 'certain'})
+        self.assertIn('sql_fragment_id_duplicate', [d['code'] for d in result['diagnostics']])
+        self.assertIn('sql_fragment_dynamic', [d['code'] for d in result['diagnostics']])
+        duplicate_diagnostic = next(d for d in result['diagnostics'] if d['code'] == 'sql_fragment_id_duplicate')
+        self.assertNotIn('range', duplicate_diagnostic)
