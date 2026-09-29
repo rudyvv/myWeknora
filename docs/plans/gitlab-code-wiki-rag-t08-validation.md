@@ -10,13 +10,21 @@ The Python grammar was prefetched into a new cache separate from the previously 
 
 ## Red / green evidence
 
-Initial red command (before Python registration):
+Initial implementation red command (before Python registration):
 
 ```text
 D:/Project-Weknora/WeKnora/.source-parser-venv/Scripts/python.exe -m unittest sourceparser.tests.test_python_http_contract -v
 ```
 
-The Python grammar was not advertised by `/health` and the Python contract could not pass. After registration, the same command passed 4 tests.
+The Python grammar was not advertised by `/health` and the Python contract could not pass. After registration, the original four Python contract tests passed.
+
+Review-fix red command (before iterative traversal/import extraction):
+
+```text
+D:/Project-Weknora/WeKnora/.source-parser-venv/Scripts/python.exe -m unittest sourceparser.tests.test_python_http_contract.PythonHTTPContract.test_deep_expression_within_limits_preserves_every_original_byte sourceparser.tests.test_python_http_contract.PythonHTTPContract.test_import_forms_preserve_statement_ranges_and_scope_structure -v
+```
+
+The 1,100-operand expression returned HTTP 422 (`source parsing failed`) from the Python recursion failure, and the import contract returned no import symbols.
 
 Green parser contract:
 
@@ -25,9 +33,9 @@ $env:SOURCE_PARSER_CACHE=C:/Users/28211/.codex/worktrees/a8ea/WeKnora/.source-pa
 D:/Project-Weknora/WeKnora/.source-parser-venv/Scripts/python.exe -m unittest discover -s sourceparser/tests
 ```
 
-Result: PASS. The suite covers Java, JavaScript, TypeScript, TSX and Python HTTP contracts; the Python-specific cases cover health/lock identity, class and method parent structure, decorators, async, Unicode, CRLF, syntax-error degradation, exact chunk coverage and extension admission. The same suite with the original four-language cache skips Python-specific tests and keeps the accepted-language regression green.
+Result: PASS. The suite covers Java, JavaScript, TypeScript, TSX and Python HTTP contracts. Python cases cover locked health identity, module/class/function/method parents, decorators, async, aliases and multi-item/multiline/relative/module-local imports, Unicode/CRLF coordinates, multiline triple-quoted strings with import/decorator lookalikes, syntax-error degradation, the 1,100-operand expression, complete original-byte chunk coverage, and the explicit 413 request limit. The same suite with the original four-language cache skips the Python contract class and keeps the accepted-language regression green.
 
-Results: five-language cache `22 tests, OK`; original four-language cache `18 tests, OK (1 skipped)`.
+Results: five-language cache `26 tests, OK`; original four-language cache `18 tests, OK (1 skipped)`.
 
 Go routing check:
 
@@ -50,12 +58,22 @@ $env:SOURCE_PARSER_CACHE=C:/Users/28211/.codex/worktrees/a8ea/WeKnora/.source-pa
 go test -tags=integration ./internal/application/service -run TestSourcePythonSnapshotPublishesIndexesAndReadView -count=1 -timeout 15m
 ```
 
-Result: PASS, 10.697s. The fixture published the Python snapshot from a real local Git repository, found `reserve_booking` through both keyword and vector routes, found it through the source-aware grep tool, and returned the original CRLF/Unicode file through the source read view with the fixed source symbol identity. It used a generated independent schema in the dedicated `source_test` database; the shared container was not restarted or removed.
+Result: PASS, 11.241s on the separately prepared batch-two test database at `127.0.0.1:57521`. The fixture published Python from a real local Git repository, found `reserve_booking` through both keyword and vector routes and the source-aware grep tool, then found a syntax-error marker through both index routes. The syntax-error hit retained `quality=syntax_error`, the fixed Git commit and path; the public source read returned identical original bytes and quality, and an explicit file-version read returned that same commit/version/quality. The test used its generated independent schema and did not inspect credentials or alter the database container.
+
+Existing source quality UI regression:
+
+```text
+node --import tsx --test src/components/SourceCodeView.test.ts
+```
+
+Result: PASS, 1 test. The existing source viewer rendered the syntax-error label and preserved the readable Unicode source. The checkout has no local frontend `node_modules`; the test used a temporary junction to the already installed read-only dependency tree at the original project path, then removed the junction. No files in that original project tree were modified.
 
 ## Files and boundaries
 
-- `sourceparser/runtime.py`, `prefetch.py`, `server.py`: add and verify Python without changing the HTTP request shape or allowing path access.
-- `sourceparser/tests/test_python_http_contract.py`: independent Python corpus and public HTTP assertions.
+- `sourceparser/runtime.py`: use an explicit stack for Python AST traversal, preserving declaration ancestry without Python call-stack depth limits; extract `import_statement` and `import_from_statement` as ranged syntactic symbols.
+- `sourceparser/tests/test_python_http_contract.py`: independent Python corpus and public HTTP assertions, including depth, imports, multiline strings and explicit request-limit response.
+- `internal/application/service/datasource_source_integration_test.go`: publish and retrieve a syntax-error Python file through both indexes and a fixed-version source read.
+- `frontend/src/components/SourceCodeView.test.ts`: assert the existing source quality UI shows the syntax-error state.
 - `internal/source/parser_client.go`: `.py` route; all range/hash/chunk validation remains shared.
 - `internal/application/service/datasource_source.go` and `datasource_source_sync.go`: Python readiness and admission wording only.
 - `internal/source/parser_client_test.go`: route regression.
@@ -63,4 +81,4 @@ Result: PASS, 10.697s. The fixture published the Python snapshot from a real loc
 
 ## Limits
 
-This ticket does not claim complete Python framework semantics, runtime import behavior, type resolution, dependency injection, dynamic dispatch or decorator execution. It does not claim representative-repository relevance or performance. Real GitLab, embedding/model and queue services remain controlled boundaries in the public integration fixture.
+This ticket does not claim complete Python framework semantics, runtime import behavior, type resolution, dependency injection, dynamic dispatch or decorator execution. Imports are syntax records only; no imports or target code are executed. It does not claim representative-repository relevance or performance. Real GitLab, embedding/model and queue services remain controlled boundaries in the public integration fixture. The complete repository suite was not rerun for this repair; the changed parser, Go client, Python publication/read contract and quality UI were tested directly.

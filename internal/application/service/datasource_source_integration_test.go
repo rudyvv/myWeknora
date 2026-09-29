@@ -85,7 +85,11 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 		t.Skip("SOURCE_PARSER_CACHE does not include the locked Python grammar")
 	}
 	raw := []byte("@router.post(\"/预约\")\r\nclass ReservationService:\r\n    @trace\r\n    async def reserve_booking(self, 名称: str) -> str:\r\n        return f\"预约 {名称}\"\r\n")
-	f := newJavaSourceFixture(t, map[string][]byte{"src/reservation.py": raw})
+	brokenRaw := []byte("async def broken(:\r\n    return \"degraded_python_marker 中文😀\"\r\n")
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"src/reservation.py":  raw,
+		"src/syntax_error.py": brokenRaw,
+	})
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
 	require.NoError(t, err)
 	require.True(t, preview.CanSync)
@@ -126,6 +130,44 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	require.Equal(t, raw, []byte(view.Content))
 	require.Equal(t, "src/reservation.py", view.Path)
 	require.Contains(t, string(view.Symbols), "src/reservation.py.ReservationService.reserve_booking")
+
+	var degradedHit *types.SearchResult
+	for _, params := range []types.SearchParams{
+		{QueryText: "degraded_python_marker", MatchCount: 10, DisableVectorMatch: true},
+		{QueryText: "degraded_python_marker", MatchCount: 10, DisableKeywordsMatch: true},
+	} {
+		results, searchErr := f.kbs.HybridSearch(f.ctx, f.kb.ID, params)
+		require.NoError(t, searchErr)
+		var routeHit *types.SearchResult
+		for _, candidate := range results {
+			if strings.Contains(candidate.Content, "degraded_python_marker") {
+				routeHit = candidate
+				break
+			}
+		}
+		require.NotNil(t, routeHit, "both index routes must retain readable syntax-error source")
+		if degradedHit == nil {
+			degradedHit = routeHit
+		}
+	}
+	var degradedEvidence struct {
+		Source types.SourceEvidence `json:"source"`
+	}
+	require.NoError(t, json.Unmarshal(degradedHit.ChunkMetadata, &degradedEvidence))
+	require.Equal(t, "syntax_error", degradedEvidence.Source.Quality)
+	require.Equal(t, "src/syntax_error.py", degradedEvidence.Source.Path)
+	require.Equal(t, f.sha, degradedEvidence.Source.CommitSHA)
+	degradedView, err := f.knowledge.GetSourceFile(f.ctx, degradedHit.KnowledgeID)
+	require.NoError(t, err)
+	require.Equal(t, "syntax_error", degradedView.Quality)
+	require.Equal(t, brokenRaw, []byte(degradedView.Content))
+	require.Equal(t, f.sha, degradedView.CommitSHA)
+	require.NotEmpty(t, degradedView.FileVersionID)
+	pinnedDegraded, err := f.knowledge.GetSourceFile(f.ctx, degradedHit.KnowledgeID, degradedView.FileVersionID)
+	require.NoError(t, err)
+	require.Equal(t, f.sha, pinnedDegraded.CommitSHA)
+	require.Equal(t, degradedView.FileVersionID, pinnedDegraded.FileVersionID)
+	require.Equal(t, "syntax_error", pinnedDegraded.Quality)
 }
 
 func TestSourcePublishedChunksRemainReadOnlyButDescriptionMayChange(t *testing.T) {

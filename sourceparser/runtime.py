@@ -116,8 +116,9 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         root = tree.root_node
         first_child = root.named_children[0] if root.named_children else None
         add_symbol('module', path, root, [path], first_child)
-
-        def walk_python(node, parents, containers):
+        stack = [(root, [path], [])]
+        while stack:
+            node, parents, containers = stack.pop()
             if node.type in ('class_definition', 'function_definition'):
                 name = node.child_by_field_name('name')
                 body = node.child_by_field_name('body')
@@ -128,10 +129,32 @@ def parse_source(raw, max_bytes, parser_version, language, path):
                     lineage = parents + [name_text]
                     add_symbol(kind, name_text, node, lineage, body)
                     parents, containers = lineage, containers + [kind]
-            for child in node.named_children:
-                walk_python(child, parents, containers)
-
-        walk_python(root, [path], [])
+            elif node.type in ('import_statement', 'import_from_statement'):
+                imported_names = []
+                if node.type == 'import_statement':
+                    targets = node.children_by_field_name('name')
+                    for target in targets:
+                        if target.type == 'aliased_import':
+                            target = target.child_by_field_name('name')
+                        if target is not None:
+                            imported_names.append(raw[target.start_byte:target.end_byte].decode('utf-8'))
+                    name_text = ', '.join(imported_names) or 'import'
+                else:
+                    module = node.child_by_field_name('module_name')
+                    if module is not None:
+                        module_name = raw[module.start_byte:module.end_byte].decode('utf-8')
+                        for target in node.children_by_field_name('name'):
+                            if target.type == 'aliased_import':
+                                target = target.child_by_field_name('name')
+                            if target is not None:
+                                imported_names.append(raw[target.start_byte:target.end_byte].decode('utf-8'))
+                        name_text = module_name
+                        if imported_names:
+                            name_text += ':' + ', '.join(imported_names)
+                    else:
+                        name_text = 'import'
+                add_symbol('import', name_text, node, parents + [name_text])
+            stack.extend((child, parents, containers) for child in reversed(node.named_children))
     else:
         stack = [(tree.root_node, [])]
         while stack:

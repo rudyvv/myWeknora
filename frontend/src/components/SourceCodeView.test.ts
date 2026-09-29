@@ -25,11 +25,12 @@ test('published source is escaped, read-only, and links the selected symbol to t
     if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence read') } }
     if (name === '@/api/knowledge-base') return { async getSourceFile(id: string) {
       requests.push(id)
-      return { data: { knowledge_id: id, snapshot_id: 'snapshot-one', file_version_id: 'version-one',
+      const broken = id === 'file-broken'
+      return { data: { knowledge_id: id, snapshot_id: 'snapshot-one', file_version_id: broken ? 'version-broken' : 'version-one',
         project_id: '123', commit_sha: 'a'.repeat(40), repository_url: 'https://gitlab.local/team/repo',
-        path: 'src/Service.java', encoding: 'utf-8', quality: 'structural', parser_version: 'java-pack-locked',
-        content: 'class Service {\r\n String getPushSchedule() { return "<img src=x onerror=alert(1)>"; }\r\n}',
-        symbols: [{ kind: 'method', name: 'getPushSchedule', qualified_name: 'Service.getPushSchedule', range: { start_line: 2, end_line: 2 } }] } }
+        path: broken ? 'src/syntax_error.py' : 'src/Service.java', encoding: 'utf-8', quality: broken ? 'syntax_error' : 'structural', parser_version: 'java-pack-locked',
+        content: broken ? 'async def broken(:\r\n    return "degraded_python_marker 中文😀"\r\n' : 'class Service {\r\n String getPushSchedule() { return "<img src=x onerror=alert(1)>"; }\r\n}',
+        symbols: broken ? [] : [{ kind: 'method', name: 'getPushSchedule', qualified_name: 'Service.getPushSchedule', range: { start_line: 2, end_line: 2 } }] } }
     } }
     return require(name)
   }, module, module.exports)
@@ -55,5 +56,15 @@ test('published source is escaped, read-only, and links the selected symbol to t
     for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
     assert.ok(host.querySelector('[role="alert"]'))
     assert.ok(!host.textContent?.includes('<img src=x onerror=alert(1)>'))
+    props.knowledgeId = 'file-broken'
+    props.fileVersionId = 'version-broken'
+    for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
+    assert.ok(host.textContent?.includes('存在语法错误'))
+    assert.ok(host.textContent?.includes('degraded_python_marker 中文😀'))
+    assert.ok(host.querySelector('[data-line="1"]'))
+    props.fileVersionId = 'different-version'
+    for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
+    assert.ok(host.querySelector('[role="alert"]'))
+    assert.ok(!host.textContent?.includes('degraded_python_marker 中文😀'))
   } finally { app.unmount(); host.remove() }
 })

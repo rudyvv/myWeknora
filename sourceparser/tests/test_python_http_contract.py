@@ -1,6 +1,7 @@
 """Python contract tests exercise the locked parser through its HTTP boundary."""
 import base64
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -102,6 +103,89 @@ class PythonHTTPContract(unittest.TestCase):
         self.assertEqual(result['quality'], 'syntax_error')
         self.assertTrue(all(chunk['quality'] == 'syntax_error' for chunk in result['chunks']))
         self.assertEqual(''.join(chunk['content'] for chunk in result['chunks']).encode(), raw)
+
+    def test_deep_expression_within_limits_preserves_every_original_byte(self):
+        expression = ' + '.join(['value'] * 1100)
+        raw = ('def deep_expression():\r\n'
+               '    return ' + expression + '\r\n').encode()
+        status, result = self.parse('pkg/deep_expression.py', raw)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['quality'], 'structural')
+        self.assertEqual(''.join(chunk['content'] for chunk in result['chunks']).encode(), raw)
+        self.assertTrue(any(symbol['name'] == 'deep_expression' for symbol in result['symbols']))
+        for chunk in result['chunks']:
+            span = chunk['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
+
+    def test_import_forms_preserve_statement_ranges_and_scope_structure(self):
+        raw = ('import os as operating_system, sys\r\n'
+               'from pkg.submodule import helper as helper_alias, second\r\n'
+               'from ..relative import item\r\n'
+               'from pkg.submodule import (\r\n'
+               '    first,\r\n'
+               '    second as second_alias,\r\n'
+               ')\r\n'
+               'def use_imports():\r\n'
+               '    import pathlib as paths\r\n'
+               '    from .local import helper\r\n'
+               '    return paths.Path(helper)\r\n').encode()
+        status, result = self.parse('pkg/imports.py', raw)
+        self.assertEqual(status, 200, result)
+        imports = [symbol for symbol in result['symbols'] if symbol['kind'] == 'import']
+        expected = [
+            ('import os as operating_system, sys', 'pkg/imports.py.os, sys'),
+            ('from pkg.submodule import helper as helper_alias, second', 'pkg/imports.py.pkg.submodule:helper, second'),
+            ('from ..relative import item', 'pkg/imports.py...relative:item'),
+            ('from pkg.submodule import (\r\n    first,\r\n    second as second_alias,\r\n)',
+             'pkg/imports.py.pkg.submodule:first, second'),
+            ('import pathlib as paths', 'pkg/imports.py.use_imports.pathlib'),
+            ('from .local import helper', 'pkg/imports.py.use_imports..local:helper'),
+        ]
+        self.assertEqual([symbol['signature'] for symbol in imports], [item[0] for item in expected])
+        self.assertEqual([symbol['qualified_name'] for symbol in imports], [item[1] for item in expected])
+        for symbol in imports:
+            span = symbol['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), symbol['signature'])
+            signature = symbol['signature_range']
+            self.assertEqual(raw[signature['start_byte']:signature['end_byte']].decode(), symbol['signature'])
+            self.assertEqual(raw[:span['start_byte']].count(b'\n') + 1, span['start_line'])
+            last = max(span['start_byte'], span['end_byte'] - 1)
+            self.assertEqual(raw[:last].count(b'\n') + 1, span['end_line'])
+        self.assertEqual(''.join(chunk['content'] for chunk in result['chunks']).encode(), raw)
+
+    def test_multiline_strings_keep_unicode_crlf_bytes_without_fabricated_symbols(self):
+        raw = ('MESSAGE = """预约😀\r\n'
+               'import pretend_module\r\n'
+               '@router.get("/fake")\r\n'
+               'class FakeFramework:\r\n'
+               '    pass\r\n'
+               '"""\r\n'
+               '@trace\r\n'
+               'def actual_function():\r\n'
+               '    return MESSAGE\r\n').encode()
+        status, result = self.parse('pkg/multiline.py', raw)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['quality'], 'structural')
+        self.assertFalse(any(symbol['kind'] == 'import' for symbol in result['symbols']))
+        self.assertFalse(any(symbol['name'] == 'FakeFramework' for symbol in result['symbols']))
+        actual = next(symbol for symbol in result['symbols'] if symbol['name'] == 'actual_function')
+        self.assertEqual(actual['annotations'][0]['text'], '@trace')
+        self.assertEqual(''.join(chunk['content'] for chunk in result['chunks']).encode(), raw)
+        for chunk in result['chunks']:
+            span = chunk['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
+
+    def test_http_resource_limit_is_reported_clearly(self):
+        connection = http.client.HTTPConnection(self.url.removeprefix('http://'), timeout=10)
+        connection.putrequest('POST', '/v1/parse')
+        connection.putheader('Content-Type', 'application/json')
+        connection.putheader('Content-Length', str((23 << 20) + 1))
+        connection.endheaders()
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 413, body)
+        self.assertEqual(body['error'], 'request exceeds parser limit')
 
     def test_python_extension_is_required_and_unknown_framework_file_is_not_relabelled(self):
         raw = b'class Service:\n    pass\n'
