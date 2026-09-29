@@ -4,6 +4,8 @@ package service
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -239,7 +241,56 @@ func TestSourceRunRecordsPipelineUnavailableWhenSnapshotRepositoryIsMissing(t *t
 	require.NoError(t, json.Unmarshal(failed.Result, &result))
 	require.NotNil(t, result.Source)
 	require.Equal(t, "failed", result.Source.Snapshot.State)
+	require.False(t, result.Source.Snapshot.PublicationChecked)
 	require.Contains(t, result.Source.Snapshot.Error, "source ingestion pipeline is not available")
+}
+
+func TestSourceParserReadinessFailureRetainsPublishedStatusAndReadableVersion(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	previousRun := latestIncrementalRun(t, f)
+	previousMember := sourceMember(t, previousRun, "src/Service.java")
+	previousPublication, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.NotNil(t, previousPublication)
+	require.Equal(t, previousRun.Snapshot.ID, previousPublication.Snapshot.ID)
+	require.NotNil(t, previousRun.Snapshot.PublishedAt)
+
+	unhealthyParser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "parser unavailable", http.StatusServiceUnavailable)
+	}))
+	defer unhealthyParser.Close()
+	t.Setenv("SOURCE_PARSER_URL", unhealthyParser.URL)
+	require.False(t, sourceParserReady(f.ctx))
+
+	log := &types.SyncLog{DataSourceID: f.ds.ID, TenantID: f.ds.TenantID, Status: types.SyncLogStatusRunning, StartedAt: time.Now().UTC()}
+	require.NoError(t, f.service.syncLogRepo.Create(f.ctx, log))
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	processErr := f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload))
+	require.ErrorContains(t, processErr, "source indexes or parser are not ready")
+
+	failed, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusFailed, failed.Status)
+	var result types.SyncResult
+	require.NoError(t, json.Unmarshal(failed.Result, &result))
+	require.NotNil(t, result.Source)
+	require.True(t, result.Source.Snapshot.PublicationChecked)
+	require.Equal(t, previousRun.Snapshot.ID, result.Source.Snapshot.PreviousSnapshotID)
+	require.Equal(t, previousRun.Snapshot.CommitSHA, result.Source.Snapshot.PreviousCommitSHA)
+	require.NotNil(t, result.Source.Snapshot.LastSuccessfulPublishedAt)
+	require.NotNil(t, result.Source.Snapshot.PreviousPublishedAt)
+	require.WithinDuration(t, *previousRun.Snapshot.PublishedAt, *result.Source.Snapshot.LastSuccessfulPublishedAt, time.Microsecond)
+	require.WithinDuration(t, *previousRun.Snapshot.PublishedAt, *result.Source.Snapshot.PreviousPublishedAt, time.Microsecond)
+
+	currentPublication, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, previousPublication.Snapshot.ID, currentPublication.Snapshot.ID)
+	readable, err := f.knowledge.GetSourceFile(f.ctx, previousMember.SourceFileID)
+	require.NoError(t, err)
+	require.Equal(t, previousRun.Snapshot.CommitSHA, readable.CommitSHA)
+	require.Contains(t, readable.Content, "预约")
 }
 
 func TestSourceWikiEvidenceRemainsReadableAfterForcePushAndGitUnavailable(t *testing.T) {

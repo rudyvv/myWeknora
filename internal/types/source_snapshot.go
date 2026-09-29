@@ -82,6 +82,7 @@ type SourceSnapshot struct {
 	// and which commit was being processed.
 	DetectedCommitSHA         string     `json:"detected_commit_sha,omitempty" gorm:"-"`
 	TargetCommitSHA           string     `json:"target_commit_sha,omitempty" gorm:"-"`
+	PublicationChecked        bool       `json:"publication_checked" gorm:"-"`
 	RepositoryURL             string     `json:"repository_url"`
 	RulesVersion              string     `json:"rules_version"`
 	ProcessingVersion         string     `json:"processing_version"`

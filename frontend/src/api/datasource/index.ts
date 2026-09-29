@@ -39,8 +39,9 @@ export interface SyncItemError {
 
 export interface SyncResultDetail {
   source?: {
-    snapshot: { id: string; state: string; commit_sha: string; detected_commit_sha?: string; target_commit_sha?: string; project_id: string; repository_url: string;
+    snapshot: { id: string; state: string; commit_sha: string; detected_commit_sha?: string; target_commit_sha?: string; publication_checked?: boolean; project_id: string; repository_url: string;
       manifest_complete: boolean; member_count: number; file_count: number; chunk_count: number; error?: string; previous_commit_sha?: string;
+      previous_snapshot_id?: string;
       published_at?: string; last_successful_published_at?: string; previous_published_at?: string;
       added_count?: number; changed_count?: number; deleted_count?: number; renamed_count?: number;
       parsed_count?: number; reused_file_count?: number; reused_chunk_count?: number; embedded_chunk_count?: number; reused_vector_count?: number };

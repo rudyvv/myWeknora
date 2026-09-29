@@ -88,6 +88,7 @@ func TestProcessSourceSyncRecordsPipelineUnavailableWhenSnapshotRepositoryIsMiss
 	require.NotNil(t, result.Source)
 	require.NotNil(t, result.Source.Snapshot)
 	assert.Equal(t, "failed", result.Source.Snapshot.State)
+	assert.False(t, result.Source.Snapshot.PublicationChecked)
 	assert.Equal(t, datasource.ErrSourcePipelineUnavailable.Error(), result.Source.Snapshot.Error)
 }
 

@@ -13,10 +13,23 @@ const labels: Record<string, string> = { fetching: '正在获取固定提交', p
 const detectedSHA = computed(() => props.result.snapshot.detected_commit_sha || props.result.snapshot.commit_sha)
 const targetSHA = computed(() => props.result.snapshot.target_commit_sha || props.result.snapshot.commit_sha)
 const publishedSHA = computed(() => props.result.snapshot.state === "published" ? props.result.snapshot.commit_sha : props.result.snapshot.previous_commit_sha)
+const publicationChecked = computed(() => props.result.snapshot.state === 'published' || props.result.snapshot.publication_checked === true)
+const hasPublishedVersion = computed(() => props.result.snapshot.state === 'published' || Boolean(
+  props.result.snapshot.previous_snapshot_id || props.result.snapshot.previous_commit_sha ||
+  props.result.snapshot.previous_published_at || props.result.snapshot.last_successful_published_at
+))
+const publishedLabel = computed(() => publishedSHA.value || (hasPublishedVersion.value
+  ? '已发布（SHA 不可用）'
+  : publicationChecked.value ? '尚未发布' : '无法确认当前发布'))
 const lastSuccessfulAt = computed(() => props.result.snapshot.last_successful_published_at || props.result.snapshot.published_at || props.result.snapshot.previous_published_at)
+const lastSuccessfulLabel = computed(() => lastSuccessfulAt.value || (hasPublishedVersion.value
+  ? '上次成功发布时间不可用'
+  : publicationChecked.value ? '尚无成功发布' : '无法确认上次成功发布'))
 const statusLabel = computed(() => {
   if (props.result.snapshot.state === 'failed') {
-    return publishedSHA.value ? '发布失败（已保留当前发布）' : '首次发布失败（尚无可用发布）'
+    if (hasPublishedVersion.value) return '发布失败（已保留当前发布）'
+    if (!publicationChecked.value) return '发布失败（无法确认当前发布）'
+    return '首次发布失败（尚无可用发布）'
   }
   return labels[props.result.snapshot.state] || props.result.snapshot.state
 })
@@ -29,8 +42,8 @@ const members = computed(() => filtered.value.slice(page.value * pageSize, (page
     <strong role="status">{{ statusLabel }}</strong>
     <p class="commit">检测 HEAD：{{ detectedSHA || '未能检测（请检查分支或凭据）' }}</p>
     <p class="commit">处理目标：{{ targetSHA || '未建立目标（本次未开始扫描）' }}</p>
-    <p class="commit">当前发布 SHA：{{ publishedSHA || '尚未发布' }}</p>
-    <p class="commit">最后成功发布：{{ lastSuccessfulAt || '尚无成功发布' }}</p>
+    <p class="commit">当前发布 SHA：{{ publishedLabel }}</p>
+    <p class="commit">最后成功发布：{{ lastSuccessfulLabel }}</p>
     <p>{{ result.snapshot.manifest_complete ? '成员清单完整' : '正在扫描成员清单' }} · {{ result.snapshot.member_count }} 个成员</p>
     <p>纳入文件 {{ result.snapshot.file_count }} · 源码块 {{ result.snapshot.chunk_count }}</p>
     <p>新增 {{ result.snapshot.added_count ?? 0 }} · 变更 {{ result.snapshot.changed_count ?? 0 }} · 删除/排除 {{ result.snapshot.deleted_count ?? 0 }} · 重命名 {{ result.snapshot.renamed_count ?? 0 }}</p>

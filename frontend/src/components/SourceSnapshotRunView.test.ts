@@ -14,25 +14,32 @@ for (const key of ['window', 'document', 'navigator', 'Element', 'HTMLElement', 
 }
 const require = createRequire(import.meta.url)
 const { createApp, h, nextTick, reactive } = require('vue') as typeof import('vue')
+const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
+
+function loadComponent(path: string, stubChildComponents = false): any {
+  const { descriptor } = parse(readFileSync(path, 'utf8'), { filename: path })
+  const compiled = ts.transpileModule(compileScript(descriptor, { id: path, inlineTemplate: true }).content,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const module = { exports: {} as any }
+  new Function('require', 'module', 'exports', compiled)((name: string) => {
+    if (name.endsWith('.vue')) {
+      return { __esModule: true, default: stubChildComponents ? {} : loadComponent(resolve(dirname(path), name), stubChildComponents) }
+    }
+    if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence reader') } }
+    if (name === '@/api/knowledge-base') return { async getSourceFile() { return { data: { file_version_id: 'version-one', path: 'src/Service.java', content: 'class Service {}', commit_sha: 'a'.repeat(40), quality: 'structural', symbols: [] } } } }
+    return require(name)
+  }, module, module.exports)
+  return module.exports.default
+}
+
+function loadSourceSnapshotRunView(stubChildComponents = false): any {
+  return loadComponent(componentPath, stubChildComponents)
+}
 
 test('run details expose complete manifest and permit code reading only after publication', async () => {
-  const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
-  function load(path: string): any {
-    const { descriptor } = parse(readFileSync(path, 'utf8'), { filename: path })
-    const compiled = ts.transpileModule(compileScript(descriptor, { id: path, inlineTemplate: true }).content,
-      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-    const module = { exports: {} as any }
-    new Function('require', 'module', 'exports', compiled)((name: string) => {
-      if (name.endsWith('.vue')) return { __esModule: true, default: load(resolve(dirname(path), name)) }
-      if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence reader') } }
-      if (name === '@/api/knowledge-base') return { async getSourceFile() { return { data: { file_version_id: 'version-one', path: 'src/Service.java', content: 'class Service {}', commit_sha: 'a'.repeat(40), quality: 'structural', symbols: [] } } } }
-      return require(name)
-    }, module, module.exports)
-    return module.exports.default
-  }
   const result = reactive({ snapshot: { id: 'run-one', state: 'indexing', commit_sha: 'a'.repeat(40), project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: true, member_count: 2, file_count: 1, chunk_count: 2, previous_commit_sha: 'b'.repeat(40), parsed_count: 1, reused_file_count: 3, reused_chunk_count: 6, embedded_chunk_count: 2, reused_vector_count: 6, added_count: 1, changed_count: 2, deleted_count: 1, renamed_count: 1 },
     members: [{ path: 'src/Service.java', status: 'parsed', reason: '', source_file_id: 'file-one', file_version_id: 'version-one' }, { path: 'README.md', status: 'excluded', reason: 'outside selected paths', source_file_id: '', file_version_id: '' }] })
-  const component = load(componentPath)
+  const component = loadSourceSnapshotRunView()
   const host = document.createElement('div')
   document.body.append(host)
   const app = createApp({ render: () => h(component, { result }) })
@@ -60,20 +67,11 @@ test('run details expose complete manifest and permit code reading only after pu
 })
 
 test('failed source runs explain that the last complete publication remains active', async () => {
-  const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
-  const { descriptor } = parse(readFileSync(componentPath, 'utf8'), { filename: componentPath })
-  const compiled = ts.transpileModule(compileScript(descriptor, { id: componentPath, inlineTemplate: true }).content,
-    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-  const module = { exports: {} as any }
-  new Function('require', 'module', 'exports', compiled)((name: string) => {
-    if (name.endsWith('.vue')) return { __esModule: true, default: {} }
-    return require(name)
-  }, module, module.exports)
-  const component = module.exports.default
+  const component = loadSourceSnapshotRunView(true)
   const host = document.createElement('div')
   document.body.append(host)
   const result = reactive({ snapshot: {
-    id: 'failed-run', state: 'failed', commit_sha: '', detected_commit_sha: '', target_commit_sha: '',
+    id: 'failed-run', state: 'failed', commit_sha: '', detected_commit_sha: '', target_commit_sha: '', publication_checked: true,
     project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: false,
     member_count: 0, file_count: 0, chunk_count: 0, previous_commit_sha: 'b'.repeat(40),
     previous_published_at: '2026-09-29T01:02:03Z', error: 'GitLab branch is unavailable'
@@ -92,23 +90,15 @@ test('failed source runs explain that the last complete publication remains acti
 })
 
 test('first failed source publication does not claim that a version was retained', async () => {
-  const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
-  const { descriptor } = parse(readFileSync(componentPath, 'utf8'), { filename: componentPath })
-  const compiled = ts.transpileModule(compileScript(descriptor, { id: componentPath, inlineTemplate: true }).content,
-    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-  const module = { exports: {} as any }
-  new Function('require', 'module', 'exports', compiled)((name: string) => {
-    if (name.endsWith('.vue')) return { __esModule: true, default: {} }
-    return require(name)
-  }, module, module.exports)
+  const component = loadSourceSnapshotRunView(true)
   const host = document.createElement('div')
   document.body.append(host)
   const result = reactive({ snapshot: {
-    id: 'first-failed-run', state: 'failed', commit_sha: '', detected_commit_sha: '', target_commit_sha: '',
+    id: 'first-failed-run', state: 'failed', commit_sha: '', detected_commit_sha: '', target_commit_sha: '', publication_checked: true,
     project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: false,
     member_count: 0, file_count: 0, chunk_count: 0, error: 'branch does not exist'
   }, members: [] })
-  const app = createApp({ render: () => h(module.exports.default, { result }) })
+  const app = createApp({ render: () => h(component, { result }) })
   app.mount(host)
   try {
     await nextTick()
@@ -117,5 +107,26 @@ test('first failed source publication does not claim that a version was retained
     assert.ok(host.textContent?.includes('最后成功发布：尚无成功发布'))
     assert.ok(host.textContent?.includes('branch does not exist'))
     assert.ok(!host.textContent?.includes('已保留当前发布'))
+  } finally { app.unmount(); host.remove() }
+})
+
+test('failed source run does not claim first failure when publication state is unknown', async () => {
+  const component = loadSourceSnapshotRunView(true)
+  const host = document.createElement('div')
+  document.body.append(host)
+  const result = reactive({ snapshot: {
+    id: 'unknown-publication-run', state: 'failed', commit_sha: '', detected_commit_sha: '', target_commit_sha: '',
+    publication_checked: false, project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: false,
+    member_count: 0, file_count: 0, chunk_count: 0, error: 'publication lookup failed'
+  }, members: [] })
+  const app = createApp({ render: () => h(component, { result }) })
+  app.mount(host)
+  try {
+    await nextTick()
+    assert.ok(host.textContent?.includes('发布失败（无法确认当前发布）'))
+    assert.ok(host.textContent?.includes('当前发布 SHA：无法确认当前发布'))
+    assert.ok(host.textContent?.includes('最后成功发布：无法确认上次成功发布'))
+    assert.ok(host.textContent?.includes('publication lookup failed'))
+    assert.ok(!host.textContent?.includes('首次发布失败'))
   } finally { app.unmount(); host.remove() }
 })
