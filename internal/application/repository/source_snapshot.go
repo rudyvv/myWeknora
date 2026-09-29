@@ -9,6 +9,7 @@ import (
 	"time"
 
 	pgrepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/postgres"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
@@ -30,7 +31,9 @@ func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
 		EXISTS(SELECT 1 FROM pg_extension WHERE extname='vector') AND
 		EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_search') AND
 		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND tablename='embeddings' AND indexdef LIKE '%USING bm25%') AND
-		to_regclass('source_publications') IS NOT NULL`).Scan(&ready).Error
+		to_regclass('source_publications') IS NOT NULL AND
+  to_regclass('source_parsed_artifacts') IS NOT NULL AND
+  to_regclass('source_embedding_artifacts') IS NOT NULL`).Scan(&ready).Error
 	if err != nil {
 		return err
 	}
@@ -114,11 +117,26 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 			return fmt.Errorf("source configuration changed before publication")
 		}
 		var currentKB types.KnowledgeBase
-		if err := tx.Where("id=? AND tenant_id=?", kb.ID, kb.TenantID).First(&currentKB).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=?", kb.ID, kb.TenantID).First(&currentKB).Error; err != nil {
 			return err
 		}
-		if currentKB.EmbeddingModelID != kb.EmbeddingModelID || !currentKB.IsKeywordEnabled() || !currentKB.IsVectorEnabled() {
+		if currentKB.EmbeddingModelID != kb.EmbeddingModelID || !currentKB.IsKeywordEnabled() || !currentKB.IsVectorEnabled() || (currentKB.VectorStoreID != nil && *currentKB.VectorStoreID != "") {
 			return fmt.Errorf("source knowledge base indexing configuration changed")
+		}
+		var model types.Model
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=?", kb.EmbeddingModelID).First(&model).Error; err != nil {
+			return err
+		}
+		if model.Status != types.ModelStatusActive || model.Type != types.ModelTypeEmbedding || source.EmbeddingVersion(&model, dimension) != snapshot.EmbeddingVersion {
+			return fmt.Errorf("source embedding configuration changed before publication")
+		}
+		var previous types.SourcePublication
+		err := tx.Where("data_source_id=?", ds.ID).First(&previous).Error
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return err
+		}
+		if previous.SnapshotID != snapshot.PreviousSnapshotID {
+			return fmt.Errorf("source publication changed during preparation")
 		}
 		var counts struct{ Members, Files, Chunks, Embeddings int64 }
 		if err := tx.Raw(`SELECT
@@ -145,6 +163,9 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 			return err
 		}
 		for _, member := range members {
+			if err := tx.Model(&types.SourceFile{}).Where("id=? AND data_source_id=?", member.SourceFileID, ds.ID).Update("path", member.Path).Error; err != nil {
+				return err
+			}
 			var version types.SourceFileVersion
 			if err := tx.Where("id=? AND source_file_id=? AND snapshot_id=?", member.FileVersionID, member.SourceFileID, snapshot.ID).First(&version).Error; err != nil {
 				return err
@@ -171,7 +192,7 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 			return err
 		}
 		now := time.Now().UTC()
-		if err := tx.Model(&types.SourceSnapshot{}).Where("id=? AND manifest_complete=true", snapshot.ID).Updates(map[string]any{"state": "published", "file_count": snapshot.FileCount, "chunk_count": snapshot.ChunkCount, "published_at": now}).Error; err != nil {
+		if err := tx.Model(&types.SourceSnapshot{}).Where("id=? AND manifest_complete=true", snapshot.ID).Updates(map[string]any{"state": "published", "file_count": snapshot.FileCount, "chunk_count": snapshot.ChunkCount, "published_at": now, "processing_version": snapshot.ProcessingVersion, "embedding_version": snapshot.EmbeddingVersion, "parsed_count": snapshot.ParsedCount, "reused_file_count": snapshot.ReusedFileCount, "reused_chunk_count": snapshot.ReusedChunkCount, "embedded_chunk_count": snapshot.EmbeddedChunkCount, "reused_vector_count": snapshot.ReusedVectorCount}).Error; err != nil {
 			return err
 		}
 		snapshot.State, snapshot.PublishedAt = "published", &now

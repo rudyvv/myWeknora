@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -41,6 +40,18 @@ func (s *DataSourceService) checkSourceSyncReady(ctx context.Context, kb *types.
 }
 
 func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.DataSource, log *types.SyncLog, kb *types.KnowledgeBase, connector datasource.Connector, config *types.DataSourceConfig, wasPaused bool) (failure error) {
+	// An already acknowledged delivery must neither replace its successful log
+	// nor re-publish an older run after the source advances. Trigger leasing and
+	// unfinished-run recovery belong to the durable trigger workflow.
+	if log.Status == types.SyncLogStatusSuccess && log.TenantID == ds.TenantID && log.DataSourceID == ds.ID && s.sourceSnapshots != nil {
+		completed, err := s.sourceSnapshots.GetRun(ctx, ds.TenantID, ds.ID, log.ID)
+		if err != nil {
+			return err
+		}
+		if completed != nil && completed.Snapshot != nil && completed.Snapshot.State == "published" {
+			return nil
+		}
+	}
 	result := &types.SyncResult{Source: &types.SourceRunResult{Snapshot: &types.SourceSnapshot{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, SyncLogID: log.ID, State: "fetching"}, Members: []types.SourceSnapshotMember{}}}
 	snapshot := result.Source.Snapshot
 	created := false
@@ -48,7 +59,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		if failure != nil {
 			snapshot.State, snapshot.Error = "failed", failure.Error()
 			if created {
-				_ = s.sourceSnapshots.SetState(context.WithoutCancel(ctx), snapshot.ID, "failed", snapshot.Error)
+				_ = s.sourceSnapshots.UpdateProgress(context.WithoutCancel(ctx), snapshot, result.Source.Members)
 			}
 			result.Failed = 1
 			data, _ := result.ToJSON()
@@ -83,13 +94,26 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			return e
 		}
 		if created {
-			return s.sourceSnapshots.SetState(ctx, snapshot.ID, state, "")
+			return s.sourceSnapshots.UpdateProgress(ctx, snapshot, result.Source.Members)
 		}
 		return nil
+	}
+	previous, err := s.sourceSnapshots.GetPublished(ctx, ds.TenantID, ds.ID)
+	if err != nil {
+		return err
+	}
+	if previous != nil {
+		snapshot.PreviousSnapshotID = previous.Snapshot.ID
+		snapshot.PreviousCommitSHA = previous.Snapshot.CommitSHA
 	}
 	if err := progress("fetching"); err != nil {
 		return err
 	}
+	parserVersion, err := source.ParserVersion(ctx, os.Getenv("SOURCE_PARSER_URL"))
+	if err != nil {
+		return err
+	}
+	snapshot.ProcessingVersion = source.ArtifactKey(source.ProcessingVersion, parserVersion)
 	content := map[string][]byte{}
 	var totalBytes int
 	manifest, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, raw []byte) error {
@@ -106,7 +130,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err != nil {
 		return err
 	}
-	if len(content) == 0 {
+	if len(content) == 0 && previous == nil {
 		return fmt.Errorf("initial source sync requires at least one selected Java file")
 	}
 	snapshot.ManifestComplete = true
@@ -123,6 +147,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			return fmt.Errorf("selected source member is not readable: %s (%s)", file.Path, file.Status)
 		}
 	}
+	reconcileSourceMembers(snapshot, result.Source.Members, previous)
 	snapshot.State = "parsing"
 	if err := s.sourceSnapshots.Create(ctx, snapshot, result.Source.Members); err != nil {
 		return err
@@ -139,11 +164,29 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			result.Skipped++
 			continue
 		}
-		parsed, err := source.ParseJava(ctx, os.Getenv("SOURCE_PARSER_URL"), member.Path, raw)
+		artifactKey := sourceParseArtifactKey(member.Path, raw, parserVersion, version)
+		parsed, err := s.sourceSnapshots.GetParsedArtifact(ctx, ds.TenantID, ds.ID, artifactKey)
 		if err != nil {
 			return err
 		}
-		fileID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(ds.ID+"\x00"+member.Path)).String()
+		if parsed == nil {
+			parsed, err = source.ParseJava(ctx, os.Getenv("SOURCE_PARSER_URL"), member.Path, raw)
+			if err == nil && parsed.ParserVersion != parserVersion {
+				return fmt.Errorf("source parser version changed during processing")
+			}
+			if err == nil {
+				err = s.sourceSnapshots.SaveParsedArtifact(ctx, ds.TenantID, ds.ID, artifactKey, parsed)
+			}
+			snapshot.ParsedCount++
+		} else {
+			member.ParseReused = true
+			snapshot.ReusedFileCount++
+			snapshot.ReusedChunkCount += len(parsed.Chunks)
+		}
+		if err != nil {
+			return err
+		}
+		fileID := member.SourceFileID
 		file := &types.SourceFile{ID: fileID, TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, Path: member.Path}
 		symbols, _ := json.Marshal(parsed.Symbols)
 		fileVersion := &types.SourceFileVersion{ID: uuid.NewString(), SourceFileID: fileID, SnapshotID: snapshot.ID, BlobSHA: member.BlobSHA, SHA256: parsed.SHA256, Content: raw, Encoding: parsed.Encoding, ParserVersion: parsed.ParserVersion, Quality: parsed.Quality, Symbols: types.JSON(symbols)}
@@ -168,51 +211,9 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err := progress("indexing"); err != nil {
 		return err
 	}
-	model, err := s.sourceModelService.GetEmbeddingModelForTenant(ctx, kb.EmbeddingModelID, kb.TenantID)
+	dimension, err := s.stageSourceIndexes(ctx, ds, kb, snapshot, indexes)
 	if err != nil {
 		return err
-	}
-	dimension := model.GetDimensions()
-	if dimension <= 0 {
-		return fmt.Errorf("source embedding model dimension is invalid")
-	}
-	for offset := 0; offset < len(indexes); offset += 32 {
-		end := offset + 32
-		if end > len(indexes) {
-			end = len(indexes)
-		}
-		batch := indexes[offset:end]
-		texts := make([]string, len(batch))
-		for i, index := range batch {
-			texts[i] = index.Content
-		}
-		vectors, err := model.BatchEmbed(ctx, texts)
-		if err != nil {
-			return fmt.Errorf("source embedding request failed")
-		}
-		if len(vectors) != len(batch) {
-			return fmt.Errorf("source embedding result is incomplete")
-		}
-		mapped := make(map[string][]float32, len(batch))
-		for i, vector := range vectors {
-			if len(vector) != dimension {
-				return fmt.Errorf("source embedding dimension mismatch")
-			}
-			var norm float64
-			for _, v := range vector {
-				if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-					return fmt.Errorf("source embedding contains non-finite values")
-				}
-				norm += float64(v) * float64(v)
-			}
-			if norm == 0 {
-				return fmt.Errorf("source embedding has zero norm")
-			}
-			mapped[batch[i].SourceID] = vector
-		}
-		if err := s.sourceSnapshots.StageIndexes(ctx, batch, mapped); err != nil {
-			return err
-		}
 	}
 	if err := progress("ready"); err != nil {
 		return err
@@ -221,7 +222,9 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		return err
 	}
 	result.Total = snapshot.FileCount
-	result.Created = snapshot.FileCount
+	result.Created = snapshot.AddedCount
+	result.Updated = snapshot.ChangedCount + snapshot.RenamedCount
+	result.Deleted = snapshot.DeletedCount
 	data, _ := result.ToJSON()
 	s.updateSyncRunResult(ctx, ds, log, result, data, types.SyncLogStatusSuccess, "", wasPaused)
 	return nil

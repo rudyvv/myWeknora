@@ -9,8 +9,14 @@ import (
 // transaction on the built-in PostgreSQL index database.
 type SourceSnapshotRepository interface {
 	CheckReady(context.Context) error
+	GetPublished(context.Context, uint64, string) (*types.SourceRunResult, error)
+	GetParsedArtifact(context.Context, uint64, string, string) (*types.ParsedSourceFile, error)
+	SaveParsedArtifact(context.Context, uint64, string, string, *types.ParsedSourceFile) error
+	GetEmbeddingArtifacts(context.Context, uint64, string, []string) (map[string][]float32, error)
+	SaveEmbeddingArtifacts(context.Context, uint64, string, map[string][]float32) error
 	Create(context.Context, *types.SourceSnapshot, []types.SourceSnapshotMember) error
 	SetState(context.Context, string, string, string) error
+	UpdateProgress(context.Context, *types.SourceSnapshot, []types.SourceSnapshotMember) error
 	StageFile(context.Context, *types.SourceFile, *types.SourceFileVersion, []*types.Chunk) error
 	StageIndexes(context.Context, []*types.IndexInfo, map[string][]float32) error
 	Publish(context.Context, *types.SourceSnapshot, *types.DataSource, *types.KnowledgeBase, int) error

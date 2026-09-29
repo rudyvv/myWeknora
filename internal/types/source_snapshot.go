@@ -49,8 +49,8 @@ type SourceFile struct {
 	ID              string `json:"id" gorm:"type:varchar(36);primaryKey"`
 	TenantID        uint64 `json:"tenant_id"`
 	KnowledgeBaseID string `json:"knowledge_base_id" gorm:"type:varchar(36)"`
-	DataSourceID    string `json:"data_source_id" gorm:"type:varchar(36);uniqueIndex:source_file_path"`
-	Path            string `json:"path" gorm:"type:text;uniqueIndex:source_file_path"`
+	DataSourceID    string `json:"data_source_id" gorm:"type:varchar(36)"`
+	Path            string `json:"path" gorm:"type:text"`
 }
 
 type SourceFileVersion struct {
@@ -68,24 +68,37 @@ type SourceFileVersion struct {
 }
 
 type SourceSnapshot struct {
-	ID               string     `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID         uint64     `json:"tenant_id"`
-	KnowledgeBaseID  string     `json:"knowledge_base_id" gorm:"type:varchar(36)"`
-	DataSourceID     string     `json:"data_source_id" gorm:"type:varchar(36);index"`
-	SyncLogID        string     `json:"sync_log_id" gorm:"type:varchar(36);uniqueIndex"`
-	ProjectID        string     `json:"project_id"`
-	CommitSHA        string     `json:"commit_sha"`
-	RepositoryURL    string     `json:"repository_url"`
-	RulesVersion     string     `json:"rules_version"`
-	State            string     `json:"state"`
-	ManifestComplete bool       `json:"manifest_complete"`
-	ManifestDigest   string     `json:"manifest_digest"`
-	MemberCount      int        `json:"member_count"`
-	FileCount        int        `json:"file_count"`
-	ChunkCount       int        `json:"chunk_count"`
-	Error            string     `json:"error,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	PublishedAt      *time.Time `json:"published_at,omitempty"`
+	ID                 string     `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID           uint64     `json:"tenant_id"`
+	KnowledgeBaseID    string     `json:"knowledge_base_id" gorm:"type:varchar(36)"`
+	DataSourceID       string     `json:"data_source_id" gorm:"type:varchar(36);index"`
+	SyncLogID          string     `json:"sync_log_id" gorm:"type:varchar(36);uniqueIndex"`
+	ProjectID          string     `json:"project_id"`
+	CommitSHA          string     `json:"commit_sha"`
+	RepositoryURL      string     `json:"repository_url"`
+	RulesVersion       string     `json:"rules_version"`
+	ProcessingVersion  string     `json:"processing_version"`
+	EmbeddingVersion   string     `json:"embedding_version"`
+	PreviousSnapshotID string     `json:"previous_snapshot_id"`
+	PreviousCommitSHA  string     `json:"previous_commit_sha"`
+	AddedCount         int        `json:"added_count"`
+	ChangedCount       int        `json:"changed_count"`
+	DeletedCount       int        `json:"deleted_count"`
+	RenamedCount       int        `json:"renamed_count"`
+	ParsedCount        int        `json:"parsed_count"`
+	ReusedFileCount    int        `json:"reused_file_count"`
+	ReusedChunkCount   int        `json:"reused_chunk_count"`
+	EmbeddedChunkCount int        `json:"embedded_chunk_count"`
+	ReusedVectorCount  int        `json:"reused_vector_count"`
+	State              string     `json:"state"`
+	ManifestComplete   bool       `json:"manifest_complete"`
+	ManifestDigest     string     `json:"manifest_digest"`
+	MemberCount        int        `json:"member_count"`
+	FileCount          int        `json:"file_count"`
+	ChunkCount         int        `json:"chunk_count"`
+	Error              string     `json:"error,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	PublishedAt        *time.Time `json:"published_at,omitempty"`
 }
 
 type SourceSnapshotMember struct {
@@ -99,6 +112,9 @@ type SourceSnapshotMember struct {
 	Reason        string `json:"reason"`
 	Encoding      string `json:"encoding,omitempty"`
 	Generated     bool   `json:"generated"`
+	Change        string `json:"change"`
+	PreviousPath  string `json:"previous_path"`
+	ParseReused   bool   `json:"parse_reused"`
 }
 
 type SourcePublication struct {
@@ -158,4 +174,17 @@ type SourceFileView struct {
 	Content       string `json:"content" gorm:"-"`
 	RawContent    []byte `json:"-"`
 	Symbols       JSON   `json:"symbols"`
+}
+
+type SourceParsedArtifact struct {
+	TenantID     uint64 `gorm:"primaryKey"`
+	DataSourceID string `gorm:"type:varchar(36);primaryKey"`
+	ArtifactKey  string `gorm:"type:text;primaryKey"`
+	Parsed       JSON   `gorm:"type:jsonb"`
+}
+type SourceEmbeddingArtifact struct {
+	TenantID     uint64 `gorm:"primaryKey"`
+	DataSourceID string `gorm:"type:varchar(36);primaryKey"`
+	ArtifactKey  string `gorm:"type:text;primaryKey"`
+	Vector       JSON   `gorm:"type:jsonb"`
 }
