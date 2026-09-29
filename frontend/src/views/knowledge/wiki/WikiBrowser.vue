@@ -154,6 +154,7 @@
             <div v-if="graphDrawerNeighborHint" class="wiki-drawer-neighbor-hint" style="margin-bottom: 16px;">
               {{ graphDrawerNeighborHint }}
             </div>
+            <p v-if="graphDrawerPage.source_provenance && graphDrawerPage.source_provenance.state !== 'ready'" role="status">技术卡片{{ graphDrawerPage.source_provenance.state === 'stale' ? '已过期' : '待核验' }}，不参与当前源码回答。</p>
             <div ref="drawerBodyRef" class="wiki-reader-body" v-html="graphDrawerContent"
               @click="handleGraphDrawerClick"></div>
           </template>
@@ -165,6 +166,7 @@
     <template v-else>
       <!-- Left Panel: Page List -->
       <aside class="wiki-sidebar">
+ <SourceWikiModules :kb-id="props.knowledgeBaseId" :can-edit="props.canEdit" @ready="handleSourceWikiReady" />
         <div class="wiki-sidebar-header">
           <div v-if="stats && (stats.pending_tasks > 0 || stats.is_active)" class="wiki-queue-status">
             <t-loading size="small" />
@@ -562,7 +564,8 @@
               </div>
 
               <!-- Content -->
-              <div v-if="!editingPage" ref="readerBodyRef" class="wiki-reader-body" v-html="renderedContent"
+              <p v-if="selectedPage?.source_provenance && selectedPage.source_provenance.state !== 'ready'" role="status">技术卡片{{ selectedPage.source_provenance.state === 'stale' ? '已过期' : '待核验' }}，不参与当前源码回答。</p>
+ <div v-if="!editingPage" ref="readerBodyRef" class="wiki-reader-body" v-html="renderedContent"
                 @click="handleContentClick">
               </div>
 
@@ -726,6 +729,7 @@
     </t-drawer>
 
     <!-- Revision history drawer -->
+    <t-drawer v-model:visible="sourceEvidenceVisible" header="固定版本源码证据" size="720px" :footer="false" destroy-on-close><SourceCodeView v-if="sourceEvidence" :knowledge-id="sourceEvidence.knowledge_id" :file-version-id="sourceEvidence.file_version_id" :wiki-evidence="sourceEvidenceOwner" :evidence-range="sourceEvidence.range" /></t-drawer>
     <WikiRevisionDrawer v-model:visible="showRevisionDrawer" :kb-id="props.knowledgeBaseId"
       :slug="selectedPage?.slug || ''" :current-page="selectedPage" :can-edit="props.canEdit"
       @reverted="onPageReverted" />
@@ -803,6 +807,8 @@ import { hydrateProtectedFileImages, sanitizeMarkdownHTML } from '@/utils/securi
 import type { ProtectedFileAccessContext } from '@/utils/protectedFileAccess'
 import picturePreview from '@/components/picture-preview.vue'
 import WikiFolderActions from './WikiFolderActions.vue'
+import SourceCodeView from '@/components/SourceCodeView.vue'
+import SourceWikiModules from '@/components/SourceWikiModules.vue'
 import WikiRevisionDrawer from './WikiRevisionDrawer.vue'
 import {
   expandedWikiDirectoryPaths,
@@ -866,6 +872,34 @@ const kbFileAccess = computed<ProtectedFileAccessContext>(() => ({
   mode: 'knowledgeBase',
   kbId: props.knowledgeBaseId,
 }))
+async function handleSourceWikiReady(slug: string) {
+ await loadPages()
+ const response: any = await getWikiPage(props.knowledgeBaseId, slug)
+ if (response) selectedPage.value = response.data || response
+}
+const sourceEvidenceVisible = ref(false)
+const sourceEvidence = ref<NonNullable<WikiPage['source_provenance']>['evidence'][number] | null>(null)
+const sourceEvidenceOwner = ref<{ kbId: string; slug: string; id: string; version: number; commitSHA: string }>()
+function openSourceWikiEvidence(page: WikiPage, id: string) {
+ const evidence = page.source_provenance?.evidence.find(e => e.id === id)
+ if (!evidence) return
+ sourceEvidence.value = evidence
+ sourceEvidenceOwner.value = { kbId: props.knowledgeBaseId, slug: page.slug, id, version: page.version, commitSHA: evidence.commit_sha }
+ sourceEvidenceVisible.value = true
+}
+function interceptSourceEvidenceClick(event: MouseEvent, page: WikiPage | null): boolean {
+ const anchor = (event.target as HTMLElement).closest('a')
+ if (!anchor || !page) return false
+ try {
+  const url = new URL(anchor.getAttribute('href') || '', window.location.origin)
+  if (url.origin !== window.location.origin || url.pathname !== `/api/v1/knowledgebase/${props.knowledgeBaseId}/wiki/source/evidence` || url.searchParams.get('slug') !== page.slug) return false
+  const id = url.searchParams.get('evidence_id') || ''
+  if (!page.source_provenance?.evidence.some(e => e.id === id)) return false
+  event.preventDefault()
+  openSourceWikiEvidence(page, id)
+  return true
+ } catch { return false }
+}
 const pages = ref<WikiPage[]>([])
 const selectedPage = ref<WikiPage | null>(null)
 
@@ -1546,6 +1580,7 @@ async function openGraphDrawer(slug: string) {
 }
 
 function handleGraphDrawerClick(e: MouseEvent) {
+ if(interceptSourceEvidenceClick(e,graphDrawerPage.value)) return
   const target = e.target as HTMLElement
   if (target.classList.contains('wiki-content-link')) {
     e.preventDefault()
@@ -2057,6 +2092,7 @@ watch(renderedIndexMarkdown, async () => {
 })
 
 function handleContentClick(e: MouseEvent) {
+ if(interceptSourceEvidenceClick(e,selectedPage.value)) return
   const target = e.target as HTMLElement
   if (target.classList.contains('wiki-content-link')) {
     e.preventDefault()

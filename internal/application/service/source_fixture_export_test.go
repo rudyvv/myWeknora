@@ -26,7 +26,7 @@ type SourceIntegrationFixture struct {
 	Sync        func()
 }
 
-func NewSourceIntegrationFixture(t *testing.T) *SourceIntegrationFixture {
-	f := newJavaSourceFixture(t)
+func NewSourceIntegrationFixture(t *testing.T, extraFiles ...map[string][]byte) *SourceIntegrationFixture {
+	f := newJavaSourceFixture(t, extraFiles...)
 	return &SourceIntegrationFixture{Ctx: f.ctx, DB: f.db, KBs: f.kbs.(interfaces.KnowledgeBaseService), KB: f.kb, Source: f.ds, Knowledge: f.knowledge, Chunks: f.chunks, Shares: f.shares, AgentShares: f.agentShares, Sync: func() { syncSourceFixture(t, f) }}
 }

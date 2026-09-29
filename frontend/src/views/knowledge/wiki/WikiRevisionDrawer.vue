@@ -93,8 +93,18 @@
             <pre class="wiki-rev-raw-body">{{ rawRevisionText }}</pre>
           </div>
         </template>
-
         <div v-else class="wiki-rev-detail-hint">{{ t('knowledgeEditor.wikiBrowser.revisionSelectHint') }}</div>
+
+        <div v-if="selectedRevision?.source_provenance">
+          <button v-for="evidence in selectedRevision.source_provenance.evidence" :key="evidence.id" type="button"
+            @click="historyEvidence = evidence">
+            阅读修订源码：{{ evidence.path }} · {{ evidence.commit_sha.slice(0, 12) }}
+          </button>
+          <SourceCodeView v-if="historyEvidence" :knowledge-id="historyEvidence.knowledge_id"
+            :file-version-id="historyEvidence.file_version_id"
+            :wiki-evidence="{ kbId, slug, id: historyEvidence.id, version: selectedRevision.version, commitSHA: historyEvidence.commit_sha }"
+            :evidence-range="historyEvidence.range" />
+        </div>
       </div>
     </div>
   </SettingDrawer>
@@ -104,6 +114,7 @@
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { MessagePlugin } from 'tdesign-vue-next'
+import SourceCodeView from '@/components/SourceCodeView.vue'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import {
   listWikiRevisions,
@@ -155,6 +166,8 @@ const loadingList = ref(false)
 
 const selectedVersion = ref<number | null>(null)
 const selectedRevision = ref<WikiPageRevision | null>(null)
+const historyEvidence = ref<NonNullable<WikiPage['source_provenance']>['evidence'][number] | null>(null)
+watch(selectedVersion, () => { historyEvidence.value = null })
 const detailContent = ref('')
 const loadingDetail = ref(false)
 const viewMode = ref<ViewMode>('incremental')

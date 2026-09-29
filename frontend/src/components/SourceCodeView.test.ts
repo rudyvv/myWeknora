@@ -22,6 +22,7 @@ test('published source is escaped, read-only, and links the selected symbol to t
   const requests: string[] = []
   const module = { exports: {} as any }
   new Function('require', 'module', 'exports', compiled)((name: string) => {
+    if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence read') } }
     if (name === '@/api/knowledge-base') return { async getSourceFile(id: string) {
       requests.push(id)
       return { data: { knowledge_id: id, snapshot_id: 'snapshot-one', file_version_id: 'version-one',

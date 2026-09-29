@@ -706,3 +706,11 @@ func TestMovePageIntoTypeLabelNamedFolderKeepsHierarchy(t *testing.T) {
 	require.Equal(t, 1, listed.Pages[0].Depth)
 	require.Equal(t, "concept/概念/将计就计", listed.Pages[0].WikiPath)
 }
+
+func TestWikiGraphRejectsNilRequest(t *testing.T) {
+	svc := NewWikiPageService(nil, nil, nil, nil, nil)
+	graph, err := svc.GetGraph(context.Background(), nil)
+	if err == nil || graph != nil {
+		t.Fatalf("nil graph request: graph=%v err=%v", graph, err)
+	}
+}
