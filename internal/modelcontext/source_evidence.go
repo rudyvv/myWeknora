@@ -58,6 +58,9 @@ func sourceEvidenceAttrs(evidence *types.SourceEvidence) string {
 	if symbols := boundedSourceSymbols(evidence.Symbols); symbols != "" {
 		attrs += fmt.Sprintf(` symbols="%s"`, escapeAttr(symbols))
 	}
+	if diagnostics := boundedSourceDiagnostics(evidence.Diagnostics); diagnostics != "" {
+		attrs += fmt.Sprintf(` sfc_diagnostics="%s"`, escapeAttr(diagnostics))
+	}
 	return attrs
 }
 
@@ -71,6 +74,30 @@ func boundedExternalStatus(value string) string {
 	default:
 		return ""
 	}
+}
+
+func boundedSourceDiagnostics(diagnostics []types.SourceDiagnostic) string {
+	values := make([]string, 0, min(len(diagnostics), 4))
+	for index, diagnostic := range diagnostics {
+		if len(values) == 4 || index == 16 {
+			break
+		}
+		if diagnostic.Range.StartLine < 1 || diagnostic.Range.EndLine < diagnostic.Range.StartLine {
+			continue
+		}
+		var explanation string
+		switch diagnostic.Code {
+		case "vue_sfc_parse_warning":
+			explanation = "Vue SFC block has a descriptor warning; original bytes are retained."
+		case "vue_sfc_duplicate_block":
+			explanation = "Vue SFC has a duplicate top-level block; original bytes are retained."
+		default:
+			continue
+		}
+		values = append(values, fmt.Sprintf("%s@L%d-L%d: %s", diagnostic.Code,
+			diagnostic.Range.StartLine, diagnostic.Range.EndLine, explanation))
+	}
+	return boundedSourceValue(strings.Join(values, "; "), 512)
 }
 
 const (

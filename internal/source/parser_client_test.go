@@ -52,3 +52,39 @@ func TestSourceRegionValidationOnlyAcceptsUnresolvedLiteralReferences(t *testing
 		}
 	}
 }
+
+func TestSourceDiagnosticValidationRequiresKnownVueCodeAndOriginalRange(t *testing.T) {
+	raw := []byte("<template><div>first</template>\r\n")
+	valid := types.SourceDiagnostic{
+		Code:  "vue_sfc_parse_warning",
+		Range: types.SourceRange{StartByte: 10, EndByte: 15, StartLine: 1, EndLine: 1},
+	}
+	chunk := types.SourceRange{StartByte: 0, EndByte: len(raw), StartLine: 1, EndLine: 1}
+	if !validSourceDiagnostic("vue", raw, chunk, valid) {
+		t.Fatal("expected a known Vue diagnostic with an exact original range to be accepted")
+	}
+	crossingRange := types.SourceDiagnostic{
+		Code:  valid.Code,
+		Range: types.SourceRange{StartByte: 10, EndByte: 20, StartLine: 1, EndLine: 1},
+	}
+	affectedChunk := types.SourceRange{StartByte: 10, EndByte: 15, StartLine: 1, EndLine: 1}
+	if !validSourceDiagnostic("vue", raw, affectedChunk, crossingRange) {
+		t.Fatal("expected an exact diagnostic range to remain valid when it extends beyond its attributed start chunk")
+	}
+	invalid := []types.SourceDiagnostic{
+		{Code: "untrusted_parser_message", Range: valid.Range},
+		{Code: valid.Code, Range: types.SourceRange{StartByte: 10, EndByte: len(raw) + 1, StartLine: 1, EndLine: 1}},
+		{Code: valid.Code, Range: types.SourceRange{StartByte: 10, EndByte: 15, StartLine: 2, EndLine: 2}},
+	}
+	for _, diagnostic := range invalid {
+		if validSourceDiagnostic("vue", raw, chunk, diagnostic) {
+			t.Fatalf("accepted invalid Vue diagnostic: %#v", diagnostic)
+		}
+	}
+	if validSourceDiagnostic("javascript", raw, chunk, valid) {
+		t.Fatal("accepted an SFC diagnostic for a non-Vue source file")
+	}
+	if validSourceDiagnostic("vue", raw, types.SourceRange{StartByte: 15, EndByte: len(raw), StartLine: 1, EndLine: 1}, valid) {
+		t.Fatal("accepted a diagnostic whose start position is outside the attributed chunk")
+	}
+}

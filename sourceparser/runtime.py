@@ -218,7 +218,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     span = lambda start, end: _source_span(newlines, start, end)
     utf16_offsets = _utf16_offsets(text, raw)
     blocks = _offset_vue_blocks(text, raw, response.get('blocks', []), utf16_offsets)
-    chunks, symbols = [], []
+    chunks, symbols, block_infos = [], [], []
     cursor = 0
     degraded = False
     unknown_preprocess = False
@@ -238,8 +238,12 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         return {'kind': kind, 'language': language, 'quality': quality,
                 'external_source': external, 'external_status': status}
 
-    known_raw_languages = {'', 'html', 'vue', 'css', 'scss', 'sass', 'less', 'stylus', 'postcss',
-                           'json', 'yaml', 'yml', 'js', 'javascript', 'jsx', 'ts', 'typescript', 'tsx'}
+    known_raw_languages = {
+        'template': {'', 'html', 'vue'},
+        'script': {'', 'js', 'javascript', 'jsx', 'ts', 'typescript', 'tsx'},
+        'style': {'', 'css', 'scss', 'sass', 'less', 'stylus', 'postcss'},
+        'custom': {'', 'json', 'yaml', 'yml'},
+    }
     for index, block in enumerate(blocks):
         start, end = block['start_byte'], block['end_byte']
         block_type, language = block['type'], block.get('lang', '').lower()
@@ -249,9 +253,11 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         body = raw[start:end]
         block_quality = 'structural'
         block_symbols = []
-        unsupported_script = kind == 'script' and not block.get('src') and script_language not in script_languages
+        external_script = kind == 'script' and bool(block.get('src'))
+        unsupported_script = kind == 'script' and not external_script and script_language not in script_languages
+        unsupported_preprocess = unsupported_script or language not in known_raw_languages[kind]
         wrapper_quality = ('degraded' if kind == 'script' and block.get('src') else
-                           'unknown_preprocess' if unsupported_script or language not in known_raw_languages else '')
+                           'unknown_preprocess' if unsupported_preprocess else '')
         wrapper_region = region_for(block, wrapper_quality) if wrapper_quality else None
         tag_start = block.get('tag_start_byte')
         if wrapper_quality and tag_start is None:
@@ -262,7 +268,8 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         if opening_start > cursor:
             chunks.extend(_split_raw(raw, cursor, opening_start, max_bytes, span, 'structural', None))
         if wrapper_quality:
-            chunks.extend(_split_raw(raw, tag_start, start, max_bytes, span, wrapper_quality, wrapper_region))
+            opening_chunks = _split_raw(raw, tag_start, start, max_bytes, span, wrapper_quality, wrapper_region)
+            chunks.extend(opening_chunks)
         is_script = (kind == 'script' and not block.get('src') and
                      script_language in script_languages)
         if is_script and body:
@@ -275,24 +282,25 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
                 chunk['region'] = region_for(block, block_quality)
             chunks.extend(block_chunks)
         else:
-            if kind == 'script' and (script_language not in script_languages or block.get('src')):
-                block_quality = 'degraded' if block.get('src') else 'unknown_preprocess'
+            if external_script:
+                block_quality = 'degraded'
                 degraded = True
-                unknown_preprocess = unknown_preprocess or block_quality == 'unknown_preprocess'
-            elif language not in known_raw_languages:
+            elif unsupported_preprocess:
                 block_quality = 'unknown_preprocess'
                 degraded = True
                 unknown_preprocess = True
             if not body and end > start:
                 raise RuntimeError('SFC empty body range mismatch')
-            chunks.extend(_split_raw(raw, start, end, max_bytes, span, block_quality,
-                                     region_for(block, block_quality)))
+            body_chunks = _split_raw(raw, start, end, max_bytes, span, block_quality,
+                                     region_for(block, block_quality))
+            chunks.extend(body_chunks)
         region = region_for(block, block_quality)
         region_range = span(start, end)
         marker_signature_range = span(start, start)
-        symbols.append({'kind': 'sfc_region', 'name': kind, 'qualified_name': path + '#' + kind + '[' + str(index) + ']',
-                        'signature': '', 'signature_range': marker_signature_range, 'range': region_range,
-                        'annotations': [], 'region': region})
+        region_symbol = {'kind': 'sfc_region', 'name': kind, 'qualified_name': path + '#' + kind + '[' + str(index) + ']',
+                         'signature': '', 'signature_range': marker_signature_range, 'range': region_range,
+                         'annotations': [], 'region': region}
+        symbols.append(region_symbol)
         for symbol in block_symbols:
             symbol['region'] = region
             symbols.append(symbol)
@@ -301,21 +309,63 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             close_start, close_end = block['close_start_byte'], block['close_end_byte']
             if close_start != cursor or close_end <= close_start:
                 raise RuntimeError('SFC parser returned a non-contiguous closing wrapper range')
-            chunks.extend(_split_raw(raw, close_start, close_end, max_bytes, span, wrapper_quality, wrapper_region))
+            closing_chunks = _split_raw(raw, close_start, close_end, max_bytes, span, wrapper_quality, wrapper_region)
+            chunks.extend(closing_chunks)
             cursor = close_end
+        block_infos.append({
+            'region': region,
+            'start_byte': tag_start if tag_start is not None else start,
+            'end_byte': block.get('close_end_byte', end),
+        })
     if cursor < len(raw):
         chunks.extend(_split_raw(raw, cursor, len(raw), max_bytes, span, 'structural', None))
+    safe_diagnostic_codes = {'vue_sfc_parse_warning', 'vue_sfc_duplicate_block'}
+    if not isinstance(diagnostics, list) or len(diagnostics) > 128:
+        raise RuntimeError('SFC parser returned invalid diagnostics')
     for diagnostic in diagnostics:
-        position = diagnostic.get('start_utf16') if isinstance(diagnostic, dict) else None
-        try:
-            byte_position = utf16_offsets.get(position, 0)
-        except (RuntimeError, TypeError, KeyError):
-            byte_position = 0
-        point = span(byte_position, byte_position)
+        if not isinstance(diagnostic, dict) or diagnostic.get('code') not in safe_diagnostic_codes:
+            raise RuntimeError('SFC parser returned an invalid diagnostic code')
+        start_utf16 = diagnostic.get('start_utf16')
+        end_utf16 = diagnostic.get('end_utf16')
+        if type(start_utf16) is not int or start_utf16 not in utf16_offsets:
+            degraded = True
+            continue
+        start_byte = utf16_offsets[start_utf16]
+        if end_utf16 is None:
+            end_byte = start_byte
+        elif type(end_utf16) is int and end_utf16 in utf16_offsets and end_utf16 >= start_utf16:
+            end_byte = utf16_offsets[end_utf16]
+        else:
+            degraded = True
+            continue
+        diagnostic_range = span(start_byte, end_byte)
+        diagnostic_evidence = {'code': diagnostic['code'], 'range': diagnostic_range}
+        block_info = next((item for item in block_infos
+                           if item['start_byte'] <= start_byte < item['end_byte']), None)
+        affected_chunks = [chunk for chunk in chunks
+                           if chunk['range']['start_byte'] <= start_byte < chunk['range']['end_byte']]
+        if not affected_chunks:
+            degraded = True
+            continue
+        if block_info is not None:
+            region = block_info['region']
+            if region['quality'] == 'structural':
+                region['quality'] = 'degraded'
+            diagnostic_region = region
+        else:
+            diagnostic_region = (affected_chunks[0].get('region') if affected_chunks else
+                                 {'kind': 'custom', 'quality': 'degraded'})
+        for chunk in affected_chunks:
+            if chunk['quality'] == 'structural':
+                chunk['quality'] = 'degraded'
+            if chunk.get('region') and chunk['region']['quality'] == 'structural':
+                chunk['region']['quality'] = 'degraded'
+            chunk.setdefault('diagnostics', []).append(diagnostic_evidence)
+        point = span(start_byte, start_byte)
         symbols.append({'kind': 'sfc_diagnostic', 'name': 'SFC descriptor warning',
                         'qualified_name': path + '#diagnostic[' + str(len(symbols)) + ']',
-                        'signature': '', 'signature_range': point, 'range': point, 'annotations': [],
-                        'region': {'kind': 'custom', 'quality': 'degraded'}})
+                        'signature': '', 'signature_range': point, 'range': diagnostic_range,
+                        'annotations': [], 'region': diagnostic_region})
         degraded = True
     for chunk in chunks:
         area = chunk['range']

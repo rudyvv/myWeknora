@@ -141,6 +141,66 @@ class VueHTTPContract(unittest.TestCase):
         self.assertTrue(any(chunk.get('region') is None and '<template' in chunk['content']
                             for chunk in parsed['chunks']))
 
+    def test_preprocessor_quality_is_scoped_to_block_kind(self):
+        raw = ('<template lang="ts">template_marker</template>\r\n'
+               '<style lang="json">style_marker</style>\r\n'
+               '<script lang="ts">\r\nexport const supportedScriptMarker = 1;\r\n</script>\r\n').encode()
+        status, parsed = self.parse(raw)
+        self.assertEqual(status, 200, parsed)
+        self.assertEqual(parsed['quality'], 'unknown_preprocess')
+        regions = {symbol['region']['kind']: symbol['region'] for symbol in parsed['symbols']
+                   if symbol['kind'] == 'sfc_region'}
+        self.assertEqual(regions['template']['quality'], 'unknown_preprocess')
+        self.assertEqual(regions['style']['quality'], 'unknown_preprocess')
+        self.assertEqual(regions['script']['quality'], 'structural')
+        for marker, kind, quality in (('template_marker', 'template', 'unknown_preprocess'),
+                                      ('style_marker', 'style', 'unknown_preprocess'),
+                                      ('supportedScriptMarker', 'script', 'structural')):
+            chunk = next(chunk for chunk in parsed['chunks'] if marker in chunk['content'])
+            self.assertEqual(chunk['quality'], quality)
+            self.assertEqual(chunk['region']['kind'], kind)
+            self.assertEqual(chunk['region']['quality'], quality)
+        self.assertTrue(any(symbol['name'] == 'supportedScriptMarker' and
+                            symbol['region']['kind'] == 'script' and
+                            symbol['region']['quality'] == 'structural'
+                            for symbol in parsed['symbols']))
+
+    def test_descriptor_warning_degrades_only_its_region_and_attaches_exact_safe_diagnostic(self):
+        template_body = '<div>first ' + ('unrelated ' * 20)
+        raw = ('<template>' + template_body + '</template>\r\n'
+               '<style lang="scss">.safe{color:red}</style>\r\n').encode()
+        status, parsed = self.parse(raw, maximum=64)
+        self.assertEqual(status, 200, parsed)
+        self.assertEqual(parsed['quality'], 'degraded')
+        regions = {symbol['region']['kind']: symbol['region'] for symbol in parsed['symbols']
+                   if symbol['kind'] == 'sfc_region'}
+        self.assertEqual(regions['template']['quality'], 'degraded')
+        self.assertEqual(regions['style']['quality'], 'structural')
+        template_chunks = [chunk for chunk in parsed['chunks']
+                           if (chunk.get('region') or {}).get('kind') == 'template']
+        self.assertGreater(len(template_chunks), 1)
+        diagnostic_chunks = [chunk for chunk in template_chunks if chunk.get('diagnostics')]
+        self.assertEqual(len(diagnostic_chunks), 1)
+        self.assertEqual(diagnostic_chunks[0]['quality'], 'degraded')
+        self.assertEqual(diagnostic_chunks[0]['region']['quality'], 'degraded')
+        self.assertEqual(diagnostic_chunks[0]['diagnostics'], [{
+            'code': 'vue_sfc_parse_warning',
+            'range': {'start_byte': 10, 'end_byte': 15, 'start_line': 1, 'end_line': 1},
+        }])
+        for chunk in template_chunks:
+            if chunk is diagnostic_chunks[0]:
+                continue
+            self.assertEqual(chunk['quality'], 'structural')
+            self.assertEqual(chunk['region']['quality'], 'structural')
+            self.assertFalse(chunk.get('diagnostics'))
+        style_chunk = next(chunk for chunk in parsed['chunks'] if '.safe' in chunk['content'])
+        self.assertEqual(style_chunk['quality'], 'structural')
+        self.assertFalse(style_chunk.get('diagnostics'))
+        diagnostic = next(symbol for symbol in parsed['symbols'] if symbol['kind'] == 'sfc_diagnostic')
+        self.assertEqual(diagnostic['range']['start_byte'], 10)
+        self.assertEqual(diagnostic['range']['end_byte'], 15)
+        self.assertEqual(raw[diagnostic['range']['start_byte']:diagnostic['range']['end_byte']], b'<div>')
+
     def test_jsx_script_alias_uses_javascript_structure_with_original_ranges(self):
         raw = ('<script lang="jsx">\r\n'
                'export const Widget = () => <button>go</button>;\r\n'

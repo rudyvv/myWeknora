@@ -38,14 +38,21 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	rejectedVue := []byte("<script src=\"../private.js\"></script>\r\n")
 	missingVue := []byte("<script src=\"./missing.js\"></script>\r\n")
 	unknownVue := []byte("<template lang=\"pug\">\r\nsection unknown\r\n</template>\r\n")
+	dialectVue := []byte("<template lang=\"ts\">templateDialectMarker</template>\r\n" +
+		"<style lang=\"json\">styleDialectMarker</style>\r\n" +
+		"<script lang=\"ts\">\r\nexport const scriptDialectMarker = 1;\r\n</script>\r\n")
+	diagnosticVue := []byte("<template><div>first</template>\r\n" +
+		"<style lang=\"scss\">.diagnosticStyleMarker { color: red; }</style>\r\n")
 	api := []byte("export function send(name) { return `预约 ${name}`; }\r\n")
 	files := map[string][]byte{
-		"src/components/BookingPanel.vue":  component,
-		"src/components/ExternalPanel.vue": externalVue,
-		"src/components/RejectedPanel.vue": rejectedVue,
-		"src/components/MissingPanel.vue":  missingVue,
-		"src/components/UnknownPanel.vue":  unknownVue,
-		"src/components/api.js":            api,
+		"src/components/BookingPanel.vue":    component,
+		"src/components/ExternalPanel.vue":   externalVue,
+		"src/components/RejectedPanel.vue":   rejectedVue,
+		"src/components/MissingPanel.vue":    missingVue,
+		"src/components/UnknownPanel.vue":    unknownVue,
+		"src/components/DialectPanel.vue":    dialectVue,
+		"src/components/DiagnosticPanel.vue": diagnosticVue,
+		"src/components/api.js":              api,
 	}
 	f := newJavaSourceFixture(t, files)
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
@@ -85,6 +92,79 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 			"evidence is one verifiable contiguous region, never concatenated across SFC blocks")
 		require.Contains(t, evidence.GitLabURL, "/-/blob/"+f.sha+"/src/components/BookingPanel.vue#L")
 	}
+
+	findIndexedEvidence := func(query, logicalPath, contentMarker string) (*types.SearchResult, *types.SourceEvidence) {
+		t.Helper()
+		hits, searchErr := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
+			QueryText: query, MatchCount: 100, SourceIDs: []string{f.ds.ID},
+			DisableVectorMatch: true, SkipContextEnrichment: true,
+		})
+		require.NoError(t, searchErr)
+		for _, candidate := range hits {
+			if candidate.Metadata["source_path"] != logicalPath || !strings.Contains(candidate.Content, contentMarker) {
+				continue
+			}
+			return candidate, source.Evidence(candidate.ChunkMetadata)
+		}
+		return nil, nil
+	}
+	for _, test := range []struct {
+		query, marker, kind, language, quality string
+	}{
+		{"templateDialectMarker", "templateDialectMarker", "template", "ts", "unknown_preprocess"},
+		{"styleDialectMarker", "styleDialectMarker", "style", "json", "unknown_preprocess"},
+		{"scriptDialectMarker", "scriptDialectMarker", "script", "ts", "structural"},
+	} {
+		hit, evidence := findIndexedEvidence(test.query, "src/components/DialectPanel.vue", test.marker)
+		require.NotNil(t, hit, "keyword retrieval should find the indexed %s block", test.kind)
+		require.NotNil(t, evidence)
+		require.NotNil(t, evidence.Region)
+		require.Equal(t, test.kind, evidence.Region.Kind)
+		require.Equal(t, test.language, evidence.Region.Language)
+		require.Equal(t, test.quality, evidence.Region.Quality)
+		require.Equal(t, test.quality, evidence.Quality)
+		area := evidence.Range
+		require.Equal(t, string(dialectVue[area.StartByte:area.EndByte]), hit.Content)
+	}
+
+	diagnosticHit, diagnosticEvidence := findIndexedEvidence(
+		"descriptor warning", "src/components/DiagnosticPanel.vue", "first")
+	require.NotNil(t, diagnosticHit, "the parser's safe warning label should be searchable from published index text")
+	require.NotNil(t, diagnosticEvidence)
+	require.NotNil(t, diagnosticEvidence.Region)
+	require.Equal(t, "template", diagnosticEvidence.Region.Kind)
+	require.Equal(t, "degraded", diagnosticEvidence.Quality)
+	require.Equal(t, "degraded", diagnosticEvidence.Region.Quality)
+	diagnosticArea := diagnosticEvidence.Range
+	require.Equal(t, string(diagnosticVue[diagnosticArea.StartByte:diagnosticArea.EndByte]), diagnosticHit.Content)
+	require.Len(t, diagnosticEvidence.Diagnostics, 1)
+	require.Equal(t, "vue_sfc_parse_warning", diagnosticEvidence.Diagnostics[0].Code)
+	require.Equal(t, types.SourceRange{StartByte: 10, EndByte: 15, StartLine: 1, EndLine: 1}, diagnosticEvidence.Diagnostics[0].Range)
+	modelOutput := modelcontext.NewRegistry(true).ModelToolResultForTool("knowledge_search", &types.ToolResult{
+		Success: true, Data: map[string]interface{}{
+			"display_type": "search_results",
+			"results": []map[string]interface{}{{
+				"chunk_id": diagnosticHit.ID, "knowledge_id": diagnosticHit.KnowledgeID,
+				"knowledge_base_id": f.kb.ID, "knowledge_title": diagnosticHit.KnowledgeTitle,
+				"content": diagnosticHit.Content, "source_evidence": diagnosticEvidence,
+			}},
+		},
+	})
+	require.Contains(t, modelOutput, `sfc_diagnostics="vue_sfc_parse_warning@L1-L1:`)
+	require.Contains(t, modelOutput, "original bytes are retained")
+	require.NotContains(t, modelOutput, `resolved_path=`)
+	require.NotContains(t, modelOutput, `message=`)
+
+	styleHit, styleEvidence := findIndexedEvidence(
+		"diagnosticStyleMarker", "src/components/DiagnosticPanel.vue", "diagnosticStyleMarker")
+	require.NotNil(t, styleHit)
+	require.NotNil(t, styleEvidence)
+	require.NotNil(t, styleEvidence.Region)
+	require.Equal(t, "style", styleEvidence.Region.Kind)
+	require.Equal(t, "structural", styleEvidence.Quality)
+	styleArea := styleEvidence.Range
+	require.Equal(t, string(diagnosticVue[styleArea.StartByte:styleArea.EndByte]), styleHit.Content)
+	require.Empty(t, styleEvidence.Diagnostics, "a neighboring unaffected block must not inherit the template warning")
 
 	var bookingID string
 	require.NoError(t, f.db.Raw("SELECT id FROM source_files WHERE path=?", "src/components/BookingPanel.vue").Scan(&bookingID).Error)

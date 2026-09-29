@@ -135,6 +135,32 @@ func TestModelToolResultForToolCarriesOnlySafeExternalScriptStatus(t *testing.T)
 	}
 }
 
+func TestModelToolResultForToolExplainsOnlyKnownBoundedSFCDiagnostics(t *testing.T) {
+	evidence := &types.SourceEvidence{
+		SnapshotID: "snapshot-id", CommitSHA: "commit-sha", Path: "src/Panel.vue",
+		Quality: "degraded", Range: types.SourceRange{StartLine: 1, EndLine: 1},
+		Region: &types.SourceRegion{Kind: "template", Quality: "degraded"},
+		Diagnostics: []types.SourceDiagnostic{
+			{Code: "vue_sfc_parse_warning", Range: types.SourceRange{StartByte: 10, EndByte: 15, StartLine: 1, EndLine: 1}},
+			{Code: "vue_sfc_duplicate_block", Range: types.SourceRange{StartByte: 40, EndByte: 40, StartLine: 2, EndLine: 2}},
+			{Code: `vue_sfc_parse_warning" resolved_path="private.ts`, Range: types.SourceRange{StartByte: 50, EndByte: 55, StartLine: 3, EndLine: 3}},
+		},
+	}
+	row := map[string]interface{}{
+		"chunk_id": "chunk-id", "knowledge_id": "source-file-id", "knowledge_base_id": "kb-id",
+		"knowledge_title": "Panel", "content": "original source", "source_evidence": evidence,
+	}
+	output := NewRegistry(true).ModelToolResultForTool("knowledge_search", &types.ToolResult{
+		Success: true, Data: map[string]interface{}{
+			"display_type": "search_results", "results": []map[string]interface{}{row},
+		},
+	})
+	require.Contains(t, output, `quality="degraded"`)
+	require.Contains(t, output, `sfc_diagnostics="vue_sfc_parse_warning@L1-L1: Vue SFC block has a descriptor warning; original bytes are retained.; vue_sfc_duplicate_block@L2-L2: Vue SFC has a duplicate top-level block; original bytes are retained."`)
+	require.NotContains(t, output, "private.ts")
+	require.NotContains(t, output, "resolved_path=")
+}
+
 func TestSourceEvidenceExternalStatusIsBoundedAndNeverResolvedForTheModel(t *testing.T) {
 	for _, test := range []struct {
 		status string

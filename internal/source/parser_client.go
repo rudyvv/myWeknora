@@ -109,6 +109,11 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 			if !validSourceRegion(chunk.Region) {
 				return nil, fmt.Errorf("source parser returned invalid chunk region")
 			}
+			for _, diagnostic := range chunk.Diagnostics {
+				if !validSourceDiagnostic(language, raw, span, diagnostic) {
+					return nil, fmt.Errorf("source parser returned invalid diagnostic coordinates")
+				}
+			}
 			for _, context := range chunk.Context {
 				p := context.Range
 				if p.StartByte < 0 || p.EndByte < p.StartByte || p.EndByte > len(raw) || string(raw[p.StartByte:p.EndByte]) != context.Text || !validSourceLines(raw, p) {
@@ -167,12 +172,33 @@ func validSourceRange(raw []byte, span types.SourceRange) bool {
 	return span.StartByte >= 0 && span.EndByte >= span.StartByte && span.EndByte <= len(raw) && utf8.Valid(raw[span.StartByte:span.EndByte]) && validSourceLines(raw, span)
 }
 
+// Diagnostics are attributed by start byte; their verified source range may
+// extend beyond the single chunk that owns that position.
+func validSourceDiagnostic(language string, raw []byte, chunk types.SourceRange, diagnostic types.SourceDiagnostic) bool {
+	if language != "vue" || (diagnostic.Code != "vue_sfc_parse_warning" && diagnostic.Code != "vue_sfc_duplicate_block") {
+		return false
+	}
+	return chunk.StartByte <= diagnostic.Range.StartByte && diagnostic.Range.StartByte < chunk.EndByte &&
+		validSourceRange(raw, diagnostic.Range)
+}
+
 // SourceIndexText is derived index text, not a contiguous original fragment.
 // Only Chunk.Content and separately ranged context may be shown as code evidence.
 func SourceIndexText(path string, chunk types.ParsedSourceChunk) string {
 	parts := []string{path, strings.Join(chunk.Symbols, " ")}
 	if chunk.Region != nil {
 		parts = append(parts, "Vue "+chunk.Region.Kind+" region "+chunk.Region.Language+" "+chunk.Region.Quality)
+	}
+	for index, diagnostic := range chunk.Diagnostics {
+		if index == 4 {
+			break
+		}
+		switch diagnostic.Code {
+		case "vue_sfc_parse_warning":
+			parts = append(parts, "Vue SFC block descriptor warning; original source retained")
+		case "vue_sfc_duplicate_block":
+			parts = append(parts, "Vue SFC duplicate top-level block warning; original source retained")
+		}
 	}
 	for _, c := range chunk.Context {
 		parts = append(parts, c.Text)
