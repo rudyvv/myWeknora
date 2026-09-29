@@ -5,6 +5,7 @@ from importlib.metadata import version
 import json
 from pathlib import Path
 
+from mybatis_parser import extract_java_facts, parse_mybatis_xml
 import tree_sitter_language_pack as pack
 
 PACK_VERSION = '1.19.0'
@@ -18,7 +19,8 @@ BUNDLES = {
 
 def load_runtime(cache):
     """Never prefetch here. Validate every advertised grammar before loading it."""
-    if version('tree-sitter-language-pack') != PACK_VERSION or version('tree-sitter') != '0.26.0':
+    if (version('tree-sitter-language-pack') != PACK_VERSION or version('tree-sitter') != '0.26.0'
+            or version('sqlglot') != '30.20.0'):
         raise RuntimeError('parser dependency version differs from requirements.lock')
     cache = Path(cache).resolve()
     lock = json.loads((cache / 'grammar.lock.json').read_text(encoding='utf-8'))
@@ -38,7 +40,7 @@ def load_runtime(cache):
         grammar = cache / relative
         if grammar.resolve().parent != (cache / expected).resolve() or any(p.is_symlink() for p in [grammar, grammar.parent, grammar.parent.parent, grammar.parent.parent.parent]) or hashlib.sha256(grammar.read_bytes()).hexdigest() != entry['grammar_sha256']:
             raise RuntimeError('grammar checksum mismatch')
-        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-3-' + entry['grammar_sha256']
+        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-5-' + entry['grammar_sha256']
     pack.configure(pack.PackConfig(cache_dir=str(cache)))
     for language in versions:
         # Only already verified libraries can reach the language registry.
@@ -50,8 +52,9 @@ def runtime_version(versions):
     """One stable process version binds the full verified grammar set and rules."""
     if not versions:
         return ''
-    fingerprint = hashlib.sha256(json.dumps(versions, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    return 'source-pack-' + PACK_VERSION + '-rules-3-' + fingerprint[:32]
+    processing = {'grammars': versions, 'sqlglot': version('sqlglot'), 'xml_rules': 'mybatis-expat-rules-1'}
+    fingerprint = hashlib.sha256(json.dumps(processing, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return 'source-pack-' + PACK_VERSION + '-rules-5-' + fingerprint[:32]
 
 
 def parse_source(raw, max_bytes, parser_version, language, path):
@@ -65,11 +68,13 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         start = symbol['signature_range']['start_byte']
         prefix = raw[start:min(symbol['signature_range']['end_byte'], start + 512)].decode('utf-8', errors='ignore')
         return {'text': prefix, 'range': span(start, start + len(prefix.encode()))}
+    xml_result = parse_mybatis_xml(raw) if language == 'mybatis-xml' else None
+    chunk_language = 'java' if language == 'mybatis-xml' else language
     parsed = pack.process(text, pack.ProcessConfig(
-        language=language, structure=True, symbols=True, diagnostics=True,
+        language=chunk_language, structure=language != 'mybatis-xml', symbols=language != 'mybatis-xml', diagnostics=language != 'mybatis-xml',
         chunk_max_size=max_bytes, max_source_bytes=16 << 20, parse_timeout_ms=4000,
     ))
-    tree = pack.get_parser(language).parse(raw)
+    tree = None if language == 'mybatis-xml' else pack.get_parser(language).parse(raw)
     symbols = []
     java_declarations = {
         'class_declaration': 'class', 'interface_declaration': 'interface',
@@ -112,7 +117,7 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         if len(symbols) > 10000:
             raise RuntimeError('source declaration limit exceeded')
     # Language node extraction rules only; parsing and structural splitting stay upstream.
-    stack = [(tree.root_node, [])]
+    stack = [] if tree is None else [(tree.root_node, [])]
     while stack:
         node, parents = stack.pop()
         lineage = parents
@@ -169,7 +174,13 @@ def parse_source(raw, max_bytes, parser_version, language, path):
                 lineage = parents
         stack.extend((child, lineage) for child in reversed(node.named_children))
     symbols.sort(key=lambda symbol: symbol['range']['start_byte'])
-    quality = 'syntax_error' if tree.root_node.has_error else 'structural'
+    quality = (xml_result['quality'] if xml_result is not None
+               else ('syntax_error' if tree.root_node.has_error else 'structural'))
+    facts, diagnostics = [], []
+    if language == 'java':
+        facts, diagnostics = extract_java_facts(raw, tree, path)
+    elif xml_result is not None:
+        facts, diagnostics = xml_result['facts'], xml_result['diagnostics']
     chunks = []
     cursor = 0
     for chunk in parsed.chunks:
@@ -179,7 +190,10 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         cursor = end
         chunks.append({
             'content': chunk.content, 'range': span(start, end), 'quality': quality,
-            'symbols': [s['qualified_name'] for s in symbols if s['range']['start_byte'] < end and s['range']['end_byte'] > start],
+            'symbols': ([s['qualified_name'] for s in symbols if s['range']['start_byte'] < end and s['range']['end_byte'] > start]
+                        + [((fact.get('namespace', '') + '.') if fact.get('namespace') else '')
+                           + fact.get('name', fact.get('statement_type', fact['kind']))
+                           for fact in facts if fact['range']['start_byte'] < end and fact['range']['end_byte'] > start]),
             'context': [context(s) for s in symbols
                         if s['range']['start_byte'] <= start and s['range']['end_byte'] >= end][-2:],
         })
@@ -187,4 +201,4 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         raise RuntimeError('chunker did not cover the entire original file')
     return {'parser_version': parser_version, 'sha256': hashlib.sha256(raw).hexdigest(),
             'byte_length': len(raw), 'encoding': 'utf-8-bom' if raw.startswith(b'\xef\xbb\xbf') else 'utf-8',
-            'quality': quality, 'symbols': symbols, 'chunks': chunks}
+            'quality': quality, 'symbols': symbols, 'chunks': chunks, 'facts': facts, 'diagnostics': diagnostics}

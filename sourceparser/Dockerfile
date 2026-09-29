@@ -12,7 +12,7 @@ WORKDIR /opt/source-parser
 ENV PATH=/opt/venv/bin:$PATH SOURCE_PARSER_CACHE=/opt/source-parser/grammar PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /opt/source-parser/grammar ./grammar
-COPY runtime.py server.py ./
+COPY runtime.py mybatis_parser.py server.py ./
 COPY LICENSE-*.txt ./
 RUN chown -R 65532:65532 /opt/source-parser/grammar && chmod -R a+rX,a-w /opt/source-parser /opt/venv
 USER 65532:65532

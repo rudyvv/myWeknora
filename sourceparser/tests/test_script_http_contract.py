@@ -176,8 +176,8 @@ class ScriptHTTPContract(unittest.TestCase):
     def test_health_advertises_only_verified_offline_grammars(self):
         status, health = self.request('/health')
         self.assertEqual(status, 200, health)
-        self.assertEqual(health['languages'], ['java', 'javascript', 'tsx', 'typescript'])
-        self.assertIn('rules-3', health['parser_version'])
+        self.assertEqual(health['languages'], ['java', 'javascript', 'mybatis-xml', 'tsx', 'typescript'])
+        self.assertIn('rules-5', health['parser_version'])
 
     def test_legacy_java_cache_stays_ready_but_changed_script_grammar_cannot_advertise_readiness(self):
         cache = Path(os.environ['SOURCE_PARSER_CACHE'])
@@ -211,7 +211,7 @@ class ScriptHTTPContract(unittest.TestCase):
             (destination / 'grammar.lock.json').write_text(json.dumps(legacy), encoding='utf-8')
             status, health = health_for(destination)
             self.assertEqual(status, 200, health)
-            self.assertEqual(health['languages'], ['java'])
+            self.assertEqual(health['languages'], ['java', 'mybatis-xml'])
             changed = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             changed['grammars'] = {'javascript': dict(lock['grammars']['javascript'])}
             grammar = destination / changed['grammars']['javascript']['grammar']
