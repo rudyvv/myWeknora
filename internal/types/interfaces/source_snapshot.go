@@ -18,6 +18,7 @@ type SourceSnapshotRepository interface {
 	SetState(context.Context, string, string, string) error
 	UpdateProgress(context.Context, *types.SourceSnapshot, []types.SourceSnapshotMember) error
 	StageFile(context.Context, *types.SourceFile, *types.SourceFileVersion, []*types.Chunk) error
+	StageRelations(context.Context, uint64, string, string, []types.SourceCodeRelation) error
 	StageIndexes(context.Context, []*types.IndexInfo, map[string][]float32) error
 	Publish(context.Context, *types.SourceSnapshot, *types.DataSource, *types.KnowledgeBase, int) error
 	GetRun(context.Context, uint64, string, string) (*types.SourceRunResult, error)

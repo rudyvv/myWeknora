@@ -1,6 +1,12 @@
 -- Static MyBatis/SQL/Mapper edges are immutable per source snapshot. The
 -- parser may report uncertain edges, but consumers must never promote them to
 -- a proven call or table relationship.
+ALTER TABLE source_file_versions
+    ADD COLUMN IF NOT EXISTS facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE source_snapshots
+    ADD COLUMN IF NOT EXISTS relation_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS relations_staged BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS source_code_relations (
     id VARCHAR(36) PRIMARY KEY,
     tenant_id BIGINT NOT NULL,
@@ -19,6 +25,7 @@ CREATE TABLE IF NOT EXISTS source_code_relations (
     to_range JSONB NOT NULL,
     determinacy VARCHAR(24) NOT NULL,
     quality VARCHAR(24) NOT NULL,
+    resolution_reason TEXT NOT NULL DEFAULT '',
     context JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -28,3 +35,5 @@ CREATE INDEX IF NOT EXISTS source_code_relations_from_key
     ON source_code_relations(tenant_id, data_source_id, snapshot_id, from_key);
 CREATE INDEX IF NOT EXISTS source_code_relations_to_key
     ON source_code_relations(tenant_id, data_source_id, snapshot_id, to_key);
+CREATE INDEX IF NOT EXISTS source_code_relations_from_file
+    ON source_code_relations(tenant_id, data_source_id, snapshot_id, from_file_id, from_version_id);

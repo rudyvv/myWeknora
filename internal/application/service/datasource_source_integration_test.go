@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,6 +76,163 @@ func TestSourceFirstJavaSnapshotIsPublishedAndSearchable(t *testing.T) {
 		require.NoError(t, searchErr)
 		require.NotEmpty(t, hits, "both real index routes must find the known Java method")
 	}
+}
+
+func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
+	files := map[string][]byte{
+		"src/PushScheduleMapper.java": []byte("package demo; public interface PushScheduleMapper { Schedule getPushSchedule(Long id); }\n"),
+		"src/mapper/PushScheduleMapper.xml": []byte(`<?xml version="1.0"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="demo.PushScheduleMapper">
+  <resultMap id="ScheduleMap" type="demo.Schedule"><id column="id" property="id"/></resultMap>
+  <sql id="columns">ORDER BY id</sql>
+  <select id="getPushSchedule" resultMap="ScheduleMap">
+    SELECT id FROM push_schedule WHERE id = #{id} <include refid="columns"/>
+  </select>
+</mapper>`),
+	}
+	f := newJavaSourceFixture(t, files)
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, _ := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+
+	var javaFile, xmlFile types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/PushScheduleMapper.java").Take(&javaFile).Error)
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/mapper/PushScheduleMapper.xml").Take(&xmlFile).Error)
+	var snapshot types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&snapshot).Error)
+	require.True(t, snapshot.RelationsStaged)
+	require.Greater(t, snapshot.RelationCount, 0)
+
+	var mapperRelation types.SourceCodeRelation
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='mapper_statement' AND determinacy='certain'", snapshot.ID).Take(&mapperRelation).Error)
+	require.Equal(t, javaFile.ID, mapperRelation.FromFileID)
+	require.Equal(t, xmlFile.ID, mapperRelation.ToFileID)
+	require.Equal(t, "src/mapper/PushScheduleMapper.xml", mapperRelation.ToPath)
+	require.Equal(t, snapshot.ID, mapperRelation.SnapshotID)
+	var xmlVersion types.SourceFileVersion
+	require.NoError(t, f.db.Where("source_file_id=? AND snapshot_id=?", xmlFile.ID, snapshot.ID).Take(&xmlVersion).Error)
+	var storedFacts []types.ParsedSourceFact
+	require.NoError(t, json.Unmarshal(xmlVersion.Facts, &storedFacts))
+	factKinds := map[string]bool{}
+	for _, fact := range storedFacts {
+		factKinds[fact.Kind] = true
+	}
+	require.True(t, factKinds["mybatis_statement"])
+	require.True(t, factKinds["mybatis_sql_fragment"])
+	var includeRelation, resultMapRelation, tableRelation types.SourceCodeRelation
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='include' AND determinacy='certain'", snapshot.ID).Take(&includeRelation).Error)
+	require.Equal(t, xmlFile.ID, includeRelation.FromFileID)
+	require.Equal(t, xmlFile.ID, includeRelation.ToFileID)
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='result_map' AND determinacy='certain'", snapshot.ID).Take(&resultMapRelation).Error)
+	require.Equal(t, xmlFile.ID, resultMapRelation.FromFileID)
+	require.Equal(t, xmlFile.ID, resultMapRelation.ToFileID)
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='table_access' AND to_key='push_schedule' AND determinacy='certain'", snapshot.ID).Take(&tableRelation).Error)
+	require.Empty(t, tableRelation.ToFileID, "database table facts must not fabricate a readable source-file target")
+	require.Empty(t, tableRelation.ResolutionReason)
+
+	for _, params := range []types.SearchParams{
+		{QueryText: "getPushSchedule", MatchCount: 20, DisableVectorMatch: true},
+		{QueryText: "getPushSchedule", MatchCount: 20, DisableKeywordsMatch: true},
+	} {
+		hits, searchErr := f.kbs.HybridSearch(f.ctx, f.kb.ID, params)
+		require.NoError(t, searchErr)
+		paths := map[string]bool{}
+		for _, hit := range hits {
+			var evidence struct {
+				Source types.SourceEvidence `json:"source"`
+			}
+			require.NoError(t, json.Unmarshal(hit.ChunkMetadata, &evidence))
+			paths[evidence.Source.Path] = true
+		}
+		require.True(t, paths["src/PushScheduleMapper.java"], "mapper method is searchable in each real index")
+		require.True(t, paths["src/mapper/PushScheduleMapper.xml"], "XML statement is indexed independently of Java")
+	}
+
+	javaView, err := f.knowledge.GetSourceFile(f.ctx, javaFile.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(files["src/PushScheduleMapper.java"]), javaView.Content)
+	require.Empty(t, javaView.Relations, "single-file public scope must not expose the linked XML endpoint")
+
+	pinned, release, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	})
+	require.NoError(t, err)
+	defer release()
+	linked, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, linked.Relations)
+	require.Contains(t, linked.Relations, mapperRelation)
+	xmlView, err := f.knowledge.GetSourceFile(pinned, xmlFile.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(files["src/mapper/PushScheduleMapper.xml"]), xmlView.Content)
+
+	// A failed relation stage is part of the snapshot build, not a partial
+	// update: the preceding publication and its pinned relation remain usable.
+	actualSnapshots := f.service.sourceSnapshots
+	f.service.sourceSnapshots = relationStageFailure{SourceSnapshotRepository: actualSnapshots}
+	changedXML := strings.Replace(string(files["src/mapper/PushScheduleMapper.xml"]), "push_schedule", "push_schedule_next", 1)
+	f.advanceFiles(map[string][]byte{"src/mapper/PushScheduleMapper.xml": []byte(changedXML)})
+	failedLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	failedPayload, _ := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: failedLog.ID, Trigger: "manual"})
+	require.ErrorContains(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, failedPayload)), "injected relation staging failure")
+	f.service.sourceSnapshots = actualSnapshots
+	failedResult, err := f.service.GetSyncLog(f.ctx, failedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusFailed, failedResult.Status)
+	var stillPublished types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id=?", f.ds.ID).Take(&stillPublished).Error)
+	require.Equal(t, snapshot.ID, stillPublished.SnapshotID)
+	failedRun, err := actualSnapshots.GetRun(f.ctx, 1, f.ds.ID, failedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", failedRun.Snapshot.State)
+	var failedRelationCount int64
+	require.NoError(t, f.db.Model(&types.SourceCodeRelation{}).Where("snapshot_id=?", failedRun.Snapshot.ID).Count(&failedRelationCount).Error)
+	require.Zero(t, failedRelationCount)
+	stillPinned, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.Contains(t, stillPinned.Relations, mapperRelation)
+
+	// An empty complete manifest clears the active relation set without
+	// rewriting the prior snapshot pinned by this read lease.
+	f.advanceFiles(map[string][]byte{
+		"src/PushScheduleMapper.java":       nil,
+		"src/mapper/PushScheduleMapper.xml": nil,
+	})
+	nextLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	nextPayload, _ := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: nextLog.ID, Trigger: "manual"})
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, nextPayload)))
+	var emptySnapshot types.SourceSnapshot
+	require.NoError(t, f.db.Joins("JOIN source_publications p ON p.snapshot_id=source_snapshots.id").Where("p.data_source_id=?", f.ds.ID).Take(&emptySnapshot).Error)
+	require.NotEqual(t, snapshot.ID, emptySnapshot.ID)
+	require.True(t, emptySnapshot.RelationsStaged)
+	require.Zero(t, emptySnapshot.RelationCount)
+	var retained int64
+	require.NoError(t, f.db.Model(&types.SourceCodeRelation{}).Where("snapshot_id=? AND id=?", snapshot.ID, mapperRelation.ID).Count(&retained).Error)
+	require.EqualValues(t, 1, retained)
+	oldPinned, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.Equal(t, snapshot.ID, oldPinned.SnapshotID)
+	require.Contains(t, oldPinned.Relations, mapperRelation)
+	_, err = f.knowledge.GetSourceFile(f.ctx, javaFile.ID)
+	require.Error(t, err, "the empty current publication must not expose a removed source file")
+}
+
+type relationStageFailure struct {
+	interfaces.SourceSnapshotRepository
+}
+
+func (r relationStageFailure) StageRelations(context.Context, uint64, string, string, []types.SourceCodeRelation) error {
+	return errors.New("injected relation staging failure")
 }
 
 func TestSourcePublishedChunksRemainReadOnlyButDescriptionMayChange(t *testing.T) {
@@ -487,6 +645,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	incrementalMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000104_source_incremental_artifacts.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(incrementalMigration)).Error)
+	relationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000107_source_code_relations.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(relationMigration)).Error)
 	parser := exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
 	parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
 	stdout, err := parser.StdoutPipe()

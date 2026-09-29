@@ -109,7 +109,7 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 		canPublishEmpty := publishedErr == nil && previous != nil
 		pipeline := &preview.Checks[3]
 		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && supportedOnly && (count > 0 || canPublishEmpty) && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
-		pipeline.Message = "source sync requires explicit paths, at most 100 Java/JavaScript/TypeScript files and 16 MiB with built-in PostgreSQL indexes; an existing publication may become empty"
+		pipeline.Message = "source sync requires explicit paths, at most 100 Java/JavaScript/TypeScript/MyBatis XML files and 16 MiB with built-in PostgreSQL indexes; an existing publication may become empty"
 		preview.CanSync = true
 		for _, check := range preview.Checks {
 			preview.CanSync = preview.CanSync && check.Ready

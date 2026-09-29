@@ -30,6 +30,8 @@ func LanguageForPath(logicalPath string) string {
 		return "typescript"
 	case ".tsx":
 		return "tsx"
+	case ".xml":
+		return "mybatis-xml"
 	default:
 		return ""
 	}
@@ -79,6 +81,34 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 		var parsed types.ParsedSourceFile
 		if json.Unmarshal(data, &parsed) != nil || parsed.ParserVersion == "" || parsed.SHA256 != digest || parsed.ByteLength != len(raw) {
 			return nil, fmt.Errorf("source parser content/hash mismatch")
+		}
+		if len(parsed.Facts) > 50000 || len(parsed.Diagnostics) > 50000 {
+			return nil, fmt.Errorf("source parser exceeded its fact or diagnostic limit")
+		}
+		allowedFacts := map[string]bool{
+			"java_mapper_method": true, "java_field": true, "java_mapper_call": true,
+			"java_annotation_sql": true, "mybatis_mapper": true, "mybatis_statement": true,
+			"mybatis_result_map": true, "mybatis_sql_fragment": true, "mybatis_include": true,
+			"sql_table": true,
+		}
+		for _, fact := range parsed.Facts {
+			if !allowedFacts[fact.Kind] || !validSourceRange(raw, fact.Range) || fact.Quality == "" {
+				return nil, fmt.Errorf("source parser returned invalid static fact coordinates")
+			}
+			if fact.Text != "" && string(raw[fact.Range.StartByte:fact.Range.EndByte]) != fact.Text {
+				return nil, fmt.Errorf("source parser fact does not match original bytes")
+			}
+			if fact.Kind == "sql_table" && fact.Name == "" {
+				return nil, fmt.Errorf("source parser returned an empty table fact")
+			}
+		}
+		for _, diagnostic := range parsed.Diagnostics {
+			if diagnostic.Code == "" || diagnostic.Message == "" {
+				return nil, fmt.Errorf("source parser returned an invalid diagnostic")
+			}
+			if diagnostic.Range != (types.SourceRange{}) && !validSourceRange(raw, diagnostic.Range) {
+				return nil, fmt.Errorf("source parser returned invalid diagnostic coordinates")
+			}
 		}
 		for _, symbol := range parsed.Symbols {
 			if !validSourceRange(raw, symbol.Range) || !validSourceRange(raw, symbol.SignatureRange) || symbol.SignatureRange.StartByte < symbol.Range.StartByte || symbol.SignatureRange.EndByte > symbol.Range.EndByte || string(raw[symbol.SignatureRange.StartByte:symbol.SignatureRange.EndByte]) != symbol.Signature {

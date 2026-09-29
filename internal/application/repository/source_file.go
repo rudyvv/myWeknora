@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"github.com/Tencent/WeKnora/internal/source"
 
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -26,9 +26,9 @@ func (r *knowledgeRepository) readPublishedSourceFile(ctx context.Context, tenan
 		return nil, fmt.Errorf("source file reader requires PostgreSQL")
 	}
 	var file types.SourceFileView
-	columns := "sf.id AS knowledge_id, sf.data_source_id, sm.path, ss.id AS snapshot_id, ss.project_id, ss.commit_sha, ss.repository_url, sv.id AS file_version_id, sv.sha256, sv.encoding, sv.quality, sv.parser_version, octet_length(sv.content) AS file_size"
+	columns := "sf.id AS knowledge_id, sf.knowledge_base_id, sf.data_source_id, sm.path, ss.id AS snapshot_id, ss.project_id, ss.commit_sha, ss.repository_url, sv.id AS file_version_id, sv.sha256, sv.encoding, sv.quality, sv.parser_version, octet_length(sv.content) AS file_size"
 	if content {
-		columns += ", sv.content AS raw_content, sv.symbols"
+		columns += ", sv.content AS raw_content, sv.symbols, sv.facts, sv.diagnostics"
 	}
 	query := r.db.WithContext(ctx).Table("source_files sf").
 		Select(columns).
@@ -54,5 +54,33 @@ func (r *knowledgeRepository) readPublishedSourceFile(ctx context.Context, tenan
 		return nil, fmt.Errorf("stored source file checksum mismatch")
 	}
 	file.Content = string(file.RawContent)
+	if source.HasReadScope(ctx) {
+		file.Relations, err = r.readVisibleSourceRelations(ctx, tenant, &file)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &file, nil
+}
+
+func (r *knowledgeRepository) readVisibleSourceRelations(ctx context.Context, tenant uint64, file *types.SourceFileView) ([]types.SourceCodeRelation, error) {
+	var relations []types.SourceCodeRelation
+	query := r.db.WithContext(ctx).Table("source_code_relations r").Select("r.*").
+		Joins(`JOIN source_snapshots rs ON rs.id=r.snapshot_id AND rs.tenant_id=r.tenant_id AND rs.data_source_id=r.data_source_id AND rs.state='published'`).
+		Joins(`JOIN source_snapshot_members fm ON fm.snapshot_id=r.snapshot_id AND fm.source_file_id=r.from_file_id AND fm.file_version_id=r.from_version_id AND fm.path=r.from_path AND fm.status='parsed'`).
+		Joins(`JOIN source_file_versions fv ON fv.id=r.from_version_id AND fv.source_file_id=r.from_file_id AND fv.snapshot_id=r.snapshot_id`).
+		Joins(`JOIN source_files ff ON ff.id=r.from_file_id AND ff.tenant_id=r.tenant_id AND ff.data_source_id=r.data_source_id`).
+		Joins(`JOIN knowledges fk ON fk.id=ff.id AND fk.tenant_id=ff.tenant_id AND fk.knowledge_base_id=ff.knowledge_base_id AND fk.deleted_at IS NULL`).
+		Joins(`LEFT JOIN source_snapshot_members tm ON tm.snapshot_id=r.snapshot_id AND tm.source_file_id=r.to_file_id AND tm.file_version_id=r.to_version_id AND tm.path=r.to_path AND tm.status='parsed'`).
+		Joins(`LEFT JOIN source_file_versions tv ON tv.id=r.to_version_id AND tv.source_file_id=r.to_file_id AND tv.snapshot_id=r.snapshot_id`).
+		Joins(`LEFT JOIN source_files tf ON tf.id=r.to_file_id AND tf.tenant_id=r.tenant_id AND tf.data_source_id=r.data_source_id`).
+		Joins(`LEFT JOIN knowledges tk ON tk.id=tf.id AND tk.tenant_id=tf.tenant_id AND tk.knowledge_base_id=tf.knowledge_base_id AND tk.deleted_at IS NULL`).
+		Where("r.tenant_id=? AND r.data_source_id=? AND r.snapshot_id=?", tenant, file.DataSourceID, file.SnapshotID).
+		Where("rs.knowledge_base_id=? AND ff.knowledge_base_id=? AND (r.to_file_id='' OR tf.knowledge_base_id=?)", file.KnowledgeBaseID, file.KnowledgeBaseID, file.KnowledgeBaseID).
+		Where("((r.from_file_id=? AND r.from_version_id=?) OR (r.to_file_id=? AND r.to_version_id=?))", file.KnowledgeID, file.FileVersionID, file.KnowledgeID, file.FileVersionID).
+		Where("(r.to_file_id='' OR (tm.source_file_id IS NOT NULL AND tv.id IS NOT NULL AND tf.id IS NOT NULL AND tk.id IS NOT NULL))").
+		Where(source.SnapshotSQL(ctx, "r.snapshot_id", "r.data_source_id", "r.from_file_id")).
+		Where("(r.to_file_id='' OR " + source.SnapshotSQL(ctx, "r.snapshot_id", "r.data_source_id", "r.to_file_id") + ")")
+	err := query.Order("r.from_path, r.kind, r.to_key").Limit(500).Find(&relations).Error
+	return relations, err
 }

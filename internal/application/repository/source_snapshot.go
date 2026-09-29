@@ -32,8 +32,11 @@ func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
 		EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_search') AND
 		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND tablename='embeddings' AND indexdef LIKE '%USING bm25%') AND
 		to_regclass('source_publications') IS NOT NULL AND
-  to_regclass('source_parsed_artifacts') IS NOT NULL AND
-  to_regclass('source_embedding_artifacts') IS NOT NULL`).Scan(&ready).Error
+		to_regclass('source_parsed_artifacts') IS NOT NULL AND
+		to_regclass('source_embedding_artifacts') IS NOT NULL AND
+		to_regclass('source_code_relations') IS NOT NULL AND
+		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_file_versions' AND column_name='facts') AND
+		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged')`).Scan(&ready).Error
 	if err != nil {
 		return err
 	}
@@ -94,6 +97,51 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 	})
 }
 
+func (r *sourceSnapshotRepository) StageRelations(ctx context.Context, tenant uint64, sourceID, snapshotID string, relations []types.SourceCodeRelation) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var snapshot types.SourceSnapshot
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND data_source_id=? AND state!='published' AND manifest_complete=true", snapshotID, tenant, sourceID).First(&snapshot).Error; err != nil {
+			return fmt.Errorf("source relation snapshot is unavailable")
+		}
+		if err := tx.Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenant, sourceID, snapshotID).Delete(&types.SourceCodeRelation{}).Error; err != nil {
+			return err
+		}
+		for i := range relations {
+			relation := &relations[i]
+			relation.TenantID, relation.DataSourceID, relation.SnapshotID = tenant, sourceID, snapshotID
+			if relation.FromFileID == "" || relation.FromVersionID == "" || relation.FromPath == "" {
+				return fmt.Errorf("source relation has no verified source endpoint")
+			}
+			var fromCount int64
+			if err := tx.Table("source_snapshot_members sm").Joins("JOIN source_file_versions sv ON sv.id=sm.file_version_id").
+				Joins("JOIN source_files sf ON sf.id=sm.source_file_id").
+				Where("sm.snapshot_id=? AND sm.path=? AND sm.status='parsed' AND sm.source_file_id=? AND sm.file_version_id=? AND sv.snapshot_id=sm.snapshot_id AND sf.tenant_id=? AND sf.data_source_id=? AND sf.knowledge_base_id=?", snapshotID, relation.FromPath, relation.FromFileID, relation.FromVersionID, tenant, sourceID, snapshot.KnowledgeBaseID).Count(&fromCount).Error; err != nil || fromCount != 1 {
+				return fmt.Errorf("source relation origin is outside its immutable snapshot")
+			}
+			if relation.ToFileID != "" || relation.ToVersionID != "" || relation.ToPath != "" {
+				if relation.ToFileID == "" || relation.ToVersionID == "" || relation.ToPath == "" {
+					return fmt.Errorf("source relation target endpoint is incomplete")
+				}
+				var toCount int64
+				if err := tx.Table("source_snapshot_members sm").Joins("JOIN source_file_versions sv ON sv.id=sm.file_version_id").
+					Joins("JOIN source_files sf ON sf.id=sm.source_file_id").
+					Where("sm.snapshot_id=? AND sm.path=? AND sm.status='parsed' AND sm.source_file_id=? AND sm.file_version_id=? AND sv.snapshot_id=sm.snapshot_id AND sf.tenant_id=? AND sf.data_source_id=? AND sf.knowledge_base_id=?", snapshotID, relation.ToPath, relation.ToFileID, relation.ToVersionID, tenant, sourceID, snapshot.KnowledgeBaseID).Count(&toCount).Error; err != nil || toCount != 1 {
+					return fmt.Errorf("source relation target is outside its immutable snapshot")
+				}
+			} else if relation.Determinacy == "uncertain" && relation.ResolutionReason == "" {
+				return fmt.Errorf("unresolved source relation has no diagnostic reason")
+			}
+		}
+		if len(relations) > 0 {
+			if err := tx.CreateInBatches(&relations, 100).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&types.SourceSnapshot{}).Where("id=? AND state!='published'", snapshotID).
+			Updates(map[string]any{"relation_count": len(relations), "relations_staged": true}).Error
+	})
+}
+
 func (r *sourceSnapshotRepository) StageIndexes(ctx context.Context, indexes []*types.IndexInfo, vectors map[string][]float32) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := pgrepo.NewPostgresRetrieveEngineRepository(tx).BatchSave(ctx, indexes, map[string]any{"embedding": vectors}); err != nil {
@@ -138,16 +186,21 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		if previous.SnapshotID != snapshot.PreviousSnapshotID {
 			return fmt.Errorf("source publication changed during preparation")
 		}
-		var counts struct{ Members, Files, Chunks, Embeddings int64 }
+		var counts struct{ Members, Files, Chunks, Embeddings, Relations int64 }
 		if err := tx.Raw(`SELECT
 			(SELECT count(*) FROM source_snapshot_members WHERE snapshot_id=?) AS members,
 			(SELECT count(*) FROM source_snapshot_members WHERE snapshot_id=? AND status='parsed') AS files,
 			(SELECT count(*) FROM source_chunk_references WHERE snapshot_id=?) AS chunks,
-			(SELECT count(*) FROM embeddings e JOIN source_chunk_references c ON c.chunk_id=e.chunk_id WHERE c.snapshot_id=? AND e.dimension=?) AS embeddings`,
-			snapshot.ID, snapshot.ID, snapshot.ID, snapshot.ID, dimension).Scan(&counts).Error; err != nil {
+			(SELECT count(*) FROM embeddings e JOIN source_chunk_references c ON c.chunk_id=e.chunk_id WHERE c.snapshot_id=? AND e.dimension=?) AS embeddings,
+			(SELECT count(*) FROM source_code_relations WHERE tenant_id=? AND data_source_id=? AND snapshot_id=?) AS relations`,
+			snapshot.ID, snapshot.ID, snapshot.ID, snapshot.ID, dimension, snapshot.TenantID, snapshot.DataSourceID, snapshot.ID).Scan(&counts).Error; err != nil {
 			return err
 		}
-		if counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks {
+		var relationStaged bool
+		if err := tx.Model(&types.SourceSnapshot{}).Select("relations_staged").Where("id=?", snapshot.ID).Scan(&relationStaged).Error; err != nil {
+			return err
+		}
+		if !relationStaged || counts.Relations != int64(snapshot.RelationCount) || counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks {
 			return fmt.Errorf("source membership or dual index preparation is incomplete")
 		}
 		// BM25 readiness is checked on the actual transaction's index database.

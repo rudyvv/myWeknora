@@ -119,7 +119,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	manifest, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, raw []byte) error {
 		language := source.LanguageForPath(file.Path)
 		if language == "" {
-			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript files only; narrow the included paths")
+			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript/MyBatis XML files only; narrow the included paths")
 		}
 		if !checkedLanguages[language] {
 			if !sourceParserReady(ctx, language) {
@@ -164,6 +164,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		return err
 	}
 	var indexes []*types.IndexInfo
+	relationMembers := make([]source.SourceRelationMember, 0, snapshot.FileCount)
 	for i := range result.Source.Members {
 		member := &result.Source.Members[i]
 		raw, selected := content[member.Path]
@@ -196,7 +197,9 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		fileID := member.SourceFileID
 		file := &types.SourceFile{ID: fileID, TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, Path: member.Path}
 		symbols, _ := json.Marshal(parsed.Symbols)
-		fileVersion := &types.SourceFileVersion{ID: uuid.NewString(), SourceFileID: fileID, SnapshotID: snapshot.ID, BlobSHA: member.BlobSHA, SHA256: parsed.SHA256, Content: raw, Encoding: parsed.Encoding, ParserVersion: parsed.ParserVersion, Quality: parsed.Quality, Symbols: types.JSON(symbols)}
+		facts, _ := json.Marshal(parsed.Facts)
+		diagnostics, _ := json.Marshal(parsed.Diagnostics)
+		fileVersion := &types.SourceFileVersion{ID: uuid.NewString(), SourceFileID: fileID, SnapshotID: snapshot.ID, BlobSHA: member.BlobSHA, SHA256: parsed.SHA256, Content: raw, Encoding: parsed.Encoding, ParserVersion: parsed.ParserVersion, Quality: parsed.Quality, Symbols: types.JSON(symbols), Facts: types.JSON(facts), Diagnostics: types.JSON(diagnostics)}
 		chunks := make([]*types.Chunk, len(parsed.Chunks))
 		for index, part := range parsed.Chunks {
 			evidence := types.SourceEvidence{DataSourceID: ds.ID, SnapshotID: snapshot.ID, FileVersionID: fileVersion.ID, ProjectID: snapshot.ProjectID, CommitSHA: snapshot.CommitSHA, Path: member.Path, Range: part.Range, Symbols: part.Symbols, Quality: part.Quality, Context: part.Context, GitLabURL: source.GitLabBlobURL(snapshot.RepositoryURL, snapshot.CommitSHA, member.Path, part.Range)}
@@ -208,9 +211,15 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		if err := s.sourceSnapshots.StageFile(ctx, file, fileVersion, chunks); err != nil {
 			return err
 		}
+		relationMembers = append(relationMembers, source.SourceRelationMember{Path: member.Path, FileID: fileID, VersionID: fileVersion.ID, Facts: parsed.Facts})
 		member.SourceFileID, member.FileVersionID, member.Status = fileID, fileVersion.ID, "parsed"
 		snapshot.ChunkCount += len(chunks)
 	}
+	relations := source.CorrelateSourceFacts(ds.TenantID, ds.ID, snapshot.ID, relationMembers)
+	if err := s.sourceSnapshots.StageRelations(ctx, ds.TenantID, ds.ID, snapshot.ID, relations); err != nil {
+		return err
+	}
+	snapshot.RelationCount, snapshot.RelationsStaged = len(relations), true
 	if err := progress("indexing"); err != nil {
 		return err
 	}
