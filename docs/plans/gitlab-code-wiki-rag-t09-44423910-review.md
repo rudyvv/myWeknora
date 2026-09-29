@@ -21,7 +21,7 @@ partial/wrong2，missing0，scope creep0；两项均P2。
 
 ## Root冻结复验
 
-只用d冻结代码临时导出、旧已核锁镜像sha256:ed863f31…挂载新runtime/server/SFC锁文件只读、禁网络/限进程内存CPU；用户选定独立localhost57521测试库和root专用58083 parser。未安装依赖、未修改或重启共享58082/其他容器、未读取旧容器凭据。受限grammar缓存先复制到可执行临时区；起初因挂载noexec导致整组skipped，修正后真正执行，未把skip算PASS。root自有58083已在验证后停止。
+只用44423910冻结代码临时导出、旧已核锁镜像sha256:ed863f31…挂载新runtime/server/SFC锁文件只读、禁网络/限进程内存CPU；用户选定独立localhost57521测试库和root专用58083 parser。未安装依赖、未修改或重启共享58082/其他容器、未读取旧容器凭据。受限grammar缓存先复制到可执行临时区；起初因挂载noexec导致整组skipped，修正后真正执行，未把skip算PASS。root自有58083已在验证后停止。
 
 通过：官方Node SFC测试7/7；真实Vue HTTP合同9项中的8项（含empty/whitespace/out-of-scope外置脚本、unknown/preprocessor、Unicode/CRLF、bounded timeout子进程回收）；Go internal/source PASS1.433s与internal/modelcontext PASS4.218s；真实Badge SourceCodeView组件测试PASS，frontend app/node两个typecheck均通过。真实PG合成Vue端到端 TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution PASS15.411s，核实外置引用作用域、索引与读源。代表真实Vue2三文件 TestSourceVue2RepresentativeAcceptance PASS11.125s，按测试断言关键词/向量3/3、公开读取6/6、模型证据6/6，验证完整字节/快照/区域。只报告受控统计，不披露原业务代码。
 
