@@ -24,7 +24,7 @@ Base: `3adaa587d16651a6d48f123d73c1e5cceaf75271`
 | Parser readiness failure retains publication status and old fixed reads | `TestSourceParserReadinessFailureRetainsPublishedStatusAndReadableVersion` verifies failed-run SHA/time, unchanged publication pointer, and old file-version read. | PASS against the dedicated PostgreSQL test database. |
 | Partial work cannot publish or infer deletion | `TestSourceUpdateKeepsPublishedVersionDuringParsingAndVectorFailure` and `TestSourceUpdateKeywordFailureRetainsPreviousCompletePublication`; source-mode `ReadGit` returns no complete manifest on fetch/scan error and publication requires complete member/index counts. | Both integration tests PASS against the dedicated PostgreSQL test database. |
 | Previously published Wiki evidence remains readable without Git access | `TestSourceWikiEvidenceRemainsReadableAfterForcePushAndGitUnavailable` resolves a saved evidence version after force-push and Git/API transport loss. `TestSourceWikiHistoricalFilteredFileRetainsScopeAndClearWins` covers historical file scope and clear precedence. | Both integration tests PASS against the dedicated PostgreSQL test database. |
-| Public sync/query behavior with real Git and controlled GitLab errors | Integration tests use local Git object history, controlled GitLab HTTP, and real parser/model/search boundaries. | Focused PostgreSQL-backed integration set PASS. |
+| Public sync/query behavior with real Git and controlled GitLab errors | Integration tests use local Git object history, controlled GitLab HTTP and embedding-API fixtures, the real Java parser runtime, and PostgreSQL-backed BM25/vector indexes and queries. | Focused PostgreSQL-backed integration set PASS. |
 
 ## Commands
 
