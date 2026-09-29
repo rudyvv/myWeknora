@@ -61,7 +61,10 @@
       "blocked_by": [
         12
       ],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-29",
+      "implementation_head": "583e017b",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t05-validation.md"
     },
     {
       "ticket": "T06",
@@ -94,7 +97,10 @@
       "blocked_by": [
         10
       ],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-29",
+      "implementation_head": "7f4fd1dc",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t08-validation.md"
     },
     {
       "ticket": "T09",

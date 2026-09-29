@@ -42,3 +42,5 @@ ready-for-agent 是 triage 标记，只有 blockers 已完成的 ticket 才进�
 发布映射见 [记录](gitlab-code-wiki-rag-publication.json)。Spec 和 22 项 tickets 通过用户恢复的浏览器登录发布并逐项核验；父 Spec 正文未被 tickets 发布改写。父 Spec 与未完成 tickets 仍保持 open。
 
 2026-09-29：首批并行 T04 / #12、T07 / #15、T14 / #22 完成实现、集成与双轴复审，已推送并确认关闭，累计 6 / 22。验证详情及全仓测试限制见 [首批集成验证](gitlab-code-wiki-rag-batch-one-validation.md)。下一批优先安排 T05、T08、T10，分别隔离故障对账、Python 和 MyBatis 工作；仍按每票验收，不缩减原 22 项。
+
+2026-09-29：T05 / #13、T08 / #16 已完成最终双轴复验、集成交叉验证及推送，并在 GitHub 确认关闭，累计 8 / 22。T10 / #18 继续修复和完成公开链路，不因解析模块通过而提前关闭。复用两个已空闲 worktree 和独立对话，接续 T06 / #14 与 T09 / #17；用户确认其实现与审查基线为 `7f4fd1dc`，仍为 GPT-6 Luna / xhigh 执行、当前 GPT-6 Sol / high 规划及审查。详见 [本批进度与验证](gitlab-code-wiki-rag-batch-two-integration-progress.md)。
