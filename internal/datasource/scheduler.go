@@ -54,8 +54,9 @@ func NewScheduler(
 	}
 }
 
-// Start loads all active data sources from the database and registers their
-// cron schedules. Then starts the cron runner in the background.
+// Start loads active data sources for cron registration, then independently
+// recovers durable source triggers (including retries for error/paused sources)
+// before starting the cron runner.
 func (s *Scheduler) Start(ctx context.Context) error {
 	dataSources, err := s.dsRepo.FindActive(ctx)
 	if err != nil {
@@ -63,12 +64,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 
 	for _, ds := range dataSources {
-		schedule, sourceMode := scheduledSync(ds)
-		if sourceMode {
-			if err := s.recoverQueuedSourceRuns(ctx, ds); err != nil {
-				logger.Errorf(ctx, "[Scheduler] failed to recover source triggers for ds=%s: %v", ds.ID, err)
-			}
-		}
+		schedule, _ := scheduledSync(ds)
 		if schedule == "" {
 			continue
 		}
@@ -77,6 +73,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 				ds.ID, schedule, err)
 		}
 	}
+	s.recoverSourceTriggers(ctx, dataSources)
 	s.relaySourcePublicationOutbox(ctx)
 	if _, err := s.cron.AddFunc("@every 30s", func() { s.reconcileSourceTriggers(context.Background()) }); err != nil {
 		logger.Warnf(ctx, "[Scheduler] failed to register source-trigger reconciliation: %v", err)
@@ -209,18 +206,44 @@ func (s *Scheduler) recoverQueuedSourceRuns(ctx context.Context, ds *types.DataS
 
 func (s *Scheduler) reconcileSourceTriggers(ctx context.Context) {
 	s.relaySourcePublicationOutbox(ctx)
+	if _, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+		// Durable retries are not conditional on cron eligibility or status.
+		s.recoverSourceTriggers(ctx, nil)
+		return
+	}
 	dataSources, err := s.dsRepo.FindActive(ctx)
 	if err != nil {
 		logger.Errorf(ctx, "[Scheduler] failed to list sources for trigger reconciliation: %v", err)
 		return
 	}
-	for _, ds := range dataSources {
+	s.recoverSourceTriggers(ctx, dataSources)
+}
+
+func (s *Scheduler) recoverSourceTriggers(ctx context.Context, activeSources []*types.DataSource) {
+	if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+		dispatches, err := control.RecoverAllSourceTriggers(ctx)
+		if err != nil {
+			logger.Errorf(ctx, "[Scheduler] failed to recover durable source triggers: %v", err)
+			return
+		}
+		for _, dispatch := range dispatches {
+			if dispatch.SyncLog == nil {
+				continue
+			}
+			log := dispatch.SyncLog
+			if _, err := EnqueueSourceSync(ctx, s.taskEnqueuer, dispatch, log.TenantID, log.DataSourceID, types.TaskInitiator{}); err != nil {
+				logger.Errorf(ctx, "[Scheduler] failed to redeliver source trigger ds=%s syncLog=%s: %v", log.DataSourceID, log.ID, err)
+			}
+		}
+		return
+	}
+	for _, ds := range activeSources {
 		_, sourceMode := scheduledSync(ds)
 		if !sourceMode {
 			continue
 		}
 		if err := s.recoverQueuedSourceRuns(ctx, ds); err != nil {
-			logger.Errorf(ctx, "[Scheduler] failed to reconcile source triggers for ds=%s: %v", ds.ID, err)
+			logger.Errorf(ctx, "[Scheduler] failed to recover source triggers for ds=%s: %v", ds.ID, err)
 		}
 	}
 }

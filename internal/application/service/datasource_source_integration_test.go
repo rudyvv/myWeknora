@@ -220,6 +220,56 @@ func TestSourceStaleRunCannotOverwriteCanceledStatus(t *testing.T) {
 	require.Equal(t, types.SyncLogStatusCanceled, after.Status)
 }
 
+func TestSourceConcurrentConfigCancellationFencesResultWrite(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	ds, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	control := f.service.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	lease, claimed, err := control.ClaimSourceRun(f.ctx, ds, log.ID, 1, uuid.NewString(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	stale, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	stale.Status = types.SyncLogStatusSuccess
+	stale.SourceConfigGeneration, stale.SourceFencingToken = lease.ConfigGeneration, lease.FencingToken
+
+	cancelTx := f.db.Begin()
+	require.NoError(t, cancelTx.Error)
+	t.Cleanup(func() { _ = cancelTx.Rollback().Error })
+	var cancelPID int
+	require.NoError(t, cancelTx.Raw("SELECT pg_backend_pid()").Scan(&cancelPID).Error)
+	require.NoError(t, repository.NewSyncLogRepository(cancelTx).(interfaces.SourceSyncControlRepository).
+		AdvanceSourceConfig(f.ctx, ds, false))
+
+	writeCtx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+	defer cancel()
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- f.service.syncLogRepo.UpdateResult(writeCtx, stale) }()
+	blocked := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int64
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock'", cancelPID).Scan(&count).Error)
+		if count > 0 {
+			blocked = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !blocked {
+		_ = cancelTx.Rollback().Error
+		t.Fatal("result update never reached the canceled log lock")
+	}
+	require.NoError(t, cancelTx.Commit().Error)
+	writeErr := <-writeDone
+	stored, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.ErrorIs(t, writeErr, types.ErrSourceSyncLeaseLost)
+	require.Equal(t, types.SyncLogStatusCanceled, stored.Status)
+}
+
 func TestSourceRetryableFailureKeepsDurableRecoveryAndVisibleResult(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	f.embedVector = []float32{0, 0, 0}
@@ -255,6 +305,142 @@ func TestSourceRetryableFailureKeepsDurableRecoveryAndVisibleResult(t *testing.T
 	require.Equal(t, 3, retained.Calls)
 	require.Equal(t, 4821, retained.Tokens)
 	require.Equal(t, 1, retained.Repairs, "source-run recovery must not reset a consumed T14 Wiki-attempt budget")
+}
+
+func TestSourceRetryRecoveryIncludesErrorAndPausedDataSources(t *testing.T) {
+	for _, initialStatus := range []string{types.DataSourceStatusActive, types.DataSourceStatusPaused} {
+		t.Run(initialStatus, func(t *testing.T) {
+			f := newJavaSourceFixture(t)
+			require.NoError(t, f.db.Model(&types.DataSource{}).Where("id=?", f.ds.ID).Update("status", initialStatus).Error)
+			f.embedVector = []float32{0, 0, 0}
+			f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+			log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+			require.NoError(t, err)
+			require.ErrorContains(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, log)), "zero")
+
+			deliveries := make(chan *asynq.Task, 10)
+			scheduler := datasource.NewScheduler(repository.NewDataSourceRepository(f.db), repository.NewSyncLogRepository(f.db),
+				sourceTestTaskEnqueuer{tasks: deliveries}, f.service.sourceSnapshots)
+			require.NoError(t, scheduler.Start(f.ctx))
+			scheduler.Stop()
+			require.Len(t, deliveries, 1, "startup must redeliver durable retry work even when the source is not cron-eligible")
+			require.Zero(t, scheduler.EntryCount(), "retry recovery must not create a cron entry for error/paused state")
+			f.embedVector = []float32{1, 0, 0}
+			require.NoError(t, f.service.ProcessSync(f.ctx, <-deliveries))
+			stored, err := f.service.GetSyncLog(f.ctx, log.ID)
+			require.NoError(t, err)
+			require.Equal(t, types.SyncLogStatusSuccess, stored.Status, "the recovered retry must complete")
+			ds, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+			require.NoError(t, err)
+			if initialStatus == types.DataSourceStatusPaused {
+				require.Equal(t, types.DataSourceStatusPaused, ds.Status, "recovering manual work must preserve paused scheduling state")
+			} else {
+				require.Equal(t, types.DataSourceStatusActive, ds.Status)
+			}
+		})
+	}
+}
+
+func TestSourceStaleClaimCannotCancelCurrentConfig(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	oldLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	oldDS, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+
+	newDS := *oldDS
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(newDS.Config, &config))
+	config["settings"].(map[string]any)["new_config_probe"] = true
+	newDS.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	_, err = f.service.UpdateDataSource(f.ctx, &newDS)
+	require.NoError(t, err)
+	newLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	currentDS, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	control := f.service.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	var deliveryGeneration int64
+	require.NoError(t, f.db.Table("source_sync_runs").Select("delivery_generation").Where("sync_log_id=?", newLog.ID).Scan(&deliveryGeneration).Error)
+	_, claimed, err := control.ClaimSourceRun(f.ctx, currentDS, newLog.ID, deliveryGeneration, uuid.NewString(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	_, staleClaimed, err := control.ClaimSourceRun(f.ctx, oldDS, oldLog.ID, 1, uuid.NewString(), time.Minute)
+	require.NoError(t, err)
+	require.False(t, staleClaimed)
+	stored, err := f.service.GetSyncLog(f.ctx, newLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusRunning, stored.Status, "a delayed claimant must not cancel the current-config run")
+}
+
+func TestSourceStaleRegisterAndRecoveryCannotRewriteCurrentConfig(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	_, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	oldDS, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+
+	newDS := *oldDS
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(newDS.Config, &config))
+	config["settings"].(map[string]any)["new_config_probe"] = true
+	newDS.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	_, err = f.service.UpdateDataSource(f.ctx, &newDS)
+	require.NoError(t, err)
+	newLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	currentDS, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	control := f.service.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	var deliveryGeneration int64
+	require.NoError(t, f.db.Table("source_sync_runs").Select("delivery_generation").Where("sync_log_id=?", newLog.ID).Scan(&deliveryGeneration).Error)
+	_, claimed, err := control.ClaimSourceRun(f.ctx, currentDS, newLog.ID, deliveryGeneration, uuid.NewString(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	staleLog := &types.SyncLog{DataSourceID: oldDS.ID, TenantID: oldDS.TenantID, Status: types.SyncLogStatusQueued, StartedAt: time.Now().UTC()}
+	_, _, err = control.RegisterSourceTrigger(f.ctx, oldDS, staleLog, "manual")
+	require.Error(t, err, "registration from a stale configuration must be rejected")
+	stored, err := f.service.GetSyncLog(f.ctx, newLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusRunning, stored.Status)
+
+	dispatches, err := control.RecoverSourceTriggers(f.ctx, oldDS)
+	require.NoError(t, err)
+	require.Empty(t, dispatches, "recovery must consult current persisted state and not recreate stale work")
+	stored, err = f.service.GetSyncLog(f.ctx, newLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusRunning, stored.Status, "stale recovery input must not cancel the current-config run")
+}
+
+func TestSourceConfigGenerationRestoresAfterDatasourceWriteFails(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	require.NoError(t, f.db.Exec(`CREATE FUNCTION reject_source_config_write() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.config IS DISTINCT FROM OLD.config THEN RAISE EXCEPTION 'injected source config write failure'; END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER reject_source_config_write BEFORE UPDATE ON data_sources
+			FOR EACH ROW EXECUTE FUNCTION reject_source_config_write();`).Error)
+	current, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	updated := *current
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(updated.Config, &config))
+	config["settings"].(map[string]any)["rejected_config_probe"] = true
+	updated.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	_, err = f.service.UpdateDataSource(f.ctx, &updated)
+	require.ErrorContains(t, err, "injected source config write failure")
+
+	stored, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, current.Config, stored.Config, "the failed write must leave the stored configuration unchanged")
+	_, err = f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err, "the coordinator must be restored to the stored config after a rejected write")
 }
 
 func TestSourceRecoveryRejectsIncompatiblePersistedArtifactVersions(t *testing.T) {

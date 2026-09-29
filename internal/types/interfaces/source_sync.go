@@ -16,6 +16,7 @@ type SourceSyncControlRepository interface {
 	RenewSourceRun(context.Context, types.SourceSyncLease, time.Duration) (types.SourceSyncLease, error)
 	ReleaseSourceRun(context.Context, types.SourceSyncLease, bool) (*types.SourceSyncDispatch, error)
 	RecoverSourceTriggers(context.Context, *types.DataSource) ([]types.SourceSyncDispatch, error)
+	RecoverAllSourceTriggers(context.Context) ([]types.SourceSyncDispatch, error)
 	AdvanceSourceConfig(context.Context, *types.DataSource, bool) error
 	RecordSourceRunPhase(context.Context, types.SourceSyncLease, string, string) error
 	CommitSourceRunResult(context.Context, types.SourceSyncLease, *types.DataSource) error

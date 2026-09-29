@@ -8,6 +8,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // DataSourceRepository provides data access for data sources
@@ -274,26 +275,8 @@ func (r *SyncLogRepository) UpdateResult(ctx context.Context, log *types.SyncLog
 	if hasLease && (lease.SyncLogID != log.ID || lease.DataSourceID != log.DataSourceID || lease.TenantID != log.TenantID) {
 		return types.ErrSourceSyncLeaseLost
 	}
-	query := r.db.WithContext(ctx).Model(&types.SyncLog{}).Where("id = ?", log.ID)
 	guarded := hasLease || log.SourceFencingToken > 0
-	if guarded {
-		generation, fencingToken := log.SourceConfigGeneration, log.SourceFencingToken
-		if hasLease {
-			generation, fencingToken = lease.ConfigGeneration, lease.FencingToken
-		}
-		query = query.Where("data_source_id = ? AND tenant_id = ?", log.DataSourceID, log.TenantID).
-			Where("source_config_generation = ? AND source_fencing_token = ?", generation, fencingToken).
-			Where(`EXISTS (
-				SELECT 1 FROM source_sync_states AS source_state
-				WHERE source_state.data_source_id = sync_logs.data_source_id
-					AND source_state.tenant_id = sync_logs.tenant_id
-					AND source_state.active_sync_log_id = sync_logs.id
-					AND source_state.config_generation = sync_logs.source_config_generation
-					AND source_state.fencing_token = sync_logs.source_fencing_token
-					AND source_state.lease_expires_at > ?
-			)`, time.Now().UTC())
-	}
-	result := query.Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"status":        log.Status,
 		"finished_at":   log.FinishedAt,
 		"items_total":   log.ItemsTotal,
@@ -305,14 +288,64 @@ func (r *SyncLogRepository) UpdateResult(ctx context.Context, log *types.SyncLog
 		"error_message": log.ErrorMessage,
 		"result":        log.Result,
 		"updated_at":    time.Now().UTC(),
-	})
-	if result.Error != nil {
-		return result.Error
 	}
-	if guarded && result.RowsAffected != 1 {
-		return types.ErrSourceSyncLeaseLost
+	if guarded {
+		generation, fencingToken := log.SourceConfigGeneration, log.SourceFencingToken
+		if hasLease {
+			generation, fencingToken = lease.ConfigGeneration, lease.FencingToken
+		}
+		return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var state sourceSyncStateRow
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("source_sync_states").
+				Where("data_source_id=? AND tenant_id=?", log.DataSourceID, log.TenantID).Take(&state).Error; err != nil {
+				return types.ErrSourceSyncLeaseLost
+			}
+			now := time.Now().UTC()
+			if hasLease {
+				if !sourceLeaseMatches(&state, lease, now) {
+					return types.ErrSourceSyncLeaseLost
+				}
+			} else if state.ConfigGeneration != generation || state.FencingToken != fencingToken ||
+				derefSourceID(state.ActiveSyncLogID) != log.ID || state.LeaseExpiresAt == nil ||
+				!state.LeaseExpiresAt.After(now) || derefSourceID(state.LeaseOwner) == "" {
+				return types.ErrSourceSyncLeaseLost
+			}
+
+			var current types.SyncLog
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("id=? AND data_source_id=? AND tenant_id=?", log.ID, log.DataSourceID, log.TenantID).
+				Take(&current).Error; err != nil {
+				return types.ErrSourceSyncLeaseLost
+			}
+			if current.SourceConfigGeneration != generation || current.SourceFencingToken != fencingToken {
+				return types.ErrSourceSyncLeaseLost
+			}
+			// The sync-log lock may have waited behind another transaction; the
+			// state row is still locked, so check expiry again immediately before
+			// applying the result.
+			now = time.Now().UTC()
+			if hasLease {
+				if !sourceLeaseMatches(&state, lease, now) {
+					return types.ErrSourceSyncLeaseLost
+				}
+			} else if state.ConfigGeneration != generation || state.FencingToken != fencingToken ||
+				derefSourceID(state.ActiveSyncLogID) != log.ID || state.LeaseExpiresAt == nil ||
+				!state.LeaseExpiresAt.After(now) || derefSourceID(state.LeaseOwner) == "" {
+				return types.ErrSourceSyncLeaseLost
+			}
+			result := tx.Model(&types.SyncLog{}).
+				Where("id=? AND data_source_id=? AND tenant_id=?", log.ID, log.DataSourceID, log.TenantID).
+				Updates(updates)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return types.ErrSourceSyncLeaseLost
+			}
+			return nil
+		})
 	}
-	return nil
+	return r.db.WithContext(ctx).Model(&types.SyncLog{}).Where("id = ?", log.ID).Updates(updates).Error
 }
 
 // CancelPendingByDataSource marks all non-terminal sync logs for a data source as canceled.

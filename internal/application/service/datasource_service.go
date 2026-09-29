@@ -257,6 +257,7 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 	}
 	if err := s.dsRepo.Update(ctx, ds); err != nil {
 		logger.Errorf(ctx, "failed to update data source: %v", err)
+		s.restoreSourceConfigurationFromStored(ctx, ds.ID)
 		return nil, err
 	}
 	// Reconcile once more after persistence in case a trigger registered
@@ -317,6 +318,7 @@ func (s *DataSourceService) UpdateDataSourceCredentials(
 		return nil, err
 	}
 	if err := s.dsRepo.Update(ctx, existing); err != nil {
+		s.restoreSourceConfigurationFromStored(ctx, existing.ID)
 		return nil, err
 	}
 	if err := s.advanceSourceConfigGeneration(ctx, existing, existing); err != nil {
@@ -351,6 +353,29 @@ func (s *DataSourceService) advanceSourceConfigGeneration(ctx context.Context, b
 	return control.AdvanceSourceConfig(ctx, after, modeOf(after) == datasource.ContentModeSource)
 }
 
+// restoreSourceConfigurationFromStored repairs the brief pre-write fence when
+// persistence fails. The stored datasource is authoritative; never roll the
+// generation back from the rejected request's snapshot.
+func (s *DataSourceService) restoreSourceConfigurationFromStored(ctx context.Context, dataSourceID string) {
+	control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	if !ok {
+		return
+	}
+	current, err := s.dsRepo.FindByID(ctx, dataSourceID)
+	if err != nil {
+		logger.Warnf(ctx, "failed to reload data source after a rejected config write ds=%s: %v", dataSourceID, err)
+		return
+	}
+	enabled := false
+	if config, err := current.ParseConfig(); err == nil {
+		mode, err := datasource.ContentMode(config)
+		enabled = err == nil && mode == datasource.ContentModeSource
+	}
+	if err := control.AdvanceSourceConfig(ctx, current, enabled); err != nil {
+		logger.Warnf(ctx, "failed to restore persisted source config generation ds=%s: %v", dataSourceID, err)
+	}
+}
+
 // ClearDataSourceCredentials wipes the connector credential map without
 // touching any other config field. Idempotent.
 func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id string) error {
@@ -379,6 +404,7 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 			return err
 		}
 		if err := s.dsRepo.Update(ctx, existing); err != nil {
+			s.restoreSourceConfigurationFromStored(ctx, existing.ID)
 			return err
 		}
 		return s.advanceSourceConfigGeneration(ctx, existing, existing)
@@ -393,6 +419,7 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 		return err
 	}
 	if err := s.dsRepo.Update(ctx, existing); err != nil {
+		s.restoreSourceConfigurationFromStored(ctx, existing.ID)
 		return err
 	}
 	if err := s.advanceSourceConfigGeneration(ctx, existing, existing); err != nil {
@@ -426,6 +453,7 @@ func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) err
 
 	if err := s.dsRepo.Delete(ctx, id); err != nil {
 		logger.Errorf(ctx, "failed to delete data source: %v", err)
+		s.restoreSourceConfigurationFromStored(ctx, id)
 		return err
 	}
 	if config, configErr := existing.ParseConfig(); configErr == nil {

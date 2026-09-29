@@ -19,6 +19,8 @@ const (
 	sourceRunLeaseTTL   = 2 * time.Minute
 )
 
+var errSourceConfigurationNotCurrent = errors.New("source configuration is not current")
+
 type sourceSyncStateRow struct {
 	DataSourceID              string     `gorm:"column:data_source_id;primaryKey"`
 	TenantID                  uint64     `gorm:"column:tenant_id"`
@@ -83,6 +85,25 @@ func (r *SyncLogRepository) ensureSourceSyncState(tx *gorm.DB, ds *types.DataSou
 	return &state, nil
 }
 
+// lockPersistedSourceDataSource reads source identity/config after coordinator
+// state has been locked. Keep this state→datasource order consistent with
+// result commits so a stale caller snapshot cannot rewrite coordinator state.
+func lockPersistedSourceDataSource(tx *gorm.DB, dataSourceID string, tenantID uint64) (*types.DataSource, error) {
+	var current types.DataSource
+	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
+		Where("id=? AND tenant_id=?", dataSourceID, tenantID).Take(&current).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errSourceConfigurationNotCurrent
+		}
+		return nil, err
+	}
+	return &current, nil
+}
+
+func sourceStateMatchesPersistedDataSource(state *sourceSyncStateRow, current *types.DataSource) bool {
+	return state != nil && current != nil && state.ConfigFingerprint == sourceConfigFingerprint(current)
+}
+
 func sourceStateUpdate(tx *gorm.DB, state *sourceSyncStateRow, values map[string]any) error {
 	values["updated_at"] = time.Now().UTC()
 	return tx.Table("source_sync_states").Where("data_source_id=?", state.DataSourceID).Updates(values).Error
@@ -139,7 +160,14 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 		if err != nil {
 			return err
 		}
-		if err := r.invalidateSourceGeneration(tx, state, ds); err != nil {
+		current, err := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+		if err != nil {
+			return err
+		}
+		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) || !sourceStateMatchesPersistedDataSource(state, current) {
+			return errSourceConfigurationNotCurrent
+		}
+		if err := r.invalidateSourceGeneration(tx, state, current); err != nil {
 			return err
 		}
 		log.Status = types.SyncLogStatusQueued
@@ -214,6 +242,9 @@ func (r *SyncLogRepository) AdvanceSourceConfig(ctx context.Context, ds *types.D
 }
 
 func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSource, logID string, deliveryGeneration int64, owner string, leaseTTL time.Duration) (types.SourceSyncLease, bool, error) {
+	if ds == nil || ds.ID == "" || logID == "" {
+		return types.SourceSyncLease{}, false, errors.New("source run identity is required")
+	}
 	if leaseTTL <= 0 {
 		leaseTTL = sourceRunLeaseTTL
 	}
@@ -227,7 +258,14 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 		if err != nil {
 			return err
 		}
-		if err := r.invalidateSourceGeneration(tx, state, ds); err != nil {
+		current, err := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+		if err != nil {
+			return err
+		}
+		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) || !sourceStateMatchesPersistedDataSource(state, current) {
+			return errSourceConfigurationNotCurrent
+		}
+		if err := r.invalidateSourceGeneration(tx, state, current); err != nil {
 			return err
 		}
 		var log types.SyncLog
@@ -332,6 +370,9 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 		claimed = true
 		return nil
 	})
+	if errors.Is(err, errSourceConfigurationNotCurrent) {
+		return types.SourceSyncLease{}, false, nil
+	}
 	return lease, claimed, err
 }
 
@@ -460,7 +501,34 @@ func pendingDispatchTx(tx *gorm.DB, state *sourceSyncStateRow) (*types.SourceSyn
 	return &types.SourceSyncDispatch{SyncLog: &log, Trigger: state.PendingTrigger, DeliveryGeneration: state.PendingDeliveryGeneration}, nil
 }
 
+// RecoverAllSourceTriggers recovers durable source work independently of the
+// datasource's cron status. Error and paused sources may still own queued
+// retry work, while only active sources are returned by FindActive for cron.
+func (r *SyncLogRepository) RecoverAllSourceTriggers(ctx context.Context) ([]types.SourceSyncDispatch, error) {
+	var sources []types.DataSource
+	if err := r.db.WithContext(ctx).Model(&types.DataSource{}).
+		Joins(`JOIN source_sync_states AS source_state
+			ON source_state.data_source_id = data_sources.id
+			AND source_state.tenant_id = data_sources.tenant_id`).
+		Where("(source_state.active_sync_log_id IS NOT NULL OR source_state.pending_sync_log_id IS NOT NULL)").
+		Order("data_sources.id ASC").Find(&sources).Error; err != nil {
+		return nil, err
+	}
+	dispatches := make([]types.SourceSyncDispatch, 0, len(sources))
+	for i := range sources {
+		recovered, err := r.RecoverSourceTriggers(ctx, &sources[i])
+		if err != nil {
+			return dispatches, err
+		}
+		dispatches = append(dispatches, recovered...)
+	}
+	return dispatches, nil
+}
+
 func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types.DataSource) ([]types.SourceSyncDispatch, error) {
+	if ds == nil || ds.ID == "" {
+		return nil, errors.New("source data source identity is required")
+	}
 	dispatches := []types.SourceSyncDispatch{}
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var exists bool
@@ -469,6 +537,13 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 		}
 		if !exists {
 			// Legacy queued source sync logs predate this coordinator.
+			var current types.DataSource
+			if err := tx.Where("id=? AND tenant_id=?", ds.ID, ds.TenantID).Take(&current).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
 			var logs []types.SyncLog
 			if err := tx.Where("data_source_id=? AND tenant_id=? AND status=?", ds.ID, ds.TenantID, types.SyncLogStatusQueued).Order("created_at DESC").Limit(1).Find(&logs).Error; err != nil {
 				return err
@@ -476,9 +551,16 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 			if len(logs) == 0 {
 				return nil
 			}
-			state, err := r.ensureSourceSyncState(tx, ds)
+			state, err := r.ensureSourceSyncState(tx, &current)
 			if err != nil {
 				return err
+			}
+			persisted, err := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+			if err != nil {
+				return err
+			}
+			if !sourceStateMatchesPersistedDataSource(state, persisted) {
+				return errSourceConfigurationNotCurrent
 			}
 			state.PendingSyncLogID = stringPointer(logs[0].ID)
 			state.PendingTrigger = "recovery"
@@ -497,7 +579,14 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("source_sync_states").Where("data_source_id=? AND tenant_id=?", ds.ID, ds.TenantID).Take(&state).Error; err != nil {
 			return err
 		}
-		if err := r.invalidateSourceGeneration(tx, &state, ds); err != nil {
+		current, err := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+		if err != nil {
+			return err
+		}
+		if !sourceStateMatchesPersistedDataSource(&state, current) {
+			return errSourceConfigurationNotCurrent
+		}
+		if err := r.invalidateSourceGeneration(tx, &state, current); err != nil {
 			return err
 		}
 		activeID := derefSourceID(state.ActiveSyncLogID)
@@ -558,6 +647,9 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 		}
 		return nil
 	})
+	if errors.Is(err, errSourceConfigurationNotCurrent) {
+		return nil, nil
+	}
 	return dispatches, err
 }
 
