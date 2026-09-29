@@ -63,4 +63,4 @@ Spec 轴指出三个 P2，均先通过真实 HTTP 写 red，再最小补规则�
 - 公开真实 JS/TS 全部相关集成 `go test -tags integration ./internal/application/service -run '^TestSource(Script|BrokenScripts)' -count=1` 通过，31.689 秒；包括双索引/tool/read、缺 grammar 拒绝、坏语法保留和跨发布 request pin。
 - 服务端 `go build ./cmd/server` 与 `git diff --check` 通过。按根任务要求未重复 188 秒完整 Source 或全仓 suite。
 
-当前仍未 commit/push，待 Spec finding 复审；本轮没改服务/publication、SQL、公共类型、工具 formatter 或前端。
+该轮未改服务/publication、SQL、公共类型、工具 formatter 或前端。后续 Spec 复审已完成，三个 P2 均关闭；Standards / Spec 最终均 0 项。实现 `82bdbd76` 和仅 CRLF 属性补充 `335b3d59` 已推送独立分支 `codex/source-languages`，并以 `b6638c72` 合入功能分支。与 T04 的三个共享文件已双轴复核，公开交叉测试通过（29.564 秒）；GitHub 关闭及全仓检查由批次集成记录跟踪。

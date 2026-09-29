@@ -622,8 +622,21 @@ func TestSourceWikiHistoricalFilteredFileRetainsScopeAndClearWins(t *testing.T) 
 	require.NoError(t, f.knowledge.SetKnowledgeTags(f.ctx, kid, []string{tag.ID}))
 	f.advanceJava("class Service { String getPushSchedule() { return \"new schedule\"; } }")
 	syncSourceFixture(t, f)
-	// Boundary fault simulates a currently filtered-out file, including empty publication.
-	require.NoError(t, f.db.Exec("UPDATE source_snapshot_members SET status='excluded' WHERE snapshot_id IN (SELECT snapshot_id FROM source_publications WHERE data_source_id=?)", f.ds.ID).Error)
+	config, err := f.ds.ParseConfig()
+	require.NoError(t, err)
+	config.Settings["exclude_paths"] = []string{page.SourceProvenance.Evidence[0].Path}
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, config.Settings)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync)
+	updated := *f.ds
+	updated.Config, err = config.ToJSON()
+	require.NoError(t, err)
+	f.ds, err = f.service.UpdateDataSource(f.ctx, &updated)
+	require.NoError(t, err)
+	syncSourceFixture(t, f)
+	published := latestIncrementalRun(t, f)
+	require.Equal(t, "published", published.Snapshot.State)
+	require.Zero(t, published.Snapshot.FileCount, "excluding the final file publishes a complete empty version")
 	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, SourceIDs: []string{f.ds.ID}, KnowledgeIDs: []string{kid}, TagIDs: []string{tag.ID}}}
 	ctx, release, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, targets)
 	require.NoError(t, err)
