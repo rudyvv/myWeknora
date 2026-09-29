@@ -1,0 +1,78 @@
+'use strict'
+
+const assert = require('node:assert/strict')
+const { createHash } = require('node:crypto')
+const test = require('node:test')
+
+const { parseSFC } = require('../parse_sfc.cjs')
+
+function request(source, path = 'src/Widget.vue') {
+  return {
+    path,
+    source,
+    sha256: createHash('sha256').update(source, 'utf8').digest('hex'),
+  }
+}
+
+test('Vue 2 block offsets select the exact CRLF and Unicode body slices', () => {
+  const source = '<!-- 😀 before -->\r\n' +
+    '<template lang="html">\r\n  <div>中文😀</div>\r\n</template>\r\n' +
+    '<script lang="ts">\r\nexport default { name: "Widget" }\r\n</script>\r\n' +
+    '<style lang="scss" scoped>\r\n.预约 { color: red; }\r\n</style>\r\n' +
+    '<i18n lang="json">\r\n{"title":"🧭"}\r\n</i18n>\r\n'
+  const parsed = parseSFC(request(source))
+
+  assert.equal(parsed.compiler_version, '2.7.16')
+  assert.deepEqual(parsed.blocks.map(block => block.type), ['template', 'script', 'style', 'i18n'])
+  const expected = [
+    ['template', 'html', '\r\n  <div>中文😀</div>\r\n'],
+    ['script', 'ts', '\r\nexport default { name: "Widget" }\r\n'],
+    ['style', 'scss', '\r\n.预约 { color: red; }\r\n'],
+    ['i18n', 'json', '\r\n{"title":"🧭"}\r\n'],
+  ]
+  for (const [type, language, body] of expected) {
+    const block = parsed.blocks.find(candidate => candidate.type === type)
+    assert.equal(block.lang, language)
+    assert.equal(source.slice(block.start_utf16, block.end_utf16), body)
+  }
+})
+
+test('an external script is returned as a literal reference and never loaded', () => {
+  const parsed = parseSFC(request('<script src="./api.js"></script>\r\n'))
+  assert.equal(parsed.blocks.length, 1)
+  assert.equal(parsed.blocks[0].src, './api.js')
+  assert.equal(parsed.blocks[0].start_utf16, parsed.blocks[0].end_utf16)
+})
+
+test('logical path and content hash are validated before invoking the compiler', () => {
+  const input = request('<template><div /></template>')
+  assert.throws(() => parseSFC({ ...input, sha256: '0'.repeat(64) }), /hash/i)
+  assert.throws(() => parseSFC({ ...input, path: '../secrets.vue' }), /request/i)
+  assert.throws(() => parseSFC({ ...input, path: 'https://host/app.vue' }), /request/i)
+})
+
+test('malformed descriptor warnings are reduced to bounded source-free diagnostic codes', () => {
+  const source = '<template><div>first</template>\n'
+  const parsed = parseSFC(request(source))
+  assert.ok(parsed.diagnostics.length > 0)
+  assert.ok(parsed.diagnostics.every(diagnostic => diagnostic.code === 'vue_sfc_parse_warning'))
+  assert.ok(parsed.diagnostics.every(diagnostic => !('message' in diagnostic)))
+})
+
+test('duplicate singleton descriptors receive a bounded source-free diagnostic', () => {
+  const source = '<template><div>first</div></template>\n' +
+    '<template><div>duplicate</div></template>\n'
+  const parsed = parseSFC(request(source))
+  assert.ok(parsed.diagnostics.some(diagnostic => diagnostic.code === 'vue_sfc_duplicate_block'))
+})
+
+test('a literal closing script tag is bounded exactly as Vue defines the SFC block', () => {
+  const source = '<script>const text = "</script>";\r\n' +
+    'export default { name: "A" };\r\n</script>\r\n'
+  const parsed = parseSFC(request(source))
+  const script = parsed.blocks[0]
+  assert.equal(script.type, 'script')
+  assert.equal(source.slice(script.start_utf16, script.end_utf16), 'const text = "')
+  assert.ok(source.slice(script.end_utf16).includes('export default'))
+  assert.equal(parsed.source_bytes, Buffer.byteLength(source, 'utf8'))
+})

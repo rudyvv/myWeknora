@@ -178,6 +178,9 @@ class ScriptHTTPContract(unittest.TestCase):
         self.assertEqual(status, 200, health)
         lock = json.loads((Path(os.environ['SOURCE_PARSER_CACHE']) / 'grammar.lock.json').read_text(encoding='utf-8'))
         expected = sorted(lock.get('grammars', {'java': lock}))
+        if 'vue' in health['languages']:
+            expected.append('vue')
+            expected.sort()
         self.assertEqual(health['languages'], expected)
         expected_rules = 'rules-4' if 'python' in expected else 'rules-3'
         self.assertIn(expected_rules, health['parser_version'])
@@ -217,7 +220,10 @@ class ScriptHTTPContract(unittest.TestCase):
             (four_language / 'grammar.lock.json').write_text(json.dumps(four_language_lock), encoding='utf-8')
             status, health = health_for(four_language)
             self.assertEqual(status, 200, health)
-            self.assertEqual(health['languages'], ['java', 'javascript', 'tsx', 'typescript'])
+            expected_languages = ['java', 'javascript', 'tsx', 'typescript']
+            if 'vue' in health['languages']:
+                expected_languages.append('vue')
+            self.assertEqual(health['languages'], expected_languages)
             self.assertIn('rules-3', health['parser_version'])
             legacy = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             legacy.update(lock['grammars']['java'])

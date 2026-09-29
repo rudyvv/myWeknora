@@ -10,7 +10,7 @@ import os
 from pathlib import PurePosixPath
 import threading
 
-from runtime import load_runtime, parse_source, runtime_version
+from runtime import load_runtime, load_sfc_runtime, parse_source, parse_vue_source, runtime_version
 
 MAX_FILE_BYTES = 16 << 20
 MAX_REQUEST_BYTES = 23 << 20
@@ -18,10 +18,18 @@ SLOTS = threading.BoundedSemaphore(2)
 PROCESS_CONTEXT = multiprocessing.get_context('spawn')
 
 
-def parse_child(connection, cache, raw, maximum, language, path):
+def parse_child(connection, cache, raw, maximum, language, path, sfc):
     try:
         versions = load_runtime(cache)
-        connection.send((True, parse_source(raw, maximum, runtime_version(versions), language, path)))
+        if sfc and {'javascript', 'typescript'}.issubset(versions):
+            versions['vue'] = sfc['runtime']
+        if language == 'vue':
+            if not sfc or 'vue' not in versions:
+                raise RuntimeError('Vue parser runtime unavailable')
+            parsed = parse_vue_source(raw, maximum, runtime_version(versions), path, sfc, set(versions))
+        else:
+            parsed = parse_source(raw, maximum, runtime_version(versions), language, path)
+        connection.send((True, parsed))
     except Exception:
         # Exceptions may include source text; do not put them in RPC errors/logs.
         connection.send((False, {'error': 'source parsing failed'}))
@@ -76,7 +84,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError()
             language = body['language']
             extensions = {'java': ('.java',), 'javascript': ('.js', '.jsx', '.mjs', '.cjs'),
-                          'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',), 'python': ('.py',)}
+                          'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',), 'python': ('.py',),
+                          'vue': ('.vue',)}
             if language not in self.server.versions or not path.lower().endswith(extensions[language]):
                 raise ValueError()
             raw = base64.b64decode(body['content_base64'], validate=True)
@@ -95,7 +104,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(429, {'error': 'parser capacity reached'})
             return
         parent, child = PROCESS_CONTEXT.Pipe(duplex=False)
-        process = PROCESS_CONTEXT.Process(target=parse_child, args=(child, self.server.cache, raw, maximum, language, path))
+        process = PROCESS_CONTEXT.Process(target=parse_child, args=(child, self.server.cache, raw, maximum, language, path, self.server.sfc))
         try:
             process.start()
             child.close()
@@ -126,9 +135,14 @@ def main():
         versions = load_runtime(cache)
     except Exception:
         versions = {}
+    sfc = load_sfc_runtime()
+    if sfc and {'javascript', 'typescript'}.issubset(versions):
+        versions['vue'] = sfc['runtime']
+    else:
+        sfc = None
     parser_version = runtime_version(versions)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.cache, server.parser_version, server.versions = cache, parser_version, versions
+    server.cache, server.parser_version, server.versions, server.sfc = cache, parser_version, versions, sfc
     print(json.dumps({'port': server.server_port}), flush=True)
     server.serve_forever()
 

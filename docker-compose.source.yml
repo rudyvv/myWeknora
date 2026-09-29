@@ -12,7 +12,7 @@ services:
   source-parser:
     build:
       context: ./sourceparser
-    image: weknora-source-parser:source-1.19.0-rules4
+    image: weknora-source-parser:source-1.19.0-rules4-vue-sfc
     restart: unless-stopped
     read_only: true
     init: true
