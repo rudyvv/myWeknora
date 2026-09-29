@@ -77,6 +77,57 @@ func TestSourceFirstJavaSnapshotIsPublishedAndSearchable(t *testing.T) {
 	}
 }
 
+func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
+	cache := os.Getenv("SOURCE_PARSER_CACHE")
+	lock, err := os.ReadFile(filepath.Join(cache, "grammar.lock.json"))
+	require.NoError(t, err)
+	if !strings.Contains(string(lock), `"python"`) {
+		t.Skip("SOURCE_PARSER_CACHE does not include the locked Python grammar")
+	}
+	raw := []byte("@router.post(\"/预约\")\r\nclass ReservationService:\r\n    @trace\r\n    async def reserve_booking(self, 名称: str) -> str:\r\n        return f\"预约 {名称}\"\r\n")
+	f := newJavaSourceFixture(t, map[string][]byte{"src/reservation.py": raw})
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync)
+	require.Contains(t, preview.Checks, types.SourcePreviewCheck{Name: "parser", Ready: true, Message: "source mode requires a healthy, versioned parser with every selected language grammar"})
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+
+	var hit *types.SearchResult
+	for _, params := range []types.SearchParams{
+		{QueryText: "reserve_booking", MatchCount: 10, DisableVectorMatch: true},
+		{QueryText: "reserve_booking", MatchCount: 10, DisableKeywordsMatch: true},
+	} {
+		results, searchErr := f.kbs.HybridSearch(f.ctx, f.kb.ID, params)
+		require.NoError(t, searchErr)
+		var routeHit *types.SearchResult
+		for _, candidate := range results {
+			if strings.Contains(candidate.Content, "reserve_booking") {
+				routeHit = candidate
+				break
+			}
+		}
+		require.NotNil(t, routeHit, "both source index routes must find the Python method")
+		if hit == nil {
+			hit = routeHit
+		}
+	}
+
+	grep := agenttools.NewSourceAwareGrepChunksTool(f.db, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID, TenantID: 1}})
+	grepResult, err := grep.Execute(f.ctx, json.RawMessage(`{"query":"reserve_booking"}`))
+	require.NoError(t, err)
+	require.Greater(t, grepResult.Data["result_count"].(int), 0)
+
+	view, err := f.knowledge.GetSourceFile(f.ctx, hit.KnowledgeID)
+	require.NoError(t, err)
+	require.Equal(t, raw, []byte(view.Content))
+	require.Equal(t, "src/reservation.py", view.Path)
+	require.Contains(t, string(view.Symbols), "src/reservation.py.ReservationService.reserve_booking")
+}
+
 func TestSourcePublishedChunksRemainReadOnlyButDescriptionMayChange(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	log, err := f.service.ManualSync(f.ctx, f.ds.ID)

@@ -76,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError()
             language = body['language']
             extensions = {'java': ('.java',), 'javascript': ('.js', '.jsx', '.mjs', '.cjs'),
-                          'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',)}
+                          'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',), 'python': ('.py',)}
             if language not in self.server.versions or not path.lower().endswith(extensions[language]):
                 raise ValueError()
             raw = base64.b64decode(body['content_base64'], validate=True)

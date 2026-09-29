@@ -30,6 +30,8 @@ func LanguageForPath(logicalPath string) string {
 		return "typescript"
 	case ".tsx":
 		return "tsx"
+	case ".py":
+		return "python"
 	default:
 		return ""
 	}

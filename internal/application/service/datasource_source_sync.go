@@ -130,7 +130,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	manifest, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, raw []byte) error {
 		language := source.LanguageForPath(file.Path)
 		if language == "" {
-			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript files only; narrow the included paths")
+			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript/Python files only; narrow the included paths")
 		}
 		if !checkedLanguages[language] {
 			if !sourceParserReady(ctx, language) {

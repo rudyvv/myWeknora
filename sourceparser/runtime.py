@@ -8,7 +8,7 @@ from pathlib import Path
 import tree_sitter_language_pack as pack
 
 PACK_VERSION = '1.19.0'
-LANGUAGES = ('java', 'javascript', 'typescript', 'tsx')
+LANGUAGES = ('java', 'javascript', 'typescript', 'tsx', 'python')
 BUNDLES = {
     'linux-x86_64': '86995c25a95d59a1235276c8bdfc5156f7ffb1db1d53653c9e58a60e92d4346e',
     'linux-aarch64': '4e0cf38459547f10fd2c0f33c783a9c92e744baf2c591453d59233d15d0ab2de',
@@ -112,62 +112,83 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         if len(symbols) > 10000:
             raise RuntimeError('source declaration limit exceeded')
     # Language node extraction rules only; parsing and structural splitting stay upstream.
-    stack = [(tree.root_node, [])]
-    while stack:
-        node, parents = stack.pop()
-        lineage = parents
-        kind = declarations.get(node.type)
-        inferred_name = None
-        name = node.child_by_field_name('name')
-        body = node.child_by_field_name('body')
-        if language != 'java':
-            if node.type == 'program':
-                kind, name_text = 'module', path
-                # Module context need not repeat the complete source text.
-                body = node.named_children[0] if node.named_children else None
-            elif node.type == 'import_statement':
-                kind = 'import'
-                name = node.child_by_field_name('source')
-                if name is None:
-                    name = next((child.child_by_field_name('source') for child in node.named_children
-                                 if child.type == 'import_require_clause'), None)
-            elif node.type == 'export_statement':
-                declaration = node.child_by_field_name('declaration')
-                exported_name = declaration.child_by_field_name('name') if declaration is not None else None
-                name_text = raw[exported_name.start_byte:exported_name.end_byte].decode('utf-8') if exported_name is not None else 'export'
-                add_symbol('export', name_text, node, parents + [name_text], declaration)
-                value = node.child_by_field_name('value')
-                if value is not None and value.type == 'object':
-                    lineage = parents + ['default']
-                elif value is not None and value.type == 'arrow_function':
-                    lineage = parents + ['default']
-                    add_symbol('function', 'default', value, lineage, value.child_by_field_name('body'))
-            elif node.type == 'pair':
-                name = node.child_by_field_name('key')
-                value = node.child_by_field_name('value')
-                if value is not None and value.type in ('arrow_function', 'function_expression', 'generator_function'):
-                    kind, body = 'function', value.child_by_field_name('body')
-                elif value is not None and value.type == 'object':
-                    kind, body = 'object', value
-            elif node.type in ('variable_declarator', 'public_field_definition', 'field_definition'):
-                value = node.child_by_field_name('value')
-                if value is not None and value.type in ('arrow_function', 'function_expression', 'generator_function', 'class'):
-                    kind = 'class' if value.type == 'class' else 'function'
-                    body = value.child_by_field_name('body')
-                elif value is not None and value.type == 'object' and name is not None and name.type in ('identifier', 'property_identifier', 'private_property_identifier'):
-                    kind, body = 'object', value
-        if language != 'java' and kind and name is None and node.parent is not None and node.parent.type == 'export_statement':
-            inferred_name = 'default'
-        if kind and (name is not None or node.type == 'program' or inferred_name):
-            if inferred_name:
-                name_text = inferred_name
-            if name is not None:
-                name_text = raw[name.start_byte:name.end_byte].decode('utf-8')
-            lineage = parents + [name_text]
-            add_symbol(kind, name_text, node, lineage, body)
-            if kind == 'import':
-                lineage = parents
-        stack.extend((child, lineage) for child in reversed(node.named_children))
+    if language == 'python':
+        root = tree.root_node
+        first_child = root.named_children[0] if root.named_children else None
+        add_symbol('module', path, root, [path], first_child)
+
+        def walk_python(node, parents, containers):
+            if node.type in ('class_definition', 'function_definition'):
+                name = node.child_by_field_name('name')
+                body = node.child_by_field_name('body')
+                if name is not None:
+                    name_text = raw[name.start_byte:name.end_byte].decode('utf-8')
+                    kind = 'class' if node.type == 'class_definition' else (
+                        'method' if containers and containers[-1] == 'class' else 'function')
+                    lineage = parents + [name_text]
+                    add_symbol(kind, name_text, node, lineage, body)
+                    parents, containers = lineage, containers + [kind]
+            for child in node.named_children:
+                walk_python(child, parents, containers)
+
+        walk_python(root, [path], [])
+    else:
+        stack = [(tree.root_node, [])]
+        while stack:
+            node, parents = stack.pop()
+            lineage = parents
+            kind = declarations.get(node.type)
+            inferred_name = None
+            name = node.child_by_field_name('name')
+            body = node.child_by_field_name('body')
+            if language != 'java':
+                if node.type == 'program':
+                    kind, name_text = 'module', path
+                    # Module context need not repeat the complete source text.
+                    body = node.named_children[0] if node.named_children else None
+                elif node.type == 'import_statement':
+                    kind = 'import'
+                    name = node.child_by_field_name('source')
+                    if name is None:
+                        name = next((child.child_by_field_name('source') for child in node.named_children
+                                     if child.type == 'import_require_clause'), None)
+                elif node.type == 'export_statement':
+                    declaration = node.child_by_field_name('declaration')
+                    exported_name = declaration.child_by_field_name('name') if declaration is not None else None
+                    name_text = raw[exported_name.start_byte:exported_name.end_byte].decode('utf-8') if exported_name is not None else 'export'
+                    add_symbol('export', name_text, node, parents + [name_text], declaration)
+                    value = node.child_by_field_name('value')
+                    if value is not None and value.type == 'object':
+                        lineage = parents + ['default']
+                    elif value is not None and value.type == 'arrow_function':
+                        lineage = parents + ['default']
+                        add_symbol('function', 'default', value, lineage, value.child_by_field_name('body'))
+                elif node.type == 'pair':
+                    name = node.child_by_field_name('key')
+                    value = node.child_by_field_name('value')
+                    if value is not None and value.type in ('arrow_function', 'function_expression', 'generator_function'):
+                        kind, body = 'function', value.child_by_field_name('body')
+                    elif value is not None and value.type == 'object':
+                        kind, body = 'object', value
+                elif node.type in ('variable_declarator', 'public_field_definition', 'field_definition'):
+                    value = node.child_by_field_name('value')
+                    if value is not None and value.type in ('arrow_function', 'function_expression', 'generator_function', 'class'):
+                        kind = 'class' if value.type == 'class' else 'function'
+                        body = value.child_by_field_name('body')
+                    elif value is not None and value.type == 'object' and name is not None and name.type in ('identifier', 'property_identifier', 'private_property_identifier'):
+                        kind, body = 'object', value
+            if language != 'java' and kind and name is None and node.parent is not None and node.parent.type == 'export_statement':
+                inferred_name = 'default'
+            if kind and (name is not None or node.type == 'program' or inferred_name):
+                if inferred_name:
+                    name_text = inferred_name
+                if name is not None:
+                    name_text = raw[name.start_byte:name.end_byte].decode('utf-8')
+                lineage = parents + [name_text]
+                add_symbol(kind, name_text, node, lineage, body)
+                if kind == 'import':
+                    lineage = parents
+            stack.extend((child, lineage) for child in reversed(node.named_children))
     symbols.sort(key=lambda symbol: symbol['range']['start_byte'])
     quality = 'syntax_error' if tree.root_node.has_error else 'structural'
     chunks = []

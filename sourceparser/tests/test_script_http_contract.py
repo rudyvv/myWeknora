@@ -176,7 +176,9 @@ class ScriptHTTPContract(unittest.TestCase):
     def test_health_advertises_only_verified_offline_grammars(self):
         status, health = self.request('/health')
         self.assertEqual(status, 200, health)
-        self.assertEqual(health['languages'], ['java', 'javascript', 'tsx', 'typescript'])
+        lock = json.loads((Path(os.environ['SOURCE_PARSER_CACHE']) / 'grammar.lock.json').read_text(encoding='utf-8'))
+        expected = sorted(lock.get('grammars', {'java': lock}))
+        self.assertEqual(health['languages'], expected)
         self.assertIn('rules-3', health['parser_version'])
 
     def test_legacy_java_cache_stays_ready_but_changed_script_grammar_cannot_advertise_readiness(self):
