@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,6 +78,65 @@ func TestSourceFirstJavaSnapshotIsPublishedAndSearchable(t *testing.T) {
 		require.NoError(t, searchErr)
 		require.NotEmpty(t, hits, "both real index routes must find the known Java method")
 	}
+}
+
+func TestManualSourceSyncRemainsPendingWhenQueueEnqueueFails(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err, "the durable source trigger was accepted before queue delivery")
+	require.NotNil(t, log)
+	require.Equal(t, "queued", log.Status)
+
+	stored, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, "queued", stored.Status, "a transient enqueue failure must leave a recoverable pending run")
+	require.Empty(t, stored.ErrorMessage)
+}
+
+func TestSourceSchedulerRecoversPendingManualTriggerAfterRestart(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NotNil(t, log)
+	require.Equal(t, types.SyncLogStatusQueued, log.Status)
+	require.NoError(t, f.service.ResumeDataSource(f.ctx, f.ds.ID))
+
+	recoveredTasks := make(chan *asynq.Task, 1)
+	scheduler := datasource.NewScheduler(
+		repository.NewDataSourceRepository(f.db),
+		repository.NewSyncLogRepository(f.db),
+		sourceTestTaskEnqueuer{tasks: recoveredTasks},
+	)
+	require.NoError(t, scheduler.Start(f.ctx))
+	defer scheduler.Stop()
+
+	select {
+	case task := <-recoveredTasks:
+		var payload types.DataSourceSyncPayload
+		require.NoError(t, json.Unmarshal(task.Payload(), &payload))
+		require.Equal(t, log.ID, payload.SyncLogID, "restart recovery must redeliver the registered run")
+		require.Equal(t, "recovery", payload.Trigger)
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not redeliver the durable source trigger")
+	}
+}
+
+type sourceTestTaskEnqueuer struct {
+	err   error
+	tasks chan<- *asynq.Task
+}
+
+func (e sourceTestTaskEnqueuer) Enqueue(task *asynq.Task, _ ...asynq.Option) (*asynq.TaskInfo, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	if e.tasks != nil {
+		e.tasks <- task
+	}
+	return &asynq.TaskInfo{ID: "source-test-task"}, nil
 }
 
 func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {

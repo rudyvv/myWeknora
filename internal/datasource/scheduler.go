@@ -60,12 +60,18 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 
 	for _, ds := range dataSources {
-		if ds.SyncSchedule == "" {
+		schedule, sourceMode := scheduledSync(ds)
+		if sourceMode {
+			if err := s.recoverQueuedSourceRuns(ctx, ds); err != nil {
+				logger.Errorf(ctx, "[Scheduler] failed to recover source triggers for ds=%s: %v", ds.ID, err)
+			}
+		}
+		if schedule == "" {
 			continue
 		}
 		if err := s.addEntry(ds); err != nil {
 			logger.Warnf(ctx, "[Scheduler] failed to register cron for ds=%s schedule=%q: %v",
-				ds.ID, ds.SyncSchedule, err)
+				ds.ID, schedule, err)
 		}
 	}
 
@@ -90,7 +96,8 @@ func (s *Scheduler) AddOrUpdate(ds *types.DataSource) error {
 		delete(s.entries, ds.ID)
 	}
 
-	if ds.Status != types.DataSourceStatusActive || ds.SyncSchedule == "" {
+	schedule, _ := scheduledSync(ds)
+	if ds.Status != types.DataSourceStatusActive || schedule == "" {
 		return nil
 	}
 
@@ -117,15 +124,72 @@ func (s *Scheduler) addEntry(ds *types.DataSource) error {
 func (s *Scheduler) addEntryLocked(ds *types.DataSource) error {
 	dsID := ds.ID
 	tenantID := ds.TenantID
+	schedule, _ := scheduledSync(ds)
 
-	entryID, err := s.cron.AddFunc(ds.SyncSchedule, func() {
+	entryID, err := s.cron.AddFunc(schedule, func() {
 		s.triggerSync(dsID, tenantID)
 	})
 	if err != nil {
-		return fmt.Errorf("invalid cron expression %q: %w", ds.SyncSchedule, err)
+		return fmt.Errorf("invalid cron expression %q: %w", schedule, err)
 	}
 
 	s.entries[dsID] = entryID
+	return nil
+}
+
+const defaultSourceSyncSchedule = "0 0 * * * *"
+
+// scheduledSync keeps the historical opt-in scheduling behavior for document
+// sources while giving source-mode repositories the agreed hourly default.
+func scheduledSync(ds *types.DataSource) (string, bool) {
+	if ds == nil {
+		return "", false
+	}
+	config, err := ds.ParseConfig()
+	if err != nil {
+		return ds.SyncSchedule, false
+	}
+	mode, err := ContentMode(config)
+	if err != nil || mode != ContentModeSource {
+		return ds.SyncSchedule, false
+	}
+	if ds.SyncSchedule == "" {
+		return defaultSourceSyncSchedule, true
+	}
+	return ds.SyncSchedule, true
+}
+
+// recoverQueuedSourceRuns re-enqueues registrations that survived a process
+// restart but were not yet delivered to the task queue. The stable task ID
+// makes recovery idempotent when the original enqueue actually succeeded.
+func (s *Scheduler) recoverQueuedSourceRuns(ctx context.Context, ds *types.DataSource) error {
+	logs, err := s.syncLogRepo.FindByDataSource(ctx, ds.ID, 1000, 0)
+	if err != nil {
+		return err
+	}
+	for _, syncLog := range logs {
+		if syncLog == nil || syncLog.Status != types.SyncLogStatusQueued || syncLog.TenantID != ds.TenantID {
+			continue
+		}
+		payload := &types.DataSourceSyncPayload{
+			DataSourceID: ds.ID,
+			TenantID:     ds.TenantID,
+			SyncLogID:    syncLog.ID,
+			Trigger:      "recovery",
+		}
+		langfuse.InjectTracing(ctx, payload)
+		payloadJSON, _ := json.Marshal(payload)
+		task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON)
+		_, err := s.taskEnqueuer.Enqueue(task,
+			asynq.Queue(types.QueueSync),
+			asynq.MaxRetry(5),
+			asynq.Timeout(2*time.Hour),
+			asynq.TaskID("dssource:"+syncLog.ID),
+		)
+		if err != nil && err != asynq.ErrTaskIDConflict {
+			logger.Errorf(ctx, "[Scheduler] failed to redeliver source trigger ds=%s syncLog=%s: %v", ds.ID, syncLog.ID, err)
+		}
+	}
 	return nil
 }
 

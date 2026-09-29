@@ -518,7 +518,8 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 	if err != nil {
 		return nil, err
 	}
-	if mode == datasource.ContentModeSource {
+	sourceMode := mode == datasource.ContentModeSource
+	if sourceMode {
 		if s.sourceSnapshots == nil || s.sourceModelService == nil {
 			return nil, datasource.ErrSourcePipelineUnavailable
 		}
@@ -544,6 +545,9 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		Status:       types.SyncLogStatusRunning,
 		StartedAt:    time.Now().UTC(),
 	}
+	if sourceMode {
+		syncLog.Status = types.SyncLogStatusQueued
+	}
 
 	if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
 		logger.Errorf(ctx, "failed to create sync log: %v", err)
@@ -561,12 +565,24 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 	langfuse.InjectTracing(ctx, payload)
 
 	payloadJSON, _ := json.Marshal(payload)
-	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON,
-		asynq.Queue(types.QueueSync), asynq.MaxRetry(5), asynq.Timeout(2*time.Hour))
+	taskOptions := []asynq.Option{asynq.Queue(types.QueueSync), asynq.MaxRetry(5), asynq.Timeout(2 * time.Hour)}
+	if sourceMode {
+		taskOptions = append(taskOptions, asynq.TaskID("dssource:"+syncLog.ID))
+	}
+	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON, taskOptions...)
 
 	info, err := s.taskEnqueuer.Enqueue(task)
 	if err != nil {
 		logger.Errorf(ctx, "failed to enqueue sync task: %v", err)
+		if sourceMode {
+			// Source trigger registration is durable before queue delivery. Leave
+			// its queued run visible and recoverable; the source dispatcher retries
+			// delivery independently of this request.
+			recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceSyncStarted,
+				"data_source", ds.ID, types.AuditOutcomeAccepted,
+				map[string]any{"name": ds.Name, "type": ds.Type, "sync_log_id": syncLog.ID, "trigger": "manual", "processing_status": "pending"})
+			return syncLog, nil
+		}
 		syncLog.Status = types.SyncLogStatusFailed
 		syncLog.FinishedAt = timePtr(time.Now().UTC())
 		syncLog.ErrorMessage = err.Error()

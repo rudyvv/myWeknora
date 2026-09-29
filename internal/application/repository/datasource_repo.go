@@ -142,7 +142,6 @@ func (r *DataSourceRepository) FindActive(ctx context.Context) ([]*types.DataSou
 	if err := r.db.WithContext(ctx).
 		Where("status = ?", types.DataSourceStatusActive).
 		Where("deleted_at IS NULL").
-		Where("sync_schedule != ''").
 		Order("created_at DESC").
 		Find(&dataSources).Error; err != nil {
 		return nil, err
