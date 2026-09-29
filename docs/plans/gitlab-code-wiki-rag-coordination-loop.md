@@ -38,3 +38,6 @@
 后续执行进展（非验收）：T09 报告真实三Vue组件关键词3/3、向量3/3、6次授权读取、6次模型证据切片已通过，正在固化安全统计与提交，尚无新cleanSHA，不能按执行中的产物审查/合并。T06 数据源与repository检查通过，但 consolidated PG新失败仍在定位，不能标绿；root已要求保存临时完整测试结果，避免为输出截断反复跑整组。T10 新回归与修复继续active。三者均无新READY，不重复审旧冻结。
 
 下一批候选只在对应票审查、独立验证、集成及关票完成后派发：T09/T10均验收后优先T11业务链；T10验收后T12有界切块；T06验收后T17预算/并发/恢复或T20 Hook；T13排序和T18历史已具原依赖条件，可用于空闲线。以当时具体依赖与公共文件冲突确定安排，不提前分配未解锁票，不因空闲跳过当前失败。已向用户询问后续review起点是否统一为每票启动时的已验收集成提交，尚待答复；当前三票起点已明确，不受该问题影响。
+2026-09-30 T09 新READY：干净冻结 c56b1c22e026ab5571ab97779ba5e3f65eb0e88d，已批准起点7f4fd1dc。t09_c56_standards/t09_c56_spec两个Sol/high复审已完成：Standards硬0/判断1P3，Spec旧2P2已修但新1P2为空外置script的未读/拒绝信息丢失。见gitlab-code-wiki-rag-t09-c56b1c22-review.md，不能重复审此SHA。root modelcontext PASS1.869s，真实三Vue PG PASS11.252s；新P2已派回。SourceCodeView现有component test实际FAIL（手动SFC加载器找不到新增SourceRegionBadge.vue），仅证明test setup未适配，不声称产品运行坏。已交T09补实际子组件加载与Region DOM断言，worker可单独修复交下个cleanSHA；parser/PG无变化部分不必重复。c56不集成。T06仍有两项状态断言正在定位；T10继续active修复，无新READY。
+
+最新游标：T09 bfeda9b3-5075-445d-9065-efb1864f12ae:33，继续parser状态和badge test修复；T06 c70a713b-d6db-4aff-894d-25f51d1942bf:23，20项PG已报PASS146.368s，正在记录并冻结，尚无新READY；T10 964cbe49-b467-4a3c-b158-6f6ac00a34d3:19，仍active无新READY。只在新SHA/问题/失败事件动作，marker变化不等于完成。
