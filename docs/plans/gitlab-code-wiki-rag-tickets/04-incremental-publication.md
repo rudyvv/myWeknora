@@ -1,6 +1,6 @@
 # T04：[CodeWiki] 源码增删改、重命名与配置变化的完整版本更新
 
-已发布：[Issue #12](https://github.com/rudyvv/myWeknora/issues/12)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；实现、针对性验收及双轴审查完成，待集成验证和发布。
+已发布：[Issue #12](https://github.com/rudyvv/myWeknora/issues/12)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；实现、集成验收及双轴审查完成，2026-09-29 已推送并关闭 Issue。
 
 ## What to build
 

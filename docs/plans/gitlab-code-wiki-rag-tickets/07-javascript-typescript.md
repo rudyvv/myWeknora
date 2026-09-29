@@ -1,6 +1,6 @@
 # T07：[CodeWiki] JavaScript 与 TypeScript 结构检索和原始位置引用
 
-已发布：[Issue #15](https://github.com/rudyvv/myWeknora/issues/15)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；实现、针对性验收及双轴复审完成，待集成验证和发布。
+已发布：[Issue #15](https://github.com/rudyvv/myWeknora/issues/15)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；实现、集成验收及双轴复审完成，2026-09-29 已推送并关闭 Issue。
 
 ## What to build
 

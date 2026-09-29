@@ -53,4 +53,4 @@ T04 实现提交 `3b47cf5d`（独立分支）/`dbfb6530`（集成）；T07 实�
 
 T14 独立提交 `bd7a43ac` 已推送，以 `aaf7cb58` 合入功能分支；其必要 shared fixture hunk 自动保留 A/B 版本，没有新冲突。最终 `22456cf6` 共用 GitLabBlobURL 并使用真实 T04 空发布验证旧 Wiki 修订。T14 完整及最后集成新增两轴审查均 0 项剩余。三项交叉公开测试 PASS 52.031 秒；完整 Source 服务/工具/HTTP 用例 PASS 401.699 秒。Go vet/格式/服务端构建与 frontend typecheck/Vite build 均通过。
 
-全仓 Go 仍有 24 项失败（5 包），完整 TS/mjs 前端 915 项中通过 910 / 失败 5；未独立在基点重跑，不宣称全仓全绿或全部证明基线。详细失败、测试命令与限额见 [首批集成验证](gitlab-code-wiki-rag-batch-one-validation.md)。GitHub 三票将在验证记录推送后统一关闭；原 22 项中其余未实现票保持 open，父 Spec 保持 open。当前所有实现进程结束，三个实现 worktree 可在准备下一分支和基点后复用；语言 grammar cache 保留以供既有流程，下一语言使用独立 cache，避免覆盖本次验证集合。
+全仓 Go 仍有 24 项失败（5 包），完整 TS/mjs 前端 915 项中通过 910 / 失败 5；未独立在基点重跑，不宣称全仓全绿或全部证明基线。详细失败、测试命令与限额见 [首批集成验证](gitlab-code-wiki-rag-batch-one-validation.md)。GitHub 三票已在 2026-09-29 保存验收勾选、发布证据并逐项确认关闭，父 Spec 显示 6 / 22；原 22 项中其余未实现票保持 open，父 Spec 保持 open。当前所有实现进程结束，三个实现 worktree 可在准备下一分支和基点后复用；语言 grammar cache 保留以供既有流程，下一语言使用独立 cache，避免覆盖本次验证集合。

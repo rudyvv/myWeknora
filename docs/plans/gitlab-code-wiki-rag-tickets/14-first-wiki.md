@@ -1,6 +1,6 @@
 # T14：[CodeWiki] 单模块技术 WikiPage 的生成、证据校验与范围阅读
 
-已发布：[Issue #22](https://github.com/rudyvv/myWeknora/issues/22)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；实现与本分支相关验收已完成，Standards / Spec 最终复审均 0 项剩余，待根任务集成。详见 [T14 验收记录](../gitlab-code-wiki-rag-t14-validation.md)。
+已发布：[Issue #22](https://github.com/rudyvv/myWeknora/issues/22)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；实现与集成验收已完成，Standards / Spec 最终复审均 0 项剩余，2026-09-29 已推送并关闭 Issue。详见 [T14 验收记录](../gitlab-code-wiki-rag-t14-validation.md)。
 
 ## What to build
 
@@ -22,4 +22,4 @@
 
 ## 验证状态
 
-相关公开 Wiki / HTTP / Agent / source reader 与 UI 验证已完成；2026-09-29 实现冻结且两轴最终复审通过。宽相关包的 Windows 失败、跨 T04 空 publication 待集成 case 与全仓统一验证边界详见验收记录，不宣称全仓全绿。
+相关公开 Wiki / HTTP / Agent / source reader 与 UI 验证已完成；2026-09-29 实现冻结且两轴最终复审通过。宽相关包的 Windows 失败、跨 T04 空 publication 已通过；全仓统一验证边界详见验收记录，不宣称全仓全绿。

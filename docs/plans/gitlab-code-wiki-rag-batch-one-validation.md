@@ -33,6 +33,7 @@
 Go 24 项失败集中于 Windows 的 SQLite TempDir 文件锁、符号链接权限、POSIX shell / Python 环境、Docker host 的 `npipe` 不支持，以及未改动的飞书日志汇总与 CRLF 部署能力断言。完整日志保存于工作树 `.source-batch-go-full.log`；没有在 `461029f6` 独立重跑，不能把全部失败宣称为已证明的基线，也不宣称全仓测试通过。
 
 失败包：
+
 - `github.com/Tencent/WeKnora/internal/agent/tools`
 - `github.com/Tencent/WeKnora/internal/application/service`
 - `github.com/Tencent/WeKnora/internal/datasource/connector/feishu/wiki`
@@ -79,3 +80,7 @@ Go 24 项失败集中于 Windows 的 SQLite TempDir 文件锁、符号链接权�
 本批完成增量发布、JS/TS 结构检索及首张小模块技术卡片。仍有首期 100 selected files / 16 MiB 的同步限额，技术卡片 evidence 上限 16 files / 32 KiB。代表仓库约 3,844 文件 / 125 万行、真实内网 GitLab 与真实模型相关性 / 吞吐还未验收，整体能力需要后续 tickets 与 T22。
 
 GitHub #12 / #15 / #22 在最终完整 Source 验证后统一勾选验收、记录结果并关闭；父 Spec #8 保持 open。下一批可复用空闲 worktree，按依赖安排 T05、T08、T10；T06、T09、T13 等也已进入可排期范围，不提前关闭仍未实现的 ticket。
+
+## GitHub 发布验收
+
+2026-09-29 已逐项保存验收勾选、发布完成证据并确认 T04 / #12、T07 / #15、T14 / #22 关闭。父 Spec #8 保持 open，原生子 Issue 进度为 6 / 22；尚未实施的票保持 open。

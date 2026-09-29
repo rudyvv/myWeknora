@@ -40,3 +40,5 @@
 ready-for-agent 是 triage 标记，只有 blockers 已完成的 ticket 才进入执行 frontier。T01 [#9](https://github.com/rudyvv/myWeknora/issues/9) 已实现、验证并完成双轴复审，代码已推送到 `codex/gitlab-code-wiki-rag`，Issue 已关闭；[验证记录](gitlab-code-wiki-rag-t01-validation.md)明确全量测试的环境限制。T02 [#10](https://github.com/rudyvv/myWeknora/issues/10) 及 T03 [#11](https://github.com/rudyvv/myWeknora/issues/11) 均已实现并完成针对性验收与双轴复审，见 [T02](gitlab-code-wiki-rag-t02-validation.md) 和 [T03](gitlab-code-wiki-rag-t03-progress.md) 的验证记录及全量环境限制。T03 收尾后按用户批准的 [并行安排](gitlab-code-wiki-rag-parallel-execution.md)，从同一提交分别启动 T04、T07、T14；其余已解除阻塞的 T08、T10、T13 按空闲工作线排期。尚未完成的 ticket 保持 open。
 
 发布映射见 [记录](gitlab-code-wiki-rag-publication.json)。Spec 和 22 项 tickets 通过用户恢复的浏览器登录发布并逐项核验；父 Spec 正文未被 tickets 发布改写。父 Spec 与未完成 tickets 仍保持 open。
+
+2026-09-29：首批并行 T04 / #12、T07 / #15、T14 / #22 完成实现、集成与双轴复审，已推送并确认关闭，累计 6 / 22。验证详情及全仓测试限制见 [首批集成验证](gitlab-code-wiki-rag-batch-one-validation.md)。下一批优先安排 T05、T08、T10，分别隔离故障对账、Python 和 MyBatis 工作；仍按每票验收，不缩减原 22 项。

@@ -22,7 +22,10 @@
       "blocked_by": [
         9
       ],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-29",
+      "implementation_head": "2e3d379a",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t02-validation.md"
     },
     {
       "ticket": "T03",
@@ -32,7 +35,10 @@
       "blocked_by": [
         10
       ],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-29",
+      "implementation_head": "461029f6",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t03-progress.md"
     },
     {
       "ticket": "T04",
@@ -42,7 +48,10 @@
       "blocked_by": [
         11
       ],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-29",
+      "implementation_head": "dbfb6530",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t04-validation.md"
     },
     {
       "ticket": "T05",
@@ -72,7 +81,10 @@
       "blocked_by": [
         10
       ],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-29",
+      "implementation_head": "b6638c72",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t07-validation.md"
     },
     {
       "ticket": "T08",
@@ -144,7 +156,10 @@
       "blocked_by": [
         11
       ],
-      "status": "open"
+      "status": "closed",
+      "completed_at": "2026-09-29",
+      "implementation_head": "aaf7cb58",
+      "validation": "docs/plans/gitlab-code-wiki-rag-t14-validation.md"
     },
     {
       "ticket": "T15",
