@@ -110,6 +110,7 @@ func TestSourceSchedulerRecoversPendingManualTriggerAfterRestart(t *testing.T) {
 		repository.NewDataSourceRepository(f.db),
 		repository.NewSyncLogRepository(f.db),
 		sourceTestTaskEnqueuer{tasks: recoveredTasks},
+		f.service.sourceSnapshots,
 	)
 	require.NoError(t, scheduler.Start(f.ctx))
 	defer scheduler.Stop()
@@ -182,6 +183,289 @@ func TestSourceManualTriggersSerializeAndCatchUpToLatestCommit(t *testing.T) {
 	var outboxCount int64
 	require.NoError(t, f.db.Table("source_publication_outbox").Where("data_source_id=? AND event_type='source.wiki.update' AND status='pending'", f.ds.ID).Count(&outboxCount).Error)
 	require.EqualValues(t, 2, outboxCount, "each committed publication must atomically leave a recoverable Wiki update signal")
+}
+
+func TestSourceStaleRunCannotOverwriteCanceledStatus(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+
+	ds, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	control := f.service.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	lease, claimed, err := control.ClaimSourceRun(f.ctx, ds, log.ID, 1, uuid.NewString(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(ds.Config, &config))
+	settings := config["settings"].(map[string]any)
+	settings["fencing_test_config_change"] = true
+	ds.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	require.NoError(t, control.AdvanceSourceConfig(f.ctx, ds, true))
+
+	fenced, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, fenced.Status)
+	require.ErrorIs(t, control.RecordSourceRunPhase(f.ctx, lease, "ready", ""), types.ErrSourceSyncLeaseLost)
+
+	fenced.SourceConfigGeneration = lease.ConfigGeneration
+	fenced.SourceFencingToken = lease.FencingToken
+	fenced.Status = types.SyncLogStatusSuccess
+	err = f.service.syncLogRepo.UpdateResult(f.ctx, fenced)
+	after, readErr := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, readErr)
+	require.ErrorIs(t, err, types.ErrSourceSyncLeaseLost)
+	require.Equal(t, types.SyncLogStatusCanceled, after.Status)
+}
+
+func TestSourceRetryableFailureKeepsDurableRecoveryAndVisibleResult(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.embedVector = []float32{0, 0, 0}
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+	attempt := &types.SourceWikiAttempt{
+		ID: uuid.NewString(), TenantID: f.ds.TenantID, KnowledgeBaseID: f.kb.ID,
+		SourceID: f.ds.ID, ModulePath: "src", Title: "Consumed T14 budget", Slug: "consumed-t14-budget",
+		Status: "failed", Calls: 3, Tokens: 4821, Repairs: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, f.db.Create(attempt).Error)
+
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.ErrorContains(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, log)), "zero")
+
+	stored, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, stored.Status, "retryable failure remains a durable queued run")
+	require.Contains(t, stored.ErrorMessage, "zero")
+
+	ds, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.DataSourceStatusPaused, ds.Status, "manual sync must not unpause a paused datasource")
+	require.NotEmpty(t, ds.ErrorMessage)
+	require.NotEmpty(t, ds.LastSyncResult)
+
+	dispatches, err := f.service.syncLogRepo.(interfaces.SourceSyncControlRepository).RecoverSourceTriggers(f.ctx, ds)
+	require.NoError(t, err)
+	require.Len(t, dispatches, 1, "lost queue retry must be recoverable from database state")
+	require.Equal(t, log.ID, dispatches[0].SyncLog.ID)
+	var retained types.SourceWikiAttempt
+	require.NoError(t, f.db.Where("id=?", attempt.ID).Take(&retained).Error)
+	require.Equal(t, 3, retained.Calls)
+	require.Equal(t, 4821, retained.Tokens)
+	require.Equal(t, 1, retained.Repairs, "source-run recovery must not reset a consumed T14 Wiki-attempt budget")
+}
+
+func TestSourceRecoveryRejectsIncompatiblePersistedArtifactVersions(t *testing.T) {
+	for _, field := range []string{"processing_version", "embedding_version"} {
+		t.Run(field, func(t *testing.T) {
+			f := newJavaSourceFixture(t)
+			syncSourceFixture(t, f)
+			published, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+			require.NoError(t, err)
+			f.advanceJava("package demo; public class Service { int recoveryTarget() { return 2; } }\n")
+
+			f.embedStarted = make(chan struct{}, 1)
+			f.embedRelease = make(chan struct{})
+			delivered := make(chan *asynq.Task, 2)
+			f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: delivered}
+			log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+			require.NoError(t, err)
+			task := <-delivered
+			runCtx, cancel := context.WithCancel(f.ctx)
+			done := make(chan error, 1)
+			go func() { done <- f.service.ProcessSync(runCtx, task) }()
+			select {
+			case <-f.embedStarted:
+			case <-time.After(20 * time.Second):
+				cancel()
+				t.Fatal("source run did not reach embedding after staging parsed chunks")
+			}
+			var staged struct {
+				ID string `gorm:"column:id"`
+			}
+			require.NoError(t, f.db.Table("source_snapshots").Select("id").Where("sync_log_id=?", log.ID).Take(&staged).Error)
+			cancel()
+			require.Error(t, <-done)
+			var retryTask *asynq.Task
+			select {
+			case retryTask = <-delivered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("durable retry dispatch was not enqueued after the interrupted stage")
+			}
+			f.embedStarted, f.embedRelease = nil, nil
+
+			require.NoError(t, f.db.Table("source_snapshots").Where("id=?", staged.ID).Update(field, "incompatible-fixture-version").Error)
+			parseCalls := f.parseCount.Load()
+			err = f.service.ProcessSync(f.ctx, retryTask)
+			require.ErrorContains(t, err, "start a new source run")
+			require.Equal(t, parseCalls, f.parseCount.Load(), "recovery must reject the stage before parsing can be rebound to old chunk ids")
+			current, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+			require.NoError(t, err)
+			require.Equal(t, published.Snapshot.ID, current.Snapshot.ID, "incompatible recovery must retain the previous publication")
+		})
+	}
+}
+
+func TestSourceUnchangedTargetDoesNotRepublish(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	firstLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, firstLog)))
+	before, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+
+	secondLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, secondLog)))
+	after, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+
+	var publications, signals int64
+	require.NoError(t, f.db.Table("source_snapshots").Where("data_source_id=? AND state='published'", f.ds.ID).Count(&publications).Error)
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("data_source_id=?", f.ds.ID).Count(&signals).Error)
+	require.Equal(t, before.Snapshot.ID, after.Snapshot.ID, "same target and effective processing/indexing identity must retain the existing publication")
+	require.EqualValues(t, 1, publications)
+	require.EqualValues(t, 1, signals)
+}
+
+func TestSourcePublicationOutboxAcceptsTypedPendingUpdateAtomically(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, log)))
+
+	var event struct {
+		ID               string `gorm:"column:id"`
+		SnapshotID       string `gorm:"column:snapshot_id"`
+		ConfigGeneration int64  `gorm:"column:config_generation"`
+		Status           string `gorm:"column:status"`
+		AttemptCount     int    `gorm:"column:attempt_count"`
+	}
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("data_source_id=?", f.ds.ID).Take(&event).Error)
+	require.Equal(t, "pending", event.Status)
+
+	// Fail the ack after the receiver insert. The shared transaction must roll
+	// back both writes, leave the event pending, and record one bounded attempt.
+	require.NoError(t, f.db.Exec(`CREATE FUNCTION reject_source_outbox_ack() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.status = 'delivered' THEN RAISE EXCEPTION 'injected source outbox ack failure'; END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER reject_source_outbox_ack BEFORE UPDATE ON source_publication_outbox
+			FOR EACH ROW EXECUTE FUNCTION reject_source_outbox_ack();`).Error)
+	_, err = f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+	require.ErrorContains(t, err, "injected source outbox ack failure")
+	var pendingCount int64
+	require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, event.ID).Count(&pendingCount).Error)
+	require.Zero(t, pendingCount, "receiver acceptance must roll back with the failed acknowledgement")
+	var retryWindow struct {
+		NextAttemptAt time.Time `gorm:"column:next_attempt_at"`
+		AttemptCount  int       `gorm:"column:attempt_count"`
+	}
+	require.NoError(t, f.db.Table("source_publication_outbox").Select("next_attempt_at, attempt_count").Where("id=?", event.ID).Take(&retryWindow).Error)
+	require.Equal(t, 1, retryWindow.AttemptCount)
+	require.True(t, retryWindow.NextAttemptAt.After(time.Now().UTC()), "transient receiver failures use bounded retry backoff")
+	require.NoError(t, f.db.Exec("DROP TRIGGER reject_source_outbox_ack ON source_publication_outbox; DROP FUNCTION reject_source_outbox_ack()").Error)
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("id=?", event.ID).Update("next_attempt_at", time.Now().UTC()).Error)
+
+	// A process restart runs the startup relay and accepts the still-pending row.
+	scheduler := datasource.NewScheduler(
+		repository.NewDataSourceRepository(f.db), repository.NewSyncLogRepository(f.db),
+		sourceTestTaskEnqueuer{}, f.service.sourceSnapshots,
+	)
+	require.NoError(t, scheduler.Start(f.ctx))
+	scheduler.Stop()
+
+	var accepted types.TaskPendingOp
+	require.NoError(t, f.db.Where("task_type=? AND scope=? AND scope_id=? AND op=? AND dedup_key=?",
+		types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, f.kb.ID, "published_snapshot", event.ID).Take(&accepted).Error)
+	var payload types.SourceWikiUpdatePayload
+	require.NoError(t, json.Unmarshal(accepted.Payload, &payload))
+	require.Equal(t, 1, payload.SchemaVersion)
+	require.Equal(t, event.ID, payload.EventID)
+	require.Equal(t, f.ds.TenantID, payload.TenantID)
+	require.Equal(t, f.kb.ID, payload.KnowledgeBaseID)
+	require.Equal(t, f.ds.ID, payload.DataSourceID)
+	require.Equal(t, event.SnapshotID, payload.SnapshotID)
+	require.Equal(t, event.ConfigGeneration, payload.ConfigGeneration)
+	require.Equal(t, f.sha, payload.CommitSHA)
+
+	acceptedCount, err := f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+	require.NoError(t, err)
+	require.Zero(t, acceptedCount)
+	require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, event.ID).Count(&pendingCount).Error)
+	require.EqualValues(t, 1, pendingCount, "replaying an acknowledged event cannot create duplicate pending Wiki work")
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("id=? AND status='delivered' AND attempt_count=2", event.ID).Count(&pendingCount).Error)
+	require.EqualValues(t, 1, pendingCount)
+}
+
+func TestSourcePublicationOutboxSupersedesStaleTargets(t *testing.T) {
+	t.Run("latest published snapshot wins", func(t *testing.T) {
+		f := newJavaSourceFixture(t)
+		firstLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+		require.NoError(t, err)
+		require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, firstLog)))
+		f.advanceJava("package demo; public class Service { int latest() { return 2; } }\n")
+		secondLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+		require.NoError(t, err)
+		require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, secondLog)))
+		latest, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+		require.NoError(t, err)
+
+		accepted, err := f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+		require.NoError(t, err)
+		require.Equal(t, 1, accepted)
+		var eventID string
+		require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=?", types.TypeSourceWikiUpdate).Pluck("dedup_key", &eventID).Error)
+		var payload types.SourceWikiUpdatePayload
+		var op types.TaskPendingOp
+		require.NoError(t, f.db.Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, eventID).Take(&op).Error)
+		require.NoError(t, json.Unmarshal(op.Payload, &payload))
+		require.Equal(t, latest.Snapshot.ID, payload.SnapshotID)
+		var superseded int64
+		require.NoError(t, f.db.Table("source_publication_outbox").Where("snapshot_id<>? AND status='superseded'", latest.Snapshot.ID).Count(&superseded).Error)
+		require.EqualValues(t, 1, superseded)
+	})
+
+}
+
+func TestSourcePublicationOutboxDoesNotRecreateWorkAfterInvalidation(t *testing.T) {
+	for _, scenario := range []string{"configuration changed", "source deleted", "knowledge base deleted", "publication cleared"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newJavaSourceFixture(t)
+			log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+			require.NoError(t, err)
+			require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, log)))
+
+			switch scenario {
+			case "configuration changed":
+				updated := *f.ds
+				config, parseErr := updated.ParseConfig()
+				require.NoError(t, parseErr)
+				config.Settings["exclude_paths"] = []string{"src/Service.java"}
+				updated.Config, err = config.ToJSON()
+				require.NoError(t, err)
+				_, err = f.service.UpdateDataSource(f.ctx, &updated)
+				require.NoError(t, err)
+			case "source deleted":
+				require.NoError(t, f.service.DeleteDataSource(f.ctx, f.ds.ID))
+			case "knowledge base deleted":
+				require.NoError(t, f.db.Model(&types.KnowledgeBase{}).Where("id=?", f.kb.ID).Update("deleted_at", time.Now().UTC()).Error)
+			case "publication cleared":
+				require.NoError(t, f.db.Exec("DELETE FROM source_publications WHERE data_source_id=?", f.ds.ID).Error)
+			}
+
+			_, err = f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+			require.NoError(t, err)
+			var pendingCount, superseded int64
+			require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=?", types.TypeSourceWikiUpdate).Count(&pendingCount).Error)
+			require.Zero(t, pendingCount, "invalidated publication must not recreate pending Wiki work")
+			require.NoError(t, f.db.Table("source_publication_outbox").Where("data_source_id=? AND status='superseded'", f.ds.ID).Count(&superseded).Error)
+			require.EqualValues(t, 1, superseded)
+		})
+	}
 }
 
 func TestSourceLeaseSerializesWorkersAndFencesExpiredOwner(t *testing.T) {
@@ -272,7 +556,8 @@ func TestSourceRetryReusesCompletedParseStage(t *testing.T) {
 	cancel()
 	require.Error(t, <-done, "the canceled worker should leave the run recoverable")
 	f.embedStarted, f.embedRelease = nil, nil
-	require.NoError(t, f.service.ProcessSync(f.ctx, task))
+	retryTask := <-delivered
+	require.NoError(t, f.service.ProcessSync(f.ctx, retryTask))
 	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
 	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
@@ -300,6 +585,15 @@ func (e sourceTestTaskEnqueuer) Enqueue(task *asynq.Task, _ ...asynq.Option) (*a
 		e.tasks <- task
 	}
 	return &asynq.TaskInfo{ID: "source-test-task"}, nil
+}
+
+func sourceTestSyncTask(t *testing.T, f *javaSourceFixture, log *types.SyncLog) *asynq.Task {
+	t.Helper()
+	payload, err := json.Marshal(types.DataSourceSyncPayload{
+		DataSourceID: f.ds.ID, TenantID: f.ds.TenantID, SyncLogID: log.ID, Trigger: "manual",
+	})
+	require.NoError(t, err)
+	return asynq.NewTask(types.TypeDataSourceSync, payload)
 }
 
 func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
@@ -652,7 +946,8 @@ func TestSourceInvalidEmbeddingNeverPublishes(t *testing.T) {
 	require.ErrorContains(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)), "zero")
 	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
-	require.Equal(t, types.SyncLogStatusFailed, finished.Status)
+	require.Equal(t, types.SyncLogStatusQueued, finished.Status, "retryable indexing failure remains recoverable")
+	require.Contains(t, finished.ErrorMessage, "zero")
 	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "getPushSchedule", QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10})
 	require.NoError(t, err)
 	require.Empty(t, hits)
@@ -667,10 +962,12 @@ func TestSourceUnreadableSelectedJavaPreventsPublication(t *testing.T) {
 	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
 	require.Equal(t, types.SyncLogStatusFailed, finished.Status)
+	require.Contains(t, finished.ErrorMessage, "not readable")
 	var progress types.SyncResult
 	require.NoError(t, json.Unmarshal(finished.Result, &progress))
 	require.True(t, progress.Source.Snapshot.ManifestComplete)
-	require.Len(t, progress.Source.Members, 3)
+	require.Equal(t, 3, progress.Source.Snapshot.MemberCount)
+	require.Empty(t, progress.Source.Members, "unreadable fixed-target members are rejected before staging")
 	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "getPushSchedule", QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10})
 	require.NoError(t, err)
 	require.Empty(t, hits)
@@ -706,7 +1003,8 @@ func TestSourceKeywordIndexFailureNeverPublishesFirstSnapshot(t *testing.T) {
 	require.ErrorContains(t, <-done, "keyword index")
 	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
-	require.Equal(t, types.SyncLogStatusFailed, finished.Status)
+	require.Equal(t, types.SyncLogStatusQueued, finished.Status, "retryable publication failure remains recoverable")
+	require.Contains(t, finished.ErrorMessage, "keyword index")
 	var progress types.SyncResult
 	require.NoError(t, json.Unmarshal(finished.Result, &progress))
 	require.Equal(t, "failed", progress.Source.Snapshot.State)
@@ -853,7 +1151,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	db, err := gorm.Open(pgdriver.Open(address.String()), &gorm.Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() { sqlDB, _ := db.DB(); _ = sqlDB.Close() })
-	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Model{}, &types.DataSource{}, &types.SyncLog{}, &types.KnowledgeTag{}, &types.KnowledgeTagRelation{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}))
+	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Model{}, &types.DataSource{}, &types.SyncLog{}, &types.TaskPendingOp{}, &types.SourceWikiAttempt{}, &types.KnowledgeTag{}, &types.KnowledgeTagRelation{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}))
 	require.NoError(t, db.Exec(`CREATE TABLE embeddings (
 		id BIGSERIAL PRIMARY KEY, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
 		source_id TEXT NOT NULL, source_type INTEGER NOT NULL, chunk_id TEXT, knowledge_id TEXT,
@@ -876,6 +1174,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	coordinationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000108_source_sync_coordination.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(coordinationMigration)).Error)
+	sourceWikiOutboxMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000109_source_wiki_outbox_acceptance.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(sourceWikiOutboxMigration)).Error)
 	parser := exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
 	parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
 	stdout, err := parser.StdoutPipe()
@@ -1085,7 +1386,8 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	kbs := NewKnowledgeBaseService(kbRepo, repository.NewSourceAwareKnowledgeRepository(db), repository.NewSourceAwareChunkRepository(db), nil, f.shares, modelService, engines, nil, repository.NewTenantRepository(db), nil, nil, nil, nil, nil, nil, dsRepo, repository.NewSyncLogRepository(db), nil, nil, nil, nil, f.agentShares)
 	registry := datasource.NewConnectorRegistry()
 	require.NoError(t, registry.Register(gitlab.NewConnector()))
-	svc := NewDataSourceService(dsRepo, repository.NewSyncLogRepository(db), nil, kbs, kbDeleteTaskEnqueuer{}, registry, datasource.NewScheduler(dsRepo, repository.NewSyncLogRepository(db), kbDeleteTaskEnqueuer{}), repository.NewTenantRepository(db), nil, nil, engines, nil, models, repository.NewSourceSnapshotRepository(db), modelService).(*DataSourceService)
+	sourceSnapshots := repository.NewSourceSnapshotRepository(db)
+	svc := NewDataSourceService(dsRepo, repository.NewSyncLogRepository(db), nil, kbs, kbDeleteTaskEnqueuer{}, registry, datasource.NewScheduler(dsRepo, repository.NewSyncLogRepository(db), kbDeleteTaskEnqueuer{}, sourceSnapshots), repository.NewTenantRepository(db), nil, nil, engines, nil, models, sourceSnapshots, modelService).(*DataSourceService)
 	f.ctx, f.db, f.service, f.kbs, f.ds, f.kb, f.sha = ctx, db, svc, kbs, ds, kb, sha
 	f.modelService = modelService
 	f.chunks = NewChunkService(repository.NewSourceAwareChunkRepository(db), repository.NewSourceAwareKnowledgeRepository(db), kbRepo, modelService, engines, nil, nil, nil, kbs)

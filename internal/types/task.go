@@ -251,6 +251,7 @@ const (
 	TypeDataSourceSync           = "datasource:sync"            // 数据源同步任务
 	TypeWikiIngest               = "wiki:ingest"                // Wiki 页面同步任务
 	TypeWikiFinalize             = "wiki:finalize"              // Wiki KB 级收尾任务（防抖：索引重建/死链清理/交叉链接）
+	TypeSourceWikiUpdate         = "source:wiki:update"         // Durable published-source handoff for the source Wiki updater
 	TypeTemporaryDocumentProcess = "temporary_document:process" // 会话临时文档解析任务
 	// TypeMemoryExtract 长期记忆抽取任务（会话轮次防抖后异步执行）
 	TypeMemoryExtract = "memory:extract"

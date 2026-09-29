@@ -43,9 +43,6 @@ type sourceSyncRunRow struct {
 	Trigger            string `gorm:"column:trigger"`
 	Phase              string `gorm:"column:phase"`
 	TargetCommitSHA    string `gorm:"column:target_commit_sha"`
-	BudgetCalls        int    `gorm:"column:budget_calls"`
-	BudgetTokens       int64  `gorm:"column:budget_tokens"`
-	BudgetRepairs      int    `gorm:"column:budget_repairs"`
 	RetryCount         int    `gorm:"column:retry_count"`
 }
 
@@ -57,7 +54,18 @@ func sourceConfigFingerprint(ds *types.DataSource) string {
 			canonical = encoded
 		}
 	}
-	hash := sha256.Sum256(canonical)
+	identity := struct {
+		DataSourceID    string          `json:"data_source_id"`
+		TenantID        uint64          `json:"tenant_id"`
+		KnowledgeBaseID string          `json:"knowledge_base_id"`
+		Type            string          `json:"type"`
+		Config          json.RawMessage `json:"config"`
+	}{DataSourceID: ds.ID, TenantID: ds.TenantID, KnowledgeBaseID: ds.KnowledgeBaseID, Type: ds.Type, Config: canonical}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		encoded = canonical
+	}
+	hash := sha256.Sum256(encoded)
 	return hex.EncodeToString(hash[:])
 }
 
@@ -200,9 +208,6 @@ func (r *SyncLogRepository) AdvanceSourceConfig(ctx context.Context, ds *types.D
 				"fencing_token": state.FencingToken, "lease_owner": nil, "lease_expires_at": nil,
 				"active_sync_log_id": nil, "pending_sync_log_id": nil, "pending_trigger": "",
 			})
-		}
-		if state.ConfigFingerprint == sourceConfigFingerprint(ds) {
-			return nil
 		}
 		return r.invalidateSourceGeneration(tx, state, ds)
 	})
@@ -597,7 +602,11 @@ func (r *SyncLogRepository) CommitSourceRunResult(ctx context.Context, lease typ
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=?", ds.ID, ds.TenantID).Take(&current).Error; err != nil {
 			return err
 		}
-		updates := map[string]any{"status": current.Status, "error_message": ds.ErrorMessage, "last_sync_result": ds.LastSyncResult, "updated_at": time.Now().UTC()}
+		status := ds.Status
+		if current.Status == types.DataSourceStatusPaused {
+			status = types.DataSourceStatusPaused
+		}
+		updates := map[string]any{"status": status, "error_message": ds.ErrorMessage, "last_sync_result": ds.LastSyncResult, "updated_at": time.Now().UTC()}
 		if ds.LastSyncAt != nil {
 			updates["last_sync_at"] = ds.LastSyncAt
 		}

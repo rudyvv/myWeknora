@@ -37,7 +37,7 @@ func TestUpdateDataSourceRejectsSourceModeWithoutSpecifiedBranch(t *testing.T) {
 	stored := &types.DataSource{ID: "source-one", TenantID: 1, KnowledgeBaseID: "kb-one", Type: types.ConnectorTypeGitLab,
 		Config: types.JSON(`{"type":"gitlab","settings":{"projects":[{"project_id":"123"}]}}`)}
 	repo := newKBDeleteDSRepo("kb-one", stored)
-	svc := &DataSourceService{dsRepo: repo, scheduler: datasource.NewScheduler(repo, nil, nil)}
+	svc := &DataSourceService{dsRepo: repo, scheduler: datasource.NewScheduler(repo, nil, nil, nil)}
 	incoming := *stored
 	incoming.Config = types.JSON(`{"type":"gitlab","settings":{"content_mode":"source","projects":[{"project_id":"123"}]}}`)
 
@@ -51,7 +51,7 @@ func TestUpdateDataSourceRejectsSourceModeWithoutSpecifiedBranch(t *testing.T) {
 func TestSourceSettingsAreVersionedWhenSavedWithoutChangingDocumentDefaults(t *testing.T) {
 	stored := &types.DataSource{ID: "source-one", TenantID: 1, KnowledgeBaseID: "kb-one", Type: "gitlab", Config: types.JSON(`{"settings":{"projects":[{"project_id":"123"}]}}`)}
 	repo := &sourceSettingsRepo{kbDeleteDSRepo: newKBDeleteDSRepo("kb-one", stored)}
-	svc := &DataSourceService{dsRepo: repo, scheduler: datasource.NewScheduler(repo, nil, nil)}
+	svc := &DataSourceService{dsRepo: repo, scheduler: datasource.NewScheduler(repo, nil, nil, nil)}
 	incoming := *stored
 	incoming.Config = types.JSON(`{"settings":{"content_mode":"source","projects":[{"project_id":"123","ref":"main","paths":["src"]}],"exclude_paths":["src/generated"]}}`)
 	_, err := svc.UpdateDataSource(context.Background(), &incoming)

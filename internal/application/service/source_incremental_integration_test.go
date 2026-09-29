@@ -35,7 +35,7 @@ func TestSourceRepeatedCompleteSnapshotReusesParsingAndVectors(t *testing.T) {
 	var current types.SyncResult
 	require.NoError(t, json.Unmarshal(logs[0].Result, &current))
 	require.Equal(t, old.Source.Members[1].SourceFileID, current.Source.Members[1].SourceFileID)
-	require.NotEqual(t, old.Source.Snapshot.ID, current.Source.Snapshot.ID)
+	require.Equal(t, old.Source.Snapshot.ID, current.Source.Snapshot.ID, "identical publication identity must remain a no-op")
 	for _, keywordOnly := range []bool{true, false} {
 		hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "getPushSchedule", MatchCount: 10, DisableVectorMatch: keywordOnly, DisableKeywordsMatch: !keywordOnly})
 		require.NoError(t, err)

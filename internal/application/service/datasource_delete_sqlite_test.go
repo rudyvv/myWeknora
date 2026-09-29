@@ -61,7 +61,7 @@ func newSQLiteDataSourceDeleteFixture(t *testing.T) *sqliteDataSourceDeleteFixtu
 	require.NoError(t, syncLogRepo.Create(context.Background(), pendingLog))
 	require.NoError(t, syncLogRepo.Create(context.Background(), runningLog))
 
-	scheduler := datasource.NewScheduler(dsRepo, syncLogRepo, kbDeleteTaskEnqueuer{})
+	scheduler := datasource.NewScheduler(dsRepo, syncLogRepo, kbDeleteTaskEnqueuer{}, nil)
 	require.NoError(t, scheduler.AddOrUpdate(ds))
 	require.Equal(t, 1, scheduler.EntryCount())
 

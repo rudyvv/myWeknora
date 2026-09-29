@@ -15,6 +15,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
 
 func (s *DataSourceService) checkSourceSyncReady(ctx context.Context, kb *types.KnowledgeBase, config *types.DataSourceConfig) error {
@@ -193,12 +194,46 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	snapshot.ManifestDigest = hex.EncodeToString(manifestHash[:])
 	for _, file := range manifest {
 		if file.Status != "included" && file.Status != "excluded" {
-			return fmt.Errorf("selected source member is not readable: %s (%s)", file.Path, file.Status)
+			return fmt.Errorf("selected source member is not readable: %s (%s): %w", file.Path, file.Status, asynq.SkipRetry)
+		}
+	}
+	embeddingVersion, err := s.currentSourceEmbeddingVersion(ctx, kb)
+	if err != nil {
+		return err
+	}
+	// Persist the effective vector identity with the staged manifest, before
+	// any chunk IDs can be reused or vectors can be written. A crash during
+	// indexing must not leave a stage whose dimension/model identity is unknown.
+	snapshot.EmbeddingVersion = embeddingVersion
+	if previous != nil && previous.Snapshot != nil {
+		published := previous.Snapshot
+		if published.KnowledgeBaseID == snapshot.KnowledgeBaseID && published.CommitSHA == snapshot.CommitSHA && published.ProjectID == snapshot.ProjectID &&
+			published.RepositoryURL == snapshot.RepositoryURL && published.ManifestDigest == snapshot.ManifestDigest &&
+			published.RulesVersion == snapshot.RulesVersion && published.ProcessingVersion == snapshot.ProcessingVersion &&
+			published.EmbeddingVersion == embeddingVersion {
+			published.DetectedCommitSHA, published.TargetCommitSHA = repository.CommitSHA, repository.CommitSHA
+			published.PublicationChecked = true
+			result.Source = previous
+			result.Total = published.FileCount
+			data, err := result.ToJSON()
+			if err != nil {
+				return err
+			}
+			s.updateSyncRunResult(ctx, ds, log, result, data, types.SyncLogStatusSuccess, "", wasPaused)
+			return nil
 		}
 	}
 	if existingRun != nil && existingRun.Snapshot != nil {
-		if existingRun.Snapshot.CommitSHA != repository.CommitSHA || existingRun.Snapshot.ManifestDigest != snapshot.ManifestDigest || existingRun.Snapshot.RulesVersion != version {
-			return fmt.Errorf("persisted source stage no longer matches its fixed target")
+		if existingRun.Snapshot.CommitSHA != repository.CommitSHA || existingRun.Snapshot.ProjectID != snapshot.ProjectID ||
+			existingRun.Snapshot.RepositoryURL != snapshot.RepositoryURL || existingRun.Snapshot.ManifestDigest != snapshot.ManifestDigest ||
+			existingRun.Snapshot.RulesVersion != version {
+			return fmt.Errorf("persisted source stage no longer matches its fixed target: %w", asynq.SkipRetry)
+		}
+		if existingRun.Snapshot.ProcessingVersion != snapshot.ProcessingVersion {
+			return fmt.Errorf("persisted source stage processing version changed; start a new source run: %w", asynq.SkipRetry)
+		}
+		if existingRun.Snapshot.EmbeddingVersion != embeddingVersion {
+			return fmt.Errorf("persisted source stage embedding version or dimension changed; start a new source run: %w", asynq.SkipRetry)
 		}
 		snapshot = existingRun.Snapshot
 		result.Source.Snapshot = snapshot

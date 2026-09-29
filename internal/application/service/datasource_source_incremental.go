@@ -104,6 +104,31 @@ func sourceParseArtifactKey(path string, raw []byte, parserVersion, rulesVersion
 	return source.ArtifactKey(source.ProcessingVersion, parserVersion, strings.ToLower(filepath.Ext(path)), path, fmt.Sprintf("%x", sha256.Sum256(raw)), rulesVersion)
 }
 
+func (s *DataSourceService) currentSourceEmbeddingVersion(ctx context.Context, kb *types.KnowledgeBase) (string, error) {
+	configured, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
+	if err != nil {
+		return "", err
+	}
+	if configured == nil {
+		return "", fmt.Errorf("source embedding model no longer exists")
+	}
+	model, err := s.sourceModelService.GetEmbeddingModelForTenant(ctx, kb.EmbeddingModelID, kb.TenantID)
+	if err != nil {
+		return "", err
+	}
+	if model == nil || model.GetDimensions() <= 0 {
+		return "", fmt.Errorf("source embedding model dimension is invalid")
+	}
+	current, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
+	if err != nil {
+		return "", err
+	}
+	if current == nil || source.EmbeddingVersion(current, model.GetDimensions()) != source.EmbeddingVersion(configured, model.GetDimensions()) {
+		return "", fmt.Errorf("source embedding configuration changed during initialization")
+	}
+	return source.EmbeddingVersion(configured, model.GetDimensions()), nil
+}
+
 func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase, snapshot *types.SourceSnapshot, indexes []*types.IndexInfo) (int, error) {
 	config, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
 	if err != nil {

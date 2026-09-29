@@ -1071,7 +1071,11 @@ func (s *DataSourceService) runSourceSyncWithLease(
 	if leaseLost.Load() || errors.Is(runErr, types.ErrSourceSyncLeaseLost) {
 		return nil // A newer fencing token owns status and publication from here.
 	}
-	dispatch, releaseErr := control.ReleaseSourceRun(context.WithoutCancel(ctx), lease, false)
+	// Retain retryable failures as durable retry_wait runs so restart
+	// reconciliation can recover them if queue delivery is lost. Permanent
+	// task errors use Asynq's SkipRetry sentinel and must not consume retries.
+	retry := runErr != nil && !errors.Is(runErr, asynq.SkipRetry)
+	dispatch, releaseErr := control.ReleaseSourceRun(context.WithoutCancel(ctx), lease, retry)
 	if errors.Is(releaseErr, types.ErrSourceSyncLeaseLost) {
 		return nil
 	}
@@ -1514,6 +1518,17 @@ func (s *DataSourceService) updateSyncRunResult(
 		if status == types.SyncLogStatusSuccess {
 			ds.LastSyncAt = timePtr(time.Now().UTC())
 		}
+		if status == types.SyncLogStatusFailed {
+			if !wasPaused {
+				ds.Status = types.DataSourceStatusError
+			}
+		} else if wasPaused {
+			ds.Status = types.DataSourceStatusPaused
+		} else {
+			ds.Status = types.DataSourceStatusActive
+		}
+		ds.ErrorMessage = errorMessage
+		ds.LastSyncResult = resultJSON
 		if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
 			if err := control.CommitSourceRunResult(ctx, lease, ds); err != nil {
 				logger.Errorf(ctx, "failed to commit fenced source sync status: %v", err)

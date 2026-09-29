@@ -20,6 +20,17 @@ import (
 
 type sourceSnapshotRepository struct{ db *gorm.DB }
 
+type sourcePublicationOutboxRow struct {
+	ID               string `gorm:"column:id"`
+	TenantID         uint64 `gorm:"column:tenant_id"`
+	KnowledgeBaseID  string `gorm:"column:knowledge_base_id"`
+	DataSourceID     string `gorm:"column:data_source_id"`
+	SnapshotID       string `gorm:"column:snapshot_id"`
+	EventType        string `gorm:"column:event_type"`
+	ConfigGeneration int64  `gorm:"column:config_generation"`
+	AttemptCount     int    `gorm:"column:attempt_count"`
+}
+
 func NewSourceSnapshotRepository(db *gorm.DB) interfaces.SourceSnapshotRepository {
 	return &sourceSnapshotRepository{db: db}
 }
@@ -211,15 +222,19 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		}
 		snapshot.State, snapshot.PublishedAt = "published", &now
 		if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
-			payload, _ := json.Marshal(map[string]any{
-				"tenant_id": kb.TenantID, "knowledge_base_id": kb.ID,
-				"data_source_id": ds.ID, "snapshot_id": snapshot.ID,
-				"commit_sha": snapshot.CommitSHA,
+			eventID := uuid.NewString()
+			payload, err := json.Marshal(types.SourceWikiUpdatePayload{
+				SchemaVersion: 1, EventID: eventID, TenantID: kb.TenantID,
+				KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, SnapshotID: snapshot.ID,
+				CommitSHA: snapshot.CommitSHA, ConfigGeneration: lease.ConfigGeneration,
 			})
+			if err != nil {
+				return err
+			}
 			if err := tx.Exec(`INSERT INTO source_publication_outbox
-				(id,tenant_id,knowledge_base_id,data_source_id,snapshot_id,event_type,payload,status,created_at)
-				VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(data_source_id,snapshot_id,event_type) DO NOTHING`,
-				uuid.NewString(), kb.TenantID, kb.ID, ds.ID, snapshot.ID, "source.wiki.update", string(payload), "pending", now).Error; err != nil {
+				(id,tenant_id,knowledge_base_id,data_source_id,snapshot_id,event_type,payload,status,created_at,config_generation)
+				VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(data_source_id,snapshot_id,event_type) DO NOTHING`,
+				eventID, kb.TenantID, kb.ID, ds.ID, snapshot.ID, "source.wiki.update", string(payload), "pending", now, lease.ConfigGeneration).Error; err != nil {
 				return err
 			}
 			if err := tx.Table("source_sync_states").Where(`data_source_id=? AND config_generation=? AND fencing_token=? AND active_sync_log_id=?`,
@@ -234,6 +249,147 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		}
 		return nil
 	})
+}
+
+// RelaySourcePublicationOutbox accepts published snapshots into the durable,
+// source-specific Wiki update lane. The acceptance row and outbox ack commit
+// atomically; this records pending Wiki work, not generated Wiki content.
+func (r *sourceSnapshotRepository) RelaySourcePublicationOutbox(ctx context.Context, limit int) (int, error) {
+	if r.db == nil || r.db.Dialector.Name() != "postgres" {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	accepted, processed := 0, 0
+	for processed < limit {
+		var eventID string
+		var eventAttemptCount int
+		found, eventAccepted := false, false
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var event sourcePublicationOutboxRow
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+				Table("source_publication_outbox").Where("status='pending' AND next_attempt_at <= ?", time.Now().UTC()).
+				Order("created_at ASC, id ASC").Take(&event).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			found, eventID, eventAttemptCount = true, event.ID, event.AttemptCount
+			now := time.Now().UTC()
+			stale := func(reason string) error {
+				return tx.Table("source_publication_outbox").Where("id=? AND status='pending'", event.ID).
+					Updates(map[string]any{"status": "superseded", "attempt_count": gorm.Expr("attempt_count + 1"), "last_error": reason, "delivered_at": now}).Error
+			}
+			if event.EventType != "source.wiki.update" || event.ID == "" || event.ConfigGeneration <= 0 {
+				return stale("source publication outbox event is invalid or lacks a configuration generation")
+			}
+			var state sourceSyncStateRow
+			if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Table("source_sync_states").
+				Where("data_source_id=? AND tenant_id=?", event.DataSourceID, event.TenantID).Take(&state).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return stale("source configuration state no longer exists")
+				}
+				return err
+			}
+			var ds types.DataSource
+			if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=? AND knowledge_base_id=?", event.DataSourceID, event.TenantID, event.KnowledgeBaseID).Take(&ds).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return stale("source was deleted or moved before Wiki update acceptance")
+				}
+				return err
+			}
+			var kb types.KnowledgeBase
+			if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=?", event.KnowledgeBaseID, event.TenantID).Take(&kb).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return stale("knowledge base was deleted before Wiki update acceptance")
+				}
+				return err
+			}
+			if state.ConfigGeneration != event.ConfigGeneration || state.ConfigFingerprint != sourceConfigFingerprint(&ds) {
+				return stale("source configuration generation changed before Wiki update acceptance")
+			}
+			var current types.SourcePublication
+			if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("data_source_id=? AND tenant_id=? AND knowledge_base_id=?", event.DataSourceID, event.TenantID, event.KnowledgeBaseID).Take(&current).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return stale("source has no current published snapshot")
+				}
+				return err
+			}
+			if current.SnapshotID != event.SnapshotID {
+				return stale("a newer source snapshot was published before Wiki update acceptance")
+			}
+			var snapshot types.SourceSnapshot
+			if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=? AND data_source_id=? AND knowledge_base_id=? AND state='published'",
+				event.SnapshotID, event.TenantID, event.DataSourceID, event.KnowledgeBaseID).Take(&snapshot).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return stale("published source snapshot is no longer available")
+				}
+				return err
+			}
+			payload := types.SourceWikiUpdatePayload{
+				SchemaVersion: 1, EventID: event.ID, TenantID: event.TenantID,
+				KnowledgeBaseID: event.KnowledgeBaseID, DataSourceID: event.DataSourceID,
+				SnapshotID: snapshot.ID, CommitSHA: snapshot.CommitSHA, ConfigGeneration: event.ConfigGeneration,
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			if err := tx.Exec(`INSERT INTO task_pending_ops
+				(tenant_id,task_type,scope,scope_id,op,dedup_key,payload,enqueued_at)
+				VALUES(?,?,?,?,?,?,?::jsonb,?) ON CONFLICT DO NOTHING`,
+				event.TenantID, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase,
+				event.KnowledgeBaseID, "published_snapshot", event.ID, string(encoded), now).Error; err != nil {
+				return err
+			}
+			result := tx.Table("source_publication_outbox").Where("id=? AND status='pending'", event.ID).
+				Updates(map[string]any{"status": "delivered", "attempt_count": gorm.Expr("attempt_count + 1"), "last_error": "", "delivered_at": now})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("source publication outbox event was concurrently acknowledged")
+			}
+			eventAccepted = true
+			return nil
+		})
+		if err != nil {
+			if eventID != "" {
+				writeErr := r.db.WithContext(context.WithoutCancel(ctx)).Table("source_publication_outbox").
+					Where("id=? AND status='pending'", eventID).
+					Updates(map[string]any{
+						"attempt_count": gorm.Expr("attempt_count + 1"), "last_error": err.Error(),
+						"next_attempt_at": time.Now().UTC().Add(sourceOutboxRetryDelay(eventAttemptCount + 1)),
+					}).Error
+				if writeErr != nil {
+					return accepted, errors.Join(err, writeErr)
+				}
+			}
+			return accepted, err
+		}
+		if !found {
+			break
+		}
+		processed++
+		if eventAccepted {
+			accepted++
+		}
+	}
+	return accepted, nil
+}
+
+func sourceOutboxRetryDelay(attempt int) time.Duration {
+	delay := time.Second
+	for i := 1; i < attempt && delay < 5*time.Minute; i++ {
+		delay *= 2
+	}
+	if delay > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return delay
 }
 
 func (r *sourceSnapshotRepository) GetRun(ctx context.Context, tenant uint64, sourceID, logID string) (*types.SourceRunResult, error) {

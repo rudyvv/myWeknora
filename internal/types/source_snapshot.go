@@ -147,6 +147,20 @@ type SourceRunResult struct {
 	Members  []SourceSnapshotMember `json:"members"`
 }
 
+// SourceWikiUpdatePayload is the stable, DB-derived acceptance record for a
+// published source snapshot. It identifies the update target but does not
+// request or contain generated Wiki content.
+type SourceWikiUpdatePayload struct {
+	SchemaVersion    int    `json:"schema_version"`
+	EventID          string `json:"event_id"`
+	TenantID         uint64 `json:"tenant_id"`
+	KnowledgeBaseID  string `json:"knowledge_base_id"`
+	DataSourceID     string `json:"data_source_id"`
+	SnapshotID       string `json:"snapshot_id"`
+	CommitSHA        string `json:"commit_sha"`
+	ConfigGeneration int64  `json:"config_generation"`
+}
+
 type SourceEvidence struct {
 	DataSourceID  string          `json:"data_source_id"`
 	SnapshotID    string          `json:"snapshot_id"`

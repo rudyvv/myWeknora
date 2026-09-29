@@ -25,10 +25,11 @@ import (
 //  2. asynq.TaskID  — deterministic ID per (dataSourceID, minute). Redis ensures
 //     only one task with a given ID is enqueued. Losers get ErrTaskIDConflict.
 type Scheduler struct {
-	cron         *cron.Cron
-	dsRepo       interfaces.DataSourceRepository
-	syncLogRepo  interfaces.SyncLogRepository
-	taskEnqueuer interfaces.TaskEnqueuer
+	cron            *cron.Cron
+	dsRepo          interfaces.DataSourceRepository
+	syncLogRepo     interfaces.SyncLogRepository
+	sourceSnapshots interfaces.SourceSnapshotRepository
+	taskEnqueuer    interfaces.TaskEnqueuer
 
 	mu      sync.Mutex
 	entries map[string]cron.EntryID // dataSourceID → cron entry ID
@@ -39,15 +40,17 @@ func NewScheduler(
 	dsRepo interfaces.DataSourceRepository,
 	syncLogRepo interfaces.SyncLogRepository,
 	taskEnqueuer interfaces.TaskEnqueuer,
+	sourceSnapshots interfaces.SourceSnapshotRepository,
 ) *Scheduler {
 	return &Scheduler{
 		cron: cron.New(cron.WithSeconds(), cron.WithChain(
 			cron.Recover(cron.DefaultLogger),
 		)),
-		dsRepo:       dsRepo,
-		syncLogRepo:  syncLogRepo,
-		taskEnqueuer: taskEnqueuer,
-		entries:      make(map[string]cron.EntryID),
+		dsRepo:          dsRepo,
+		syncLogRepo:     syncLogRepo,
+		sourceSnapshots: sourceSnapshots,
+		taskEnqueuer:    taskEnqueuer,
+		entries:         make(map[string]cron.EntryID),
 	}
 }
 
@@ -74,6 +77,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 				ds.ID, schedule, err)
 		}
 	}
+	s.relaySourcePublicationOutbox(ctx)
 	if _, err := s.cron.AddFunc("@every 30s", func() { s.reconcileSourceTriggers(context.Background()) }); err != nil {
 		logger.Warnf(ctx, "[Scheduler] failed to register source-trigger reconciliation: %v", err)
 	}
@@ -204,6 +208,7 @@ func (s *Scheduler) recoverQueuedSourceRuns(ctx context.Context, ds *types.DataS
 }
 
 func (s *Scheduler) reconcileSourceTriggers(ctx context.Context) {
+	s.relaySourcePublicationOutbox(ctx)
 	dataSources, err := s.dsRepo.FindActive(ctx)
 	if err != nil {
 		logger.Errorf(ctx, "[Scheduler] failed to list sources for trigger reconciliation: %v", err)
@@ -217,6 +222,20 @@ func (s *Scheduler) reconcileSourceTriggers(ctx context.Context) {
 		if err := s.recoverQueuedSourceRuns(ctx, ds); err != nil {
 			logger.Errorf(ctx, "[Scheduler] failed to reconcile source triggers for ds=%s: %v", ds.ID, err)
 		}
+	}
+}
+
+func (s *Scheduler) relaySourcePublicationOutbox(ctx context.Context) {
+	if s.sourceSnapshots == nil {
+		return
+	}
+	accepted, err := s.sourceSnapshots.RelaySourcePublicationOutbox(ctx, 100)
+	if err != nil {
+		logger.Errorf(ctx, "[Scheduler] failed to relay published source Wiki updates: %v", err)
+		return
+	}
+	if accepted > 0 {
+		logger.Infof(ctx, "[Scheduler] accepted %d published source Wiki update(s)", accepted)
 	}
 }
 

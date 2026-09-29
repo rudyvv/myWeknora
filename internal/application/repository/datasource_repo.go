@@ -270,9 +270,28 @@ func (r *SyncLogRepository) UpdateResult(ctx context.Context, log *types.SyncLog
 	if log.ID == "" {
 		return errors.New("sync log id is empty")
 	}
+	lease, hasLease := types.SourceSyncLeaseFromContext(ctx)
+	if hasLease && (lease.SyncLogID != log.ID || lease.DataSourceID != log.DataSourceID || lease.TenantID != log.TenantID) {
+		return types.ErrSourceSyncLeaseLost
+	}
 	query := r.db.WithContext(ctx).Model(&types.SyncLog{}).Where("id = ?", log.ID)
-	if log.SourceFencingToken > 0 {
-		query = query.Where("source_config_generation = ? AND source_fencing_token = ?", log.SourceConfigGeneration, log.SourceFencingToken)
+	guarded := hasLease || log.SourceFencingToken > 0
+	if guarded {
+		generation, fencingToken := log.SourceConfigGeneration, log.SourceFencingToken
+		if hasLease {
+			generation, fencingToken = lease.ConfigGeneration, lease.FencingToken
+		}
+		query = query.Where("data_source_id = ? AND tenant_id = ?", log.DataSourceID, log.TenantID).
+			Where("source_config_generation = ? AND source_fencing_token = ?", generation, fencingToken).
+			Where(`EXISTS (
+				SELECT 1 FROM source_sync_states AS source_state
+				WHERE source_state.data_source_id = sync_logs.data_source_id
+					AND source_state.tenant_id = sync_logs.tenant_id
+					AND source_state.active_sync_log_id = sync_logs.id
+					AND source_state.config_generation = sync_logs.source_config_generation
+					AND source_state.fencing_token = sync_logs.source_fencing_token
+					AND source_state.lease_expires_at > ?
+			)`, time.Now().UTC())
 	}
 	result := query.Updates(map[string]interface{}{
 		"status":        log.Status,
@@ -290,7 +309,7 @@ func (r *SyncLogRepository) UpdateResult(ctx context.Context, log *types.SyncLog
 	if result.Error != nil {
 		return result.Error
 	}
-	if log.SourceFencingToken > 0 && result.RowsAffected != 1 {
+	if guarded && result.RowsAffected != 1 {
 		return types.ErrSourceSyncLeaseLost
 	}
 	return nil
