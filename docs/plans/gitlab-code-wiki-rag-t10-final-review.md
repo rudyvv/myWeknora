@@ -16,16 +16,17 @@
 
 ## Spec
 
-**剩余 4 项：2 P1、2 P2；无范围膨胀 finding。**
+**剩余 5 项：2 P1、3 P2；无范围膨胀 finding。**
 
 - **P1：没有可靠 Java binding 的 Mapper 调用变成 certain。** `internal/source/source_relations.go:149–167/192–193` 按短类型与 receiver 后缀匹配。冻结 parser facts 与 Go CorrelateSourceFacts 的独立探针实测参数遮蔽、other.mapper、无关全限定 Mapper 类型、重载方法四种情况均生成 certain XML edge。违反父 Spec:82“可确定框架关系需有证据”。未知绑定须保持 uncertain。
-- **P1：关系上下文与质量未贯通公开消费者。** `knowledge_source.go:45` 普通 HTTP 读取建单文件 scope，隐藏跨文件关系；`knowledge_search.go:1069–1081`、`list_knowledge_chunks.go:214–227` 输出原文/source evidence，没有关系/诊断；`SourceCodeView.vue:60–69` 未显示诊断，还把有效 text_fallback XML 标为语法错误。违反 T10:12“质量提示”、:14“关联上下文与引用阅读贯通”。同一公开字段还在 source_file.go:84 静默 Limit(500)，没有分页或完整性标记；这是关系上下文输出部分，原始 facts/statement 没有据此丢失。500 上限为静态 SQL trace，未运行 1,200 项 PG 复现。需实际 Agent / HTTP / UI 消费测试，保留两端范围及有限输出的明确截断状态。
+- **P1：关系上下文与质量未贯通公开消费者。** `knowledge_source.go:45` 普通 HTTP 读取建单文件 scope，隐藏跨文件关系；`knowledge_search.go:1069–1081`、`list_knowledge_chunks.go:214–227` 输出原文/source evidence，没有关系/诊断；`SourceCodeView.vue:60–69` 未显示诊断，还把有效 text_fallback XML 标为语法错误。违反 T10:12“质量提示”、:14“关联上下文与引用阅读贯通”。需实际 Agent / HTTP / UI 消费测试，保留两端范围及有限输出的明确截断状态。
+- **P2：关系阅读静默截断。** `internal/application/repository/source_file.go:84` 对公开 Relations 固定 Limit(500)，SourceFileView 未提供 cursor / truncated 指示。违反 T10:14 关联上下文与阅读贯通；需有界 limit+1 完整性指示或受授权分页。原始 Facts / statement 完整，此 finding 是静态 SQL / API trace，没有执行 1,200 项 PG 复现。
 - **P2：派生表 UPDATE 来源回归。** `sourceparser/mybatis_parser.py:364` DML JOIN 仅接收直接 exp.Table。独立冻结 probe `UPDATE orders o JOIN (SELECT * FROM customers) c ON o.id=c.id SET o.x=1` 只返回 orders，先前检查点可返回 orders 和 customers。违反 T10:11“可确定表访问”。需恢复对子查询物理来源的作用域提取，排除派生别名。
 - **P2：代表仓库验收证据缺失。** `datasource_source_integration_test.go:83` 为一个 synthetic PushSchedule Mapper。真实代表文件存在，但提交中没有两个 PushSchedule Mapper 与 FreeTutor 的实际验证记录，T10:15 仍未核验。不能将同名 synthetic fixture 当成代表语料。
 
 Spec reviewer 独立运行冻结 parser 与隔离 Go 探针；没有运行 root 的整套 HTTP / PG 用例。既有 CTE scope 与 sibling annotation 反例已经通过。公共消费与代表语料 AC 未满足，因此整票验收仍阻断。
 
-两轴计数：Standards 1 硬违反 + 1 判断性 finding，最严重 P1；Spec 4 finding，最严重 P1。两轴独立保留原评估，不合并或重排。
+两轴计数：Standards 1 硬违反 + 1 判断性 finding，最严重 P1；Spec 5 finding，最严重 P1。两轴独立保留原评估，不合并或重排。
 
 ## 总协调独立验证
 
@@ -42,3 +43,5 @@ T10 已重新进入执行。没有 parser 提供的可核验 binding 时，Mappe
 前端补 typed facts/diagnostics、真实质量及安全关联入口；默认单文件 HTTP 范围保持，跨文件入口只能消费同次问答已核验的 target evidence，不默认扩大 KB 范围。输出有界并显式标注/提供后续关系阅读能力。T09 已收到 SourceCodeView / SourceFileView 类型重叠协调，两个 worktree 优先独立 helper/component，根对话负责最终冲突处理。
 
 代表仓库仅静态读取两个真实 PushSchedule Mapper 及 FreeTutor，记录统计、区间和不确定性，不提交内网业务原文或 SQL。陈旧 T10 coordination 文档需同步为真实实现合同。修复提交交回根对话后再次双轴复验；当前仍为 8/22 完成。
+
+恢复记录：用户暂停后明确恢复当前协调及三个执行对话，T06 / T09 / T10 已全部发送继续指令并核对 active。Spec reviewer 将原 P1 公开消费项中的 500 条静默截断独立为 P2，因此计数由 4（2 P1 + 2 P2）补正为 5（2 P1 + 3 P2）；修复清单本来已经包含该问题，没有增加实现范围或改变 Standards 轴。
