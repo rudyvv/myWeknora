@@ -1,2 +1,2 @@
-*.js -text
-*.ts -text
+*.js -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.ts -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
