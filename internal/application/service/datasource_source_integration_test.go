@@ -10,11 +10,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -418,6 +420,12 @@ type javaSourceFixture struct {
 	embedStarted chan struct{}
 	embedRelease chan struct{}
 	embedVector  []float32
+	embedCount   atomic.Int64
+	parseCount   atomic.Int64
+	parseStarted chan struct{}
+	parseRelease chan struct{}
+	advanceFiles func(map[string][]byte) string
+	modelService interfaces.ModelService
 	advanceJava  func(string) string
 	shares       interfaces.KBShareService
 	agentShares  interfaces.AgentShareService
@@ -475,6 +483,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	leaseMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000103_source_read_leases.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(leaseMigration)).Error)
+	incrementalMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000104_source_incremental_artifacts.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(incrementalMigration)).Error)
 	parser := exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
 	parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
 	stdout, err := parser.StdoutPipe()
@@ -500,12 +511,34 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	case <-time.After(10 * time.Second):
 		t.Fatal("real Java parser did not start")
 	}
-	t.Setenv("SOURCE_PARSER_URL", fmt.Sprintf("http://127.0.0.1:%d", ready.Port))
+	parserAddress, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", ready.Port))
+	require.NoError(t, err)
+	forward := httputil.NewSingleHostReverseProxy(parserAddress)
+	parserProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/parse" {
+			f.parseCount.Add(1)
+			if f.parseStarted != nil {
+				select {
+				case f.parseStarted <- struct{}{}:
+				default:
+				}
+				select {
+				case <-f.parseRelease:
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
+		forward.ServeHTTP(w, r)
+	}))
+	t.Cleanup(parserProxy.Close)
+	t.Setenv("SOURCE_PARSER_URL", parserProxy.URL)
 	t.Setenv("SSRF_WHITELIST", "127.0.0.1,::1,localhost")
 	utils.ResetSSRFWhitelistForTest()
 	t.Cleanup(utils.ResetSSRFWhitelistForTest)
 
 	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.embedCount.Add(1)
 		var request struct {
 			Input []string `json:"input"`
 		}
@@ -579,6 +612,21 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 		sha = git("rev-parse", "HEAD")
 		return sha
 	}
+	f.advanceFiles = func(changes map[string][]byte) string {
+		for name, content := range changes {
+			target := filepath.Join(repoDir, filepath.FromSlash(name))
+			if content == nil {
+				require.NoError(t, os.Remove(target))
+				continue
+			}
+			require.NoError(t, os.MkdirAll(filepath.Dir(target), 0755))
+			require.NoError(t, os.WriteFile(target, content, 0644))
+		}
+		git("add", ".")
+		git("commit", "-m", "Complete manifest change")
+		sha = git("rev-parse", "HEAD")
+		return sha
+	}
 	var gitlabServer *httptest.Server
 	gitlabServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -623,8 +671,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	kbs := NewKnowledgeBaseService(kbRepo, repository.NewSourceAwareKnowledgeRepository(db), repository.NewSourceAwareChunkRepository(db), nil, f.shares, modelService, engines, nil, repository.NewTenantRepository(db), nil, nil, nil, nil, nil, nil, dsRepo, repository.NewSyncLogRepository(db), nil, nil, nil, nil, f.agentShares)
 	registry := datasource.NewConnectorRegistry()
 	require.NoError(t, registry.Register(gitlab.NewConnector()))
-	svc := NewDataSourceService(dsRepo, repository.NewSyncLogRepository(db), nil, kbs, kbDeleteTaskEnqueuer{}, registry, nil, repository.NewTenantRepository(db), nil, nil, engines, nil, models, repository.NewSourceSnapshotRepository(db), modelService).(*DataSourceService)
+	svc := NewDataSourceService(dsRepo, repository.NewSyncLogRepository(db), nil, kbs, kbDeleteTaskEnqueuer{}, registry, datasource.NewScheduler(dsRepo, repository.NewSyncLogRepository(db), kbDeleteTaskEnqueuer{}), repository.NewTenantRepository(db), nil, nil, engines, nil, models, repository.NewSourceSnapshotRepository(db), modelService).(*DataSourceService)
 	f.ctx, f.db, f.service, f.kbs, f.ds, f.kb, f.sha = ctx, db, svc, kbs, ds, kb, sha
+	f.modelService = modelService
 	f.chunks = NewChunkService(repository.NewSourceAwareChunkRepository(db), repository.NewSourceAwareKnowledgeRepository(db), kbRepo, modelService, engines, nil, nil, nil, kbs)
 	f.knowledge = &knowledgeService{repo: repository.NewSourceAwareKnowledgeRepository(db), kbService: kbs, kbShareService: f.shares, chunkRepo: repository.NewSourceAwareChunkRepository(db), chunkService: f.chunks, modelService: modelService, retrieveEngine: engines, task: kbDeleteTaskEnqueuer{}, fileSvc: sourceNoObjectStorage{}, tagRepo: repository.NewKnowledgeTagRepository(db)}
 	return f

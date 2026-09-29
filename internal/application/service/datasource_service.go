@@ -752,6 +752,9 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		return fmt.Errorf("%w: %v", asynq.SkipRetry, modeErr)
 	}
 	if mode == datasource.ContentModeSource {
+		if payload.TenantID != ds.TenantID || syncLog.TenantID != ds.TenantID || syncLog.DataSourceID != ds.ID {
+			return fmt.Errorf("%w: source run identity mismatch", asynq.SkipRetry)
+		}
 		return s.processSourceSync(ctx, ds, syncLog, kb, connector, config, wasPaused)
 	}
 	// Surface the KB's multimodal/VLM state to the connector so it only extracts

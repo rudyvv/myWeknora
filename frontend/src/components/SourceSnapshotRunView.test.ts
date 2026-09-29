@@ -29,7 +29,7 @@ test('run details expose complete manifest and permit code reading only after pu
     }, module, module.exports)
     return module.exports.default
   }
-  const result = reactive({ snapshot: { id: 'run-one', state: 'indexing', commit_sha: 'a'.repeat(40), project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: true, member_count: 2, file_count: 1, chunk_count: 2 },
+  const result = reactive({ snapshot: { id: 'run-one', state: 'indexing', commit_sha: 'a'.repeat(40), project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: true, member_count: 2, file_count: 1, chunk_count: 2, previous_commit_sha: 'b'.repeat(40), parsed_count: 1, reused_file_count: 3, reused_chunk_count: 6, embedded_chunk_count: 2, reused_vector_count: 6, added_count: 1, changed_count: 2, deleted_count: 1, renamed_count: 1 },
     members: [{ path: 'src/Service.java', status: 'parsed', reason: '', source_file_id: 'file-one', file_version_id: 'version-one' }, { path: 'README.md', status: 'excluded', reason: 'outside selected paths', source_file_id: '', file_version_id: '' }] })
   const component = load(componentPath)
   const host = document.createElement('div')
@@ -40,10 +40,15 @@ test('run details expose complete manifest and permit code reading only after pu
     await nextTick()
     assert.ok(host.textContent?.includes('正在建立双索引'))
     assert.ok(host.textContent?.includes('成员清单完整'))
+    assert.ok(host.textContent?.includes('实际解析 1'))
+    assert.ok(host.textContent?.includes('复用文件 3'))
+    assert.ok(host.textContent?.includes('复用向量 6'))
+    assert.ok(host.textContent?.includes('已发布 SHA：' + 'b'.repeat(40)))
     assert.ok(host.textContent?.includes('README.md'))
     assert.equal(Array.from(host.querySelectorAll('button')).find(b => b.textContent?.includes('src/Service.java')), undefined)
     result.snapshot.state = 'published'
     await nextTick()
+    assert.ok(host.textContent?.includes('已发布 SHA：' + 'a'.repeat(40)))
     const read = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('src/Service.java'))
     assert.ok(read)
     read.click()

@@ -94,9 +94,11 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 				javaOnly = javaOnly && strings.HasSuffix(strings.ToLower(file.Path), ".java")
 			}
 		}
+		previous, publishedErr := s.sourceSnapshots.GetPublished(ctx, ds.TenantID, ds.ID)
+		canPublishEmpty := publishedErr == nil && previous != nil
 		pipeline := &preview.Checks[3]
-		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && javaOnly && count > 0 && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
-		pipeline.Message = "initial sync requires explicit paths, 1–100 Java files, at most 16 MiB and the built-in PostgreSQL indexes"
+		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && javaOnly && (count > 0 || canPublishEmpty) && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
+		pipeline.Message = "source sync requires explicit paths, at most 100 Java files and 16 MiB with built-in PostgreSQL indexes; an existing publication may become empty"
 		preview.CanSync = true
 		for _, check := range preview.Checks {
 			preview.CanSync = preview.CanSync && check.Ready
