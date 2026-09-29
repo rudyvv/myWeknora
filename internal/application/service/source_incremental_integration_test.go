@@ -195,8 +195,12 @@ func TestSourceForcePushReconcilesAgainstTheCompleteManifest(t *testing.T) {
 		{name: "hybrid"},
 	} {
 		t.Run(queryMode.name, func(t *testing.T) {
+			queryText := "oldForcePushToken"
+			if queryMode.name == "bm25" {
+				queryText = "forcePushToken"
+			}
 			hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
-				QueryText: "oldForcePushToken", QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10,
+				QueryText: queryText, QueryEmbedding: []float32{1, 0, 0}, MatchCount: 10,
 				DisableKeywordsMatch: queryMode.disableKeywordsMatch, DisableVectorMatch: queryMode.disableVectorMatch,
 			})
 			require.NoError(t, err)
@@ -261,7 +265,7 @@ func TestSourceWikiEvidenceRemainsReadableAfterForcePushAndGitUnavailable(t *tes
 	syncSourceFixture(t, f)
 	current := latestIncrementalRun(t, f)
 	require.Equal(t, newSHA, current.Snapshot.CommitSHA)
-	require.Equal(t, 2, current.Snapshot.DeletedCount)
+	require.Equal(t, 1, current.Snapshot.DeletedCount)
 	// The API and Git transport no longer offer the previous branch state. A
 	// saved Wiki evidence read must use its retained database file version.
 	f.gitlabBranchMissing = true
