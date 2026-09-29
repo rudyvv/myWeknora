@@ -3,11 +3,18 @@
 package service
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
+	"github.com/Tencent/WeKnora/internal/modelcontext"
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -205,4 +212,227 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	unknownView, err := f.knowledge.GetSourceFile(f.ctx, unknownID)
 	require.NoError(t, err)
 	require.Equal(t, "unknown_preprocess", unknownView.Quality)
+}
+
+func TestSourceVue2RepresentativeAcceptance(t *testing.T) {
+	componentDir := strings.TrimSpace(os.Getenv("SOURCE_TEST_VUE2_COMPONENT_DIR"))
+	if componentDir == "" {
+		t.Skip("set SOURCE_TEST_VUE2_COMPONENT_DIR to opt into the local representative Vue 2 acceptance test")
+	}
+	componentNames := []string{"index.vue", "list.vue", "qr.vue"}
+	fixtureFiles := make(map[string][]byte, len(componentNames))
+	originalFiles := make(map[string][]byte, len(componentNames))
+	for _, name := range componentNames {
+		raw, err := os.ReadFile(filepath.Join(componentDir, name))
+		if err != nil {
+			t.Fatal("could not read a representative Vue component")
+		}
+		originalFiles[name] = raw
+		fixtureFiles["src/pages/User/ConfirmTimetable/"+name] = raw
+	}
+
+	projectSHACommand := exec.Command("git", "-C", componentDir, "rev-parse", "HEAD")
+	projectSHABytes, err := projectSHACommand.Output()
+	require.NoError(t, err, "the representative component directory must belong to a Git checkout")
+	projectSHA := strings.TrimSpace(string(projectSHABytes))
+	require.Len(t, projectSHA, 40)
+
+	f := newJavaSourceFixture(t, fixtureFiles)
+	// The integration fixture configures silent SQL logging before constructing
+	// repositories so no clone can emit SQL or representative source parameters.
+	syncSourceFixture(t, f)
+	parserVersion, err := source.ParserVersion(f.ctx, os.Getenv("SOURCE_PARSER_URL"))
+	require.NoError(t, err)
+	require.NotEmpty(t, parserVersion)
+
+	type fileAggregate struct {
+		name, digest                                                   string
+		bytes, crlf, cjk, chunks, symbols, coordinates, imports, calls int
+	}
+	aggregates := make([]fileAggregate, 0, len(componentNames))
+	for _, name := range componentNames {
+		raw := originalFiles[name]
+		logicalPath := "src/pages/User/ConfirmTimetable/" + name
+		parsed, parseErr := source.ParseFile(f.ctx, os.Getenv("SOURCE_PARSER_URL"), logicalPath, raw)
+		require.NoError(t, parseErr, "production source parser rejected a representative component")
+		require.Equal(t, len(raw), parsed.ByteLength)
+		require.Equal(t, fmt.Sprintf("%x", sha256.Sum256(raw)), parsed.SHA256)
+
+		aggregate := fileAggregate{name: name, digest: parsed.SHA256, bytes: len(raw), crlf: bytes.Count(raw, []byte("\r\n"))}
+		for _, r := range string(raw) {
+			if unicode.Is(unicode.Han, r) {
+				aggregate.cjk++
+			}
+		}
+		cursor := 0
+		for _, chunk := range parsed.Chunks {
+			span := chunk.Range
+			if span.StartByte != cursor || span.EndByte <= span.StartByte || span.EndByte > len(raw) ||
+				!bytes.Equal(raw[span.StartByte:span.EndByte], []byte(chunk.Content)) {
+				t.Fatal("representative chunk coordinates did not select the exact original bytes")
+			}
+			if span.StartLine != bytes.Count(raw[:span.StartByte], []byte{'\n'})+1 {
+				t.Fatal("representative chunk start-line coordinate did not match the original bytes")
+			}
+			last := span.EndByte - 1
+			if last < span.StartByte {
+				last = span.StartByte
+			}
+			if span.EndLine != bytes.Count(raw[:last], []byte{'\n'})+1 {
+				t.Fatal("representative chunk end-line coordinate did not match the original bytes")
+			}
+			cursor = span.EndByte
+			aggregate.chunks++
+			aggregate.coordinates++
+		}
+		if cursor != len(raw) {
+			t.Fatal("representative chunk coordinates did not cover the original file")
+		}
+		regions := make(map[string]bool)
+		for _, symbol := range parsed.Symbols {
+			if symbol.Kind == "sfc_region" && symbol.Region != nil {
+				regions[symbol.Region.Kind] = true
+			}
+			span := symbol.SignatureRange
+			if span.StartByte < 0 || span.EndByte < span.StartByte || span.EndByte > len(raw) ||
+				!bytes.Equal(raw[span.StartByte:span.EndByte], []byte(symbol.Signature)) {
+				t.Fatal("representative symbol coordinates did not select the exact original bytes")
+			}
+			aggregate.symbols++
+			aggregate.coordinates++
+			inScript := symbol.Region != nil && symbol.Region.Kind == "script"
+			if symbol.Kind == "import" && inScript {
+				aggregate.imports++
+			}
+			if inScript && (symbol.Kind == "function" || symbol.Kind == "method") {
+				bodyStart := span.EndByte
+				bodyEnd := symbol.Range.EndByte
+				if bodyStart >= 0 && bodyEnd > bodyStart && bodyEnd <= len(raw) && hasCallSyntax(raw[bodyStart:bodyEnd]) {
+					aggregate.calls++
+				}
+			}
+		}
+		require.True(t, regions["template"], "representative component should expose its template region")
+		require.True(t, regions["script"], "representative component should expose its script region")
+		require.Greater(t, aggregate.crlf, 0, "representative source should retain Windows line endings")
+		require.Greater(t, aggregate.cjk, 0, "representative source should retain CJK text")
+		require.Greater(t, aggregate.chunks, 0)
+		require.Greater(t, aggregate.symbols, 0)
+		if name == "qr.vue" {
+			require.Greater(t, aggregate.imports, 0, "representative QR component should expose import structure")
+		}
+		if name == "index.vue" || name == "list.vue" {
+			require.Greater(t, aggregate.calls, 0, "representative page should expose an API-call-shaped function body")
+		}
+		aggregates = append(aggregates, aggregate)
+	}
+
+	keywordHits, vectorHits, publicReads, modelEvidenceSlices := 0, 0, 0, 0
+	for _, aggregate := range aggregates {
+		logicalPath := "src/pages/User/ConfirmTimetable/" + aggregate.name
+		for _, keywordOnly := range []bool{true, false} {
+			hits, searchErr := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
+				QueryText: "ConfirmTimetable", MatchCount: 500, SourceIDs: []string{f.ds.ID},
+				DisableVectorMatch: !keywordOnly, DisableKeywordsMatch: keywordOnly,
+				SkipContextEnrichment: true,
+			})
+			require.NoError(t, searchErr)
+			var selected *types.SearchResult
+			var selectedEvidence *types.SourceEvidence
+			for _, candidate := range hits {
+				if candidate.Metadata["source_path"] != logicalPath {
+					continue
+				}
+				evidence := source.Evidence(candidate.ChunkMetadata)
+				if evidence == nil || evidence.Region == nil {
+					continue
+				}
+				selected, selectedEvidence = candidate, evidence
+				if evidence.Region.Language != "" {
+					break
+				}
+			}
+			if selected == nil || selectedEvidence == nil {
+				t.Fatal("a public source index route did not return bounded Vue evidence for a representative file")
+			}
+			raw := originalFiles[aggregate.name]
+			span := selectedEvidence.Range
+			if span.StartByte < 0 || span.EndByte <= span.StartByte || span.EndByte > len(raw) ||
+				!bytes.Equal(raw[span.StartByte:span.EndByte], []byte(selected.Content)) {
+				t.Fatal("retrieved source evidence did not select the exact original byte range")
+			}
+			if span.StartLine != bytes.Count(raw[:span.StartByte], []byte{'\n'})+1 {
+				t.Fatal("retrieved evidence start line did not match the original source")
+			}
+			last := span.EndByte - 1
+			if last < span.StartByte {
+				last = span.StartByte
+			}
+			if span.EndLine != bytes.Count(raw[:last], []byte{'\n'})+1 {
+				t.Fatal("retrieved evidence end line did not match the original source")
+			}
+			if keywordOnly {
+				keywordHits++
+			} else {
+				vectorHits++
+			}
+
+			view, readErr := f.knowledge.GetSourceFile(f.ctx, selected.KnowledgeID)
+			require.NoError(t, readErr)
+			viewDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(view.Content)))
+			if viewDigest != aggregate.digest || view.SHA256 != aggregate.digest || view.FileSize != int64(len(raw)) || view.CommitSHA != f.sha {
+				t.Fatal("authorized public source-file read did not match the verified source identity")
+			}
+			publicReads++
+
+			modelResult := &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"display_type": "search_results",
+				"results": []map[string]interface{}{{
+					"chunk_id": selected.ID, "knowledge_id": selected.KnowledgeID,
+					"knowledge_base_id": f.kb.ID, "knowledge_title": selected.KnowledgeTitle,
+					"source_evidence": selectedEvidence,
+				}},
+			}}
+			modelOutput := modelcontext.NewRegistry(true).ModelToolResultForTool("knowledge_search", modelResult)
+			for _, required := range []string{`region_kind="`, `quality="`, `start_line="`, `end_line="`, `symbols="`} {
+				if !strings.Contains(modelOutput, required) {
+					t.Fatal("actual model-facing evidence slice omitted a required source coordinate or region field")
+				}
+			}
+			if selectedEvidence.Region.Language != "" && !strings.Contains(modelOutput, `region_language="`) {
+				t.Fatal("actual model-facing evidence slice omitted the parser-provided region language")
+			}
+			if strings.Contains(modelOutput, "private-relative-target") || strings.Contains(modelOutput, "resolved_path=") {
+				t.Fatal("model-facing evidence disclosed an unresolved local source path")
+			}
+			modelEvidenceSlices++
+		}
+	}
+	require.Equal(t, len(aggregates), keywordHits)
+	require.Equal(t, len(aggregates), vectorHits)
+	t.Logf("vue2_acceptance project_sha=%s fixture_sha=%s parser_version=%s keyword_files=%d vector_files=%d public_reads=%d model_evidence_slices=%d",
+		projectSHA, f.sha, parserVersion, keywordHits, vectorHits, publicReads, modelEvidenceSlices)
+	for _, aggregate := range aggregates {
+		t.Logf("vue2_file name=%s sha256=%s bytes=%d crlf=%d cjk=%d chunks=%d symbols=%d coordinates=%d imports=%d call_bodies=%d",
+			aggregate.name, aggregate.digest, aggregate.bytes, aggregate.crlf, aggregate.cjk,
+			aggregate.chunks, aggregate.symbols, aggregate.coordinates, aggregate.imports, aggregate.calls)
+	}
+}
+
+func hasCallSyntax(body []byte) bool {
+	for index := 0; index < len(body); index++ {
+		if body[index] != '(' {
+			continue
+		}
+		cursor := index - 1
+		for cursor >= 0 && (body[cursor] == ' ' || body[cursor] == '\t' || body[cursor] == '\r' || body[cursor] == '\n') {
+			cursor--
+		}
+		if cursor >= 0 && ((body[cursor] >= 'a' && body[cursor] <= 'z') ||
+			(body[cursor] >= 'A' && body[cursor] <= 'Z') || body[cursor] == '_' || body[cursor] == '$' ||
+			(body[cursor] >= '0' && body[cursor] <= '9') || body[cursor] == ')') {
+			return true
+		}
+	}
+	return false
 }

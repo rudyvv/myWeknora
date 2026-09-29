@@ -37,6 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 	pgdriver "gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func TestSourceFirstJavaSnapshotIsPublishedAndSearchable(t *testing.T) {
@@ -615,7 +616,8 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	// These fixtures can create/drop schemas only in the dedicated test database.
 	require.Equal(t, "/source_test", address.Path)
 	require.Equal(t, "127.0.0.1", address.Hostname())
-	admin, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{})
+	silentLogger := quietSourceIntegrationLogger{}
+	admin, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{Logger: silentLogger})
 	require.NoError(t, err)
 	schema := "source_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	require.NoError(t, admin.Exec("CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search").Error)
@@ -628,7 +630,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	query := address.Query()
 	query.Set("search_path", schema+",public")
 	address.RawQuery = query.Encode()
-	db, err := gorm.Open(pgdriver.Open(address.String()), &gorm.Config{})
+	db, err := gorm.Open(pgdriver.Open(address.String()), &gorm.Config{Logger: silentLogger})
 	require.NoError(t, err)
 	t.Cleanup(func() { sqlDB, _ := db.DB(); _ = sqlDB.Close() })
 	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Model{}, &types.DataSource{}, &types.SyncLog{}, &types.KnowledgeTag{}, &types.KnowledgeTagRelation{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}))
@@ -886,4 +888,19 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	f.chunks = NewChunkService(repository.NewSourceAwareChunkRepository(db), repository.NewSourceAwareKnowledgeRepository(db), kbRepo, modelService, engines, nil, nil, nil, kbs)
 	f.knowledge = &knowledgeService{repo: repository.NewSourceAwareKnowledgeRepository(db), kbService: kbs, kbShareService: f.shares, chunkRepo: repository.NewSourceAwareChunkRepository(db), chunkService: f.chunks, modelService: modelService, retrieveEngine: engines, task: kbDeleteTaskEnqueuer{}, fileSvc: sourceNoObjectStorage{}, tagRepo: repository.NewKnowledgeTagRepository(db)}
 	return f
+}
+
+// Debug() is used by several production repository queries. This test logger
+// remains silent even when GORM asks it to switch to Info mode, keeping source
+// integration SQL and bound values out of test output.
+type quietSourceIntegrationLogger struct{}
+
+func (quietSourceIntegrationLogger) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return quietSourceIntegrationLogger{}
+}
+
+func (quietSourceIntegrationLogger) Info(context.Context, string, ...interface{})  {}
+func (quietSourceIntegrationLogger) Warn(context.Context, string, ...interface{})  {}
+func (quietSourceIntegrationLogger) Error(context.Context, string, ...interface{}) {}
+func (quietSourceIntegrationLogger) Trace(context.Context, time.Time, func() (string, int64), error) {
 }
