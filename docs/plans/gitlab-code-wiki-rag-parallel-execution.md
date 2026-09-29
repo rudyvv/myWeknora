@@ -24,3 +24,18 @@
 使用批准的公开服务/API/工具测试入口及真实 Git、锁定解析器、独立 PG schema。可共享已运行的专用测试数据库和只读依赖缓存；禁止各任务重启/删除共享容器。源码仓库不运行目标项目脚本或插件。每项提供失败复现、通过结果、改动文件和验收差距；集成后按公共快照、权限、普通文档兼容性回归。
 
 最多三条实现线加当前集成任务。实现任务完成或进入稳定验证阶段后腾出槽位进行两轴并行审查；不同时让实现与审查修改同一 worktree。未经审查不推送实现分支、不关闭 ticket，不创建额外 PR。用户当前任务保留总协调权。
+
+## 首批启动记录（2026-09-29）
+
+共同实现及审查起点：`461029f6c11d5ca87fc3397e2fdd25898b7f3046`，用户已确认。T03 / #11 六项验收完成并关闭；源码匹配测试 23 项（含 18 项真实源码集成）通过，Standards / Spec 均无剩余问题。
+
+| 工作目录 | 分支 | 当前范围 |
+| --- | --- | --- |
+| `C:/Users/28211/.codex/worktrees/source-incremental/WeKnora` | `codex/source-incremental` | T04 实施中 |
+| `C:/Users/28211/.codex/worktrees/source-languages/WeKnora` | `codex/source-languages` | T07 实施中 |
+| `C:/Users/28211/.codex/worktrees/source-wiki/WeKnora` | `codex/source-wiki` | T14 实施中 |
+| `C:/Users/28211/.codex/worktrees/source-integration/WeKnora` | `codex/gitlab-code-wiki-rag` | 当前任务的审查/集成目录 |
+
+原目录已切至 `main`，保留该状态。三项仅在各自 worktree 实施；未通过验收的分支不标记完成。每线执行相关模块和公开集成，三分支集成后的全仓 Go/前端测试统一各执行一次，避免重复已知 Windows 环境失败与资源竞争。
+
+共享契约协调：A 的缓存只复用解析结果及 embedding 数值，各新快照重新建立带当次 SHA 的版本/块/引用；B 将语言路由封装为 LanguageForPath / ParseFile，集成同步入口时保留 A 的完整空增量发布；C 复用问答级范围，技术 Wiki 整页要求每个实际来源满足原始组合目标，不能因扁平化仓库/文件/tag 的集合扩大范围。
