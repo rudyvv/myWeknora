@@ -48,6 +48,9 @@ func sourceEvidenceAttrs(evidence *types.SourceEvidence) string {
 		if language := boundedSourceValue(evidence.Region.Language, 64); language != "" {
 			attrs += fmt.Sprintf(` region_language="%s"`, escapeAttr(language))
 		}
+		if status := boundedExternalStatus(evidence.Region.ExternalStatus); status != "" {
+			attrs += fmt.Sprintf(` external_status="%s"`, status)
+		}
 		if regionQuality != "" && regionQuality != quality {
 			attrs += fmt.Sprintf(` region_quality="%s"`, escapeAttr(regionQuality))
 		}
@@ -56,6 +59,18 @@ func sourceEvidenceAttrs(evidence *types.SourceEvidence) string {
 		attrs += fmt.Sprintf(` symbols="%s"`, escapeAttr(symbols))
 	}
 	return attrs
+}
+
+func boundedExternalStatus(value string) string {
+	if len(value) > 16 {
+		return ""
+	}
+	switch value {
+	case "unchecked", "rejected":
+		return value
+	default:
+		return ""
+	}
 }
 
 const (

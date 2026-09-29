@@ -31,7 +31,7 @@ def load_sfc_runtime():
         lock = json.loads((root / 'runtime.lock.json').read_text(encoding='utf-8'))
         package_lock = json.loads((root / 'package-lock.json').read_text(encoding='utf-8'))
         compiler_lock = package_lock['packages']['node_modules/@vue/compiler-sfc']
-        if (lock.get('rules_version') != 1 or compiler_lock.get('version') != lock.get('compiler_version') or
+        if (lock.get('rules_version') != 2 or compiler_lock.get('version') != lock.get('compiler_version') or
                 compiler_lock.get('integrity') != lock.get('compiler_integrity')):
             return None
         node = os.environ.get('SOURCE_PARSER_NODE') or shutil.which('node')
@@ -126,6 +126,29 @@ def _offset_vue_blocks(text, raw, blocks, offsets=None):
             raise RuntimeError('SFC parser returned a non-verifiable block range')
         item = dict(block)
         item['start_byte'], item['end_byte'] = start_byte, end_byte
+        tag_keys = ('tag_start_utf16', 'tag_end_utf16', 'close_start_utf16', 'close_end_utf16')
+        present_tags = [key in block for key in tag_keys]
+        if present_tags[:2].count(True) == 1 or present_tags[2:].count(True) == 1 or (
+                any(present_tags[2:]) and not all(present_tags[:2])):
+            raise RuntimeError('SFC parser returned an incomplete wrapper range')
+        if all(present_tags[:2]):
+            tag_start, tag_end = (block[key] for key in tag_keys[:2])
+            if any(value not in offsets for value in (tag_start, tag_end)):
+                raise RuntimeError('SFC parser returned a split Unicode opening wrapper range')
+            tag_start_byte, tag_end_byte = offsets[tag_start], offsets[tag_end]
+            if (tag_start_byte >= tag_end_byte or tag_end_byte != start_byte or
+                    raw[tag_start_byte:tag_start_byte + 1] != b'<'):
+                raise RuntimeError('SFC parser returned a non-verifiable wrapper range')
+            item.update(tag_start_byte=tag_start_byte, tag_end_byte=tag_end_byte)
+        if all(present_tags[2:]):
+            close_start, close_end = (block[key] for key in tag_keys[2:])
+            if any(value not in offsets for value in (close_start, close_end)):
+                raise RuntimeError('SFC parser returned a split Unicode closing wrapper range')
+            close_start_byte, close_end_byte = offsets[close_start], offsets[close_end]
+            if (close_start_byte != end_byte or close_end_byte <= close_start_byte or
+                    raw[close_start_byte:close_start_byte + 2] != b'</'):
+                raise RuntimeError('SFC parser returned a non-verifiable closing wrapper range')
+            item.update(close_start_byte=close_start_byte, close_end_byte=close_end_byte)
         mapped.append(item)
     mapped.sort(key=lambda item: (item['start_byte'], item['end_byte']))
     cursor = 0
@@ -219,8 +242,6 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
                            'json', 'yaml', 'yml', 'js', 'javascript', 'jsx', 'ts', 'typescript', 'tsx'}
     for index, block in enumerate(blocks):
         start, end = block['start_byte'], block['end_byte']
-        if start > cursor:
-            chunks.extend(_split_raw(raw, cursor, start, max_bytes, span, 'structural', None))
         block_type, language = block['type'], block.get('lang', '').lower()
         kind = block_type if block_type in ('template', 'script', 'style') else 'custom'
         script_language = {'': 'javascript', 'js': 'javascript', 'javascript': 'javascript', 'jsx': 'javascript',
@@ -228,6 +249,20 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         body = raw[start:end]
         block_quality = 'structural'
         block_symbols = []
+        unsupported_script = kind == 'script' and not block.get('src') and script_language not in script_languages
+        wrapper_quality = ('degraded' if kind == 'script' and block.get('src') else
+                           'unknown_preprocess' if unsupported_script or language not in known_raw_languages else '')
+        wrapper_region = region_for(block, wrapper_quality) if wrapper_quality else None
+        tag_start = block.get('tag_start_byte')
+        if wrapper_quality and tag_start is None:
+            raise RuntimeError('SFC parser omitted a required block wrapper range')
+        if tag_start is not None and tag_start < cursor:
+            raise RuntimeError('SFC parser returned an overlapping block wrapper range')
+        opening_start = tag_start if wrapper_quality else start
+        if opening_start > cursor:
+            chunks.extend(_split_raw(raw, cursor, opening_start, max_bytes, span, 'structural', None))
+        if wrapper_quality:
+            chunks.extend(_split_raw(raw, tag_start, start, max_bytes, span, wrapper_quality, wrapper_region))
         is_script = (kind == 'script' and not block.get('src') and
                      script_language in script_languages)
         if is_script and body:
@@ -262,6 +297,12 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             symbol['region'] = region
             symbols.append(symbol)
         cursor = end
+        if wrapper_quality and block.get('close_end_byte') is not None:
+            close_start, close_end = block['close_start_byte'], block['close_end_byte']
+            if close_start != cursor or close_end <= close_start:
+                raise RuntimeError('SFC parser returned a non-contiguous closing wrapper range')
+            chunks.extend(_split_raw(raw, close_start, close_end, max_bytes, span, wrapper_quality, wrapper_region))
+            cursor = close_end
     if cursor < len(raw):
         chunks.extend(_split_raw(raw, cursor, len(raw), max_bytes, span, 'structural', None))
     for diagnostic in diagnostics:

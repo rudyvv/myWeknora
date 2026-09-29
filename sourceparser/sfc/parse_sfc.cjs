@@ -53,6 +53,7 @@ function collectBlocks(descriptor, source) {
 function openingBlockTags(source, blocks) {
   const openings = []
   const stack = []
+  const blockTypes = new Set(blocks.map(block => block.type.toLowerCase()))
   const voidTags = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'])
   let index = 0
   let blockIndex = 0
@@ -86,14 +87,25 @@ function openingBlockTags(source, blocks) {
         }
         const tag = match[2].toLowerCase()
         if (match[1] === '/') {
-          const open = stack.lastIndexOf(tag)
-          if (open >= 0) stack.length = open
+          let open = stack.length - 1
+          while (open >= 0 && stack[open].tag !== tag) open--
+          if (open >= 0) {
+            const matched = stack[open]
+            if (matched.block) {
+              matched.block.close_start = index
+              matched.block.close_end = Math.min(cursor + 1, source.length)
+            }
+            stack.length = open
+          }
         } else {
-          if (stack.length === 0 && ['template', 'script', 'style'].includes(tag)) {
-            openings.push({ type: tag, start: index })
+          let block = null
+          if (stack.length === 0 && (['template', 'script', 'style'].includes(tag) || blockTypes.has(tag))) {
+            block = { type: tag, start: index, open_end: Math.min(cursor + 1, source.length),
+              close_start: null, close_end: null }
+            openings.push(block)
           }
           const selfClosing = /\/\s*>$/.test(source.slice(index, cursor + 1))
-          if (!selfClosing && !voidTags.has(tag)) stack.push(tag)
+          if (!selfClosing && !voidTags.has(tag)) stack.push({ tag, block })
         }
         index = Math.min(cursor + 1, source.length)
         continue
@@ -102,6 +114,24 @@ function openingBlockTags(source, blocks) {
     index++
   }
   return openings
+}
+
+function attachBlockTagRanges(source, blocks) {
+  const tags = openingBlockTags(source, blocks)
+  const used = new Set()
+  for (const block of blocks) {
+    const match = tags.find((tag, index) => !used.has(index) && tag.type === block.type.toLowerCase() &&
+      tag.open_end === block.start_utf16)
+    if (!match) continue
+    const index = tags.indexOf(match)
+    used.add(index)
+    block.tag_start_utf16 = match.start
+    block.tag_end_utf16 = match.open_end
+    if (Number.isSafeInteger(match.close_start) && Number.isSafeInteger(match.close_end)) {
+      block.close_start_utf16 = match.close_start
+      block.close_end_utf16 = match.close_end
+    }
+  }
 }
 
 function collectDiagnostics(errors, source, blocks) {
@@ -116,7 +146,9 @@ function collectDiagnostics(errors, source, blocks) {
     if (Object.prototype.hasOwnProperty.call(descriptorCounts, block.type)) descriptorCounts[block.type]++
   }
   const openingCounts = { template: [], script: [], style: [] }
-  for (const opening of openingBlockTags(source, blocks)) openingCounts[opening.type].push(opening.start)
+  for (const opening of openingBlockTags(source, blocks)) {
+    if (openingCounts[opening.type]) openingCounts[opening.type].push(opening.start)
+  }
   for (const type of ['template', 'script']) {
     for (const start of openingCounts[type].slice(descriptorCounts[type])) {
       diagnostics.push({ code: 'vue_sfc_duplicate_block', start_utf16: start, end_utf16: null })
@@ -140,6 +172,7 @@ function parseSFC(request) {
     compilerParseOptions: { pad: false, deindent: false, outputSourceRange: true },
   })
   const blocks = collectBlocks(parsed, request.source)
+  attachBlockTagRanges(request.source, blocks)
   return {
     node_version: process.version,
     compiler_version: COMPILER_VERSION,
@@ -153,7 +186,7 @@ function parseSFC(request) {
 
 function main() {
   if (process.argv.length === 3 && process.argv[2] === '--health') {
-    process.stdout.write(JSON.stringify({ node_version: process.version, compiler_version: COMPILER_VERSION, rules_version: 1 }))
+    process.stdout.write(JSON.stringify({ node_version: process.version, compiler_version: COMPILER_VERSION, rules_version: 2 }))
     return
   }
   let body

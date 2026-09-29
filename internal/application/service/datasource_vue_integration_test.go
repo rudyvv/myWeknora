@@ -34,6 +34,7 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 		"<i18n lang=\"json\">\r\n{\"title\":\"🧭\"}\r\n</i18n>\r\n")
 	externalVue := []byte("<template><div>external entry</div></template>\r\n" +
 		"<script src=\"./api.js\"></script>\r\n")
+	whitespaceExternalVue := []byte("<script src=\"./api.js\"> \r\n\t </script>\r\n")
 	rejectedVue := []byte("<script src=\"../private.js\"></script>\r\n")
 	missingVue := []byte("<script src=\"./missing.js\"></script>\r\n")
 	unknownVue := []byte("<template lang=\"pug\">\r\nsection unknown\r\n</template>\r\n")
@@ -153,6 +154,53 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	}
 	require.NotNil(t, parserExternalRegion)
 	require.Equal(t, "unchecked", parserExternalRegion.ExternalStatus)
+	assertExternalEvidence := func(raw []byte, parsed *types.ParsedSourceFile, expectedStatus, path string) {
+		t.Helper()
+		var rebuilt strings.Builder
+		foundOpening, foundClosing := false, false
+		for _, chunk := range parsed.Chunks {
+			rebuilt.WriteString(chunk.Content)
+			if chunk.Region == nil || chunk.Region.Kind != "script" || chunk.Region.ExternalStatus != expectedStatus {
+				continue
+			}
+			require.Equal(t, "degraded", chunk.Quality)
+			require.Equal(t, "degraded", chunk.Region.Quality)
+			area := chunk.Range
+			require.Greater(t, area.EndByte, area.StartByte)
+			require.Equal(t, string(raw[area.StartByte:area.EndByte]), chunk.Content)
+			foundOpening = foundOpening || strings.Contains(chunk.Content, "<script")
+			foundClosing = foundClosing || strings.Contains(chunk.Content, "</script>")
+			evidence := &types.SourceEvidence{
+				DataSourceID: f.ds.ID, SnapshotID: "snapshot-id", FileVersionID: "file-version-id",
+				ProjectID: "project-id", CommitSHA: f.sha, Path: path, Range: chunk.Range,
+				Quality: chunk.Quality, Region: chunk.Region,
+			}
+			result := &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"display_type": "search_results",
+				"results": []map[string]interface{}{{"chunk_id": "chunk-id", "knowledge_id": "source-file-id",
+					"knowledge_base_id": "kb-id", "knowledge_title": "external Vue script",
+					"content": chunk.Content, "source_evidence": evidence}},
+			}}
+			output := modelcontext.NewRegistry(true).ModelToolResultForTool("knowledge_search", result)
+			require.Contains(t, output, `quality="degraded"`)
+			require.Contains(t, output, `region_kind="script"`)
+			require.Contains(t, output, `external_status="`+expectedStatus+`"`)
+			require.NotContains(t, output, `external_source=`)
+			require.NotContains(t, output, `resolved_path=`)
+		}
+		require.Equal(t, string(raw), rebuilt.String())
+		require.True(t, foundOpening, "the original opening script tag must carry region evidence")
+		require.True(t, foundClosing, "the original closing script tag must carry region evidence")
+	}
+	assertExternalEvidence(externalVue, externalParsed, "unchecked", "src/components/ExternalPanel.vue")
+	whitespaceParsed, err := source.ParseFile(f.ctx, parserURL,
+		"src/components/WhitespaceExternalPanel.vue", whitespaceExternalVue)
+	require.NoError(t, err)
+	assertExternalEvidence(whitespaceExternalVue, whitespaceParsed, "unchecked", "src/components/WhitespaceExternalPanel.vue")
+	rejectedParsed, err := source.ParseFile(f.ctx, parserURL,
+		"src/components/RejectedPanel.vue", rejectedVue)
+	require.NoError(t, err)
+	assertExternalEvidence(rejectedVue, rejectedParsed, "rejected", "src/components/RejectedPanel.vue")
 	var externalID string
 	require.NoError(t, f.db.Raw("SELECT id FROM source_files WHERE path=?", "src/components/ExternalPanel.vue").Scan(&externalID).Error)
 	var rejectedID string

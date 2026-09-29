@@ -14,14 +14,21 @@ for (const key of ['window', 'document', 'navigator', 'Element', 'HTMLElement', 
 const require = createRequire(import.meta.url)
 const { createApp, h, nextTick, reactive } = require('vue') as typeof import('vue')
 
-test('published source is escaped, read-only, and links the selected symbol to the same commit', async () => {
-  const path = fileURLToPath(new URL('./SourceCodeView.vue', import.meta.url))
+function compileSFC(path: string, resolveModule: (name: string) => any = require) {
   const { descriptor } = parse(readFileSync(path, 'utf8'), { filename: path })
   const compiled = ts.transpileModule(compileScript(descriptor, { id: path, inlineTemplate: true }).content,
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-  const requests: string[] = []
   const module = { exports: {} as any }
-  new Function('require', 'module', 'exports', compiled)((name: string) => {
+  new Function('require', 'module', 'exports', compiled)(resolveModule, module, module.exports)
+  return module.exports
+}
+
+test('published source is escaped, read-only, and links the selected symbol to the same commit', async () => {
+  const path = fileURLToPath(new URL('./SourceCodeView.vue', import.meta.url))
+  const badgePath = fileURLToPath(new URL('./SourceRegionBadge.vue', import.meta.url))
+  const badgeModule = compileSFC(badgePath)
+  const requests: string[] = []
+  const sourceModule = compileSFC(path, (name: string) => {
     if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence read') } }
     if (name === '@/api/knowledge-base') return { async getSourceFile(id: string) {
       requests.push(id)
@@ -30,14 +37,16 @@ test('published source is escaped, read-only, and links the selected symbol to t
         project_id: '123', commit_sha: 'a'.repeat(40), repository_url: 'https://gitlab.local/team/repo',
         path: broken ? 'src/syntax_error.py' : 'src/Service.java', encoding: 'utf-8', quality: broken ? 'syntax_error' : 'structural', parser_version: 'java-pack-locked',
         content: broken ? 'async def broken(:\r\n    return "degraded_python_marker 中文😀"\r\n' : 'class Service {\r\n String getPushSchedule() { return "<img src=x onerror=alert(1)>"; }\r\n}',
-        symbols: broken ? [] : [{ kind: 'method', name: 'getPushSchedule', qualified_name: 'Service.getPushSchedule', range: { start_line: 2, end_line: 2 } }] } }
+        symbols: broken ? [] : [{ kind: 'method', name: 'getPushSchedule', qualified_name: 'Service.getPushSchedule', range: { start_line: 2, end_line: 2 },
+          region: { kind: 'script', language: 'ts', quality: 'structural' } }] } }
     } }
+    if (name === '@/components/SourceRegionBadge.vue') return badgeModule
     return require(name)
-  }, module, module.exports)
+  })
   const host = document.createElement('div')
   document.body.append(host)
   const props = reactive({ knowledgeId: 'file-one', fileVersionId: 'version-one' })
-  const app = createApp({ render: () => h(module.exports.default, props) })
+  const app = createApp({ render: () => h(sourceModule.default, props) })
   app.mount(host)
   try {
     for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
@@ -48,6 +57,7 @@ test('published source is escaped, read-only, and links the selected symbol to t
     assert.equal(host.querySelector('textarea,[contenteditable="true"]'), null)
     const symbol = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Service.getPushSchedule'))
     assert.ok(symbol)
+    assert.ok(symbol.textContent?.includes('script · ts · 结构解析'))
     symbol.click()
     await nextTick()
     assert.equal(host.querySelector('a')?.getAttribute('href'), `https://gitlab.local/team/repo/-/blob/${'a'.repeat(40)}/src/Service.java#L2-2`)

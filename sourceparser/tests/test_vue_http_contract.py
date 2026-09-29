@@ -93,6 +93,7 @@ class VueHTTPContract(unittest.TestCase):
         self.assertEqual(status, 200, health)
         self.assertIn('vue', health['languages'])
         self.assertIn('rules-4-', health['parser_version'])
+        self.assertIn('vue-sfc-node-24.19.0-compiler-2.7.16-rules-2', health['parser_version'])
         status, parsed = self.parse(b'<template><div>ok</div></template>\r\n')
         self.assertEqual(status, 200, parsed)
         self.assertEqual(parsed['parser_version'], health['parser_version'])
@@ -266,16 +267,49 @@ class VueHTTPContract(unittest.TestCase):
                 sentinel.wait(timeout=3)
 
     def test_external_script_references_are_literal_and_never_loaded(self):
-        for source, status_value in (('./api.js', 'unchecked'), ('../private.js', 'rejected'),
-                                     ('/absolute.js', 'rejected')):
-            raw = ('<script src="' + source + '"></script>\r\n').encode()
-            with self.subTest(source=source):
+        for source, body, status_value in (('./api.js', '', 'unchecked'),
+                                           ('./api.js', ' \r\n\t ', 'unchecked'),
+                                           ('../private.js', '', 'rejected'),
+                                           ('/absolute.js', '', 'rejected')):
+            raw = ('<script src="' + source + '">' + body + '</script>\r\n').encode()
+            with self.subTest(source=source, body=body):
                 status, parsed = self.parse(raw)
                 self.assertEqual(status, 200, parsed)
                 marker = next(symbol for symbol in parsed['symbols'] if symbol['kind'] == 'sfc_region')
                 self.assertEqual(marker['region']['external_source'], source)
                 self.assertEqual(marker['region']['external_status'], status_value)
+                self.assertEqual(marker['region']['quality'], 'degraded')
+                self.assertNotIn('resolved_path', marker['region'])
                 self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
+                wrapper_chunks = [chunk for chunk in parsed['chunks']
+                                  if '<script' in chunk['content'] or '</script>' in chunk['content']]
+                self.assertTrue(wrapper_chunks)
+                for chunk in wrapper_chunks:
+                    self.assertEqual(chunk['quality'], 'degraded')
+                    self.assertEqual(chunk['region']['kind'], 'script')
+                    self.assertEqual(chunk['region']['external_status'], status_value)
+                    span = chunk['range']
+                    self.assertGreater(span['end_byte'], span['start_byte'])
+                    self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
+                self.assertTrue(all('resolved_path' not in chunk['region'] for chunk in wrapper_chunks))
+
+    def test_empty_unknown_preprocessor_wrapper_has_positive_region_evidence(self):
+        cases = (
+            (b'<template lang="pug"></template>\r\n', 'template', '<template lang="pug">', '</template>'),
+            (b'<i18n lang="toml"></i18n>\r\n', 'custom', '<i18n lang="toml">', '</i18n>'),
+        )
+        for raw, kind, opening, closing in cases:
+            with self.subTest(kind=kind):
+                status, parsed = self.parse(raw)
+                self.assertEqual(status, 200, parsed)
+                self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
+                wrappers = [chunk for chunk in parsed['chunks'] if opening in chunk['content'] or closing in chunk['content']]
+                self.assertEqual([chunk['content'] for chunk in wrappers], [opening, closing])
+                for chunk in wrappers:
+                    self.assertEqual(chunk['quality'], 'unknown_preprocess')
+                    self.assertEqual(chunk['region']['kind'], kind)
+                    self.assertEqual(chunk['region']['quality'], 'unknown_preprocess')
+                    self.assertEqual(raw[chunk['range']['start_byte']:chunk['range']['end_byte']].decode(), chunk['content'])
 
     def test_unknown_preprocessor_and_descriptor_diagnostics_remain_readable(self):
         raw = ('<style lang="mystery-style">\r\nraw 😀\r\n</style>\r\n'

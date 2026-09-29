@@ -41,7 +41,6 @@ func TestModelToolResultForToolCarriesVueEvidenceIntoModelContext(t *testing.T) 
 		Quality: "structural", GitLabURL: "https://gitlab.example/project/-/blob/commit-sha/src/pages/Confirm.vue#L7",
 		Region: &types.SourceRegion{
 			Kind: "template", Language: "pug", Quality: "unknown_preprocess",
-			ExternalSource: "./api.js", ExternalStatus: "unchecked", ResolvedPath: "private-relative-target.ts",
 		},
 	}
 	row := map[string]interface{}{
@@ -74,8 +73,6 @@ func TestModelToolResultForToolCarriesVueEvidenceIntoModelContext(t *testing.T) 
 			require.Contains(t, output, `region_quality="unknown_preprocess"`)
 			require.Contains(t, output, `start_line="7"`)
 			require.Contains(t, output, `end_line="13"`)
-			require.NotContains(t, output, "private-relative-target.ts",
-				"an unresolved source reference must not disclose a resolved path")
 
 			var parsed retrievalNode
 			require.NoError(t, xml.Unmarshal([]byte(output), &parsed), "model-facing evidence must remain valid XML")
@@ -99,4 +96,73 @@ func TestSourceEvidenceQualityFallsBackToRegionQuality(t *testing.T) {
 	})
 	require.Contains(t, attrs, `quality="unknown_preprocess"`)
 	require.NotContains(t, attrs, `region_quality=`)
+}
+
+func TestModelToolResultForToolCarriesOnlySafeExternalScriptStatus(t *testing.T) {
+	for _, test := range []struct {
+		status string
+		want   string
+	}{
+		{status: "unchecked", want: `external_status="unchecked"`},
+		{status: "rejected", want: `external_status="rejected"`},
+		{status: "resolved"},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			row := map[string]interface{}{
+				"chunk_id": "chunk-id", "knowledge_id": "source-file-id", "knowledge_base_id": "kb-id",
+				"knowledge_title": "External script", "content": "<script src=\"./api.js\"></script>",
+				"source_evidence": &types.SourceEvidence{
+					SnapshotID: "snapshot-id", CommitSHA: "commit-sha", Path: "src/Panel.vue",
+					Quality: "degraded", Range: types.SourceRange{StartLine: 1, EndLine: 1},
+					Region: &types.SourceRegion{Kind: "script", Quality: "degraded", ExternalSource: "./api.js",
+						ExternalStatus: test.status, ResolvedPath: "src/api.js"},
+				},
+			}
+			output := NewRegistry(true).ModelToolResultForTool("knowledge_search", &types.ToolResult{
+				Success: true, Data: map[string]interface{}{
+					"display_type": "search_results", "results": []map[string]interface{}{row},
+				},
+			})
+			if test.want != "" {
+				require.Contains(t, output, test.want)
+			} else {
+				require.NotContains(t, output, `external_status=`)
+			}
+			require.NotContains(t, output, `external_source=`)
+			require.NotContains(t, output, `resolved_path=`)
+			require.NotContains(t, output, "src/api.js")
+		})
+	}
+}
+
+func TestSourceEvidenceExternalStatusIsBoundedAndNeverResolvedForTheModel(t *testing.T) {
+	for _, test := range []struct {
+		status string
+		want   string
+	}{
+		{status: "unchecked", want: `external_status="unchecked"`},
+		{status: "rejected", want: `external_status="rejected"`},
+		{status: "resolved"},
+		{status: `unchecked" resolved_path="private.ts`},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			attrs := sourceEvidenceAttrs(&types.SourceEvidence{Region: &types.SourceRegion{
+				Kind: "script", ExternalSource: "./private.js", ExternalStatus: test.status,
+				ResolvedPath: "private.ts",
+			}})
+			if test.want != "" {
+				require.Contains(t, attrs, test.want)
+			} else {
+				require.NotContains(t, attrs, `external_status=`)
+			}
+			require.NotContains(t, attrs, `external_source=`)
+			require.NotContains(t, attrs, `resolved_path=`)
+			require.NotContains(t, attrs, "private.js")
+			require.NotContains(t, attrs, "private.ts")
+		})
+	}
+	attrs := sourceEvidenceAttrs(&types.SourceEvidence{Region: &types.SourceRegion{
+		Kind: "script", ExternalStatus: strings.Repeat("x", 1024),
+	}})
+	require.NotContains(t, attrs, `external_status=`)
 }
