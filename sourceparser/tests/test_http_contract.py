@@ -265,6 +265,9 @@ class JavaHTTPContract(unittest.TestCase):
                b'ON DUPLICATE KEY UPDATE id=VALUES(id)</insert>'
                b'<update id="update">UPDATE schedule_status SET enabled=1</update>'
                b'<delete id="delete">DELETE FROM old_schedule WHERE id=1</delete>'
+               b'<delete id="deleteUsing">DELETE FROM o USING orders o JOIN customers c ON o.id=c.id</delete>'
+               b'<delete id="deleteMulti">DELETE o,c FROM orders o JOIN customers c ON o.id=c.id</delete>'
+               b'<update id="updateJoin">UPDATE orders o JOIN customers c ON o.id=c.id SET o.x=1</update>'
                b'<select id="query">WITH active AS (SELECT * FROM base_table) '
                b'SELECT * FROM active a JOIN JSON_TABLE(a.value, \'$\' COLUMNS(id INT PATH \'$.id\')) jt ON 1=1</select>'
                b'</mapper>')
@@ -275,7 +278,10 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertEqual(status, 200, result)
         tables = [(f['statement_id'], f['name']) for f in result['facts'] if f['kind'] == 'sql_table']
         self.assertCountEqual(tables, [('upsert', 'db.schedule'), ('update', 'schedule_status'),
-                                       ('delete', 'old_schedule'), ('query', 'base_table')])
+                                       ('delete', 'old_schedule'), ('deleteUsing', 'orders'),
+                                       ('deleteUsing', 'customers'), ('deleteMulti', 'orders'),
+                                       ('deleteMulti', 'customers'), ('updateJoin', 'orders'),
+                                       ('updateJoin', 'customers'), ('query', 'base_table')])
 
     def test_large_mybatis_mapper_keeps_every_statement(self):
         statements = ''.join(f'<select id="s{i}">SELECT id FROM table_{i}</select>' for i in range(1200))
@@ -288,6 +294,23 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertEqual(status, 200, result)
         self.assertEqual(sum(f['kind'] == 'mybatis_statement' for f in result['facts']), 1200)
         self.assertEqual(sum(f['kind'] == 'sql_table' for f in result['facts']), 1200)
+        self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
+
+    def test_each_mybatis_statement_gets_an_independent_index_chunk(self):
+        raw = (b'<mapper namespace="demo.M"><select id="first">SELECT * FROM first_table</select>'
+               b'<select id="second">SELECT * FROM second_table</select></mapper>')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/mapper.xml', 'language': 'mybatis-xml',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        statement_chunks = [chunk for chunk in result['chunks']
+                            if chunk['content'].startswith('<select')]
+        self.assertEqual(len(statement_chunks), 2)
+        self.assertIn('id="first"', statement_chunks[0]['content'])
+        self.assertNotIn('id="second"', statement_chunks[0]['content'])
+        self.assertIn('id="second"', statement_chunks[1]['content'])
+        self.assertNotIn('id="first"', statement_chunks[1]['content'])
         self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
 
     def test_dynamic_or_duplicated_sql_fragments_are_not_certain(self):

@@ -320,22 +320,53 @@ def _tables(sql):
         # call sites without guessing from SQL text.
         return isinstance(table, exp.Table) and isinstance(table.this, exp.Identifier)
 
+    def physical_name(table):
+        parts = [table.catalog, table.db, table.name]
+        return ".".join(part for part in parts if part)
+
     for statement in parse_sql(sql, read="mysql"):
         if statement is None:
             continue
-        target = statement.this if statement.key in ("insert", "update", "delete", "merge") else None
-        if isinstance(target, exp.Schema):
-            target = target.this
-        if physical_table(target):
-            parts = [target.catalog, target.db, target.name]
-            name = ".".join(part for part in parts if part)
-            if name:
-                names.append(name)
+        if statement.key in ("insert", "update", "delete", "merge"):
+            cte_names = {cte.alias_or_name.casefold() for cte in statement.find_all(exp.CTE)}
+            using_sources = statement.args.get("using")
+            if statement.key == "delete" and using_sources:
+                # MySQL `DELETE FROM alias USING physical_source ...`: the
+                # `this` table is a target alias, not an entity table.
+                sources = using_sources if isinstance(using_sources, list) else [using_sources]
+            else:
+                source = statement.args.get("this")
+                if isinstance(source, exp.Schema):
+                    source = source.this
+                sources = [source] if source is not None else []
+            seen = set()
+            for source in sources:
+                if source is None:
+                    continue
+                candidates = [source] if isinstance(source, exp.Table) else []
+                candidates.extend(source.find_all(exp.Table) if hasattr(source, "find_all") else ())
+                for table in candidates:
+                    if not physical_table(table) or table.name.casefold() in cte_names:
+                        continue
+                    name = physical_name(table)
+                    if name and name not in seen:
+                        seen.add(name)
+                        names.append(name)
+            # Some SQLGlot DML forms expose additional source scopes (for
+            # nested selects). CTE aliases and derived scopes never become
+            # physical tables themselves.
+            for scope in traverse_scope(statement):
+                for source_value in scope.sources.values():
+                    if physical_table(source_value) and source_value.name.casefold() not in cte_names:
+                        name = physical_name(source_value)
+                        if name and name not in seen:
+                            seen.add(name)
+                            names.append(name)
+            continue
         for scope in traverse_scope(statement):
             for source in scope.sources.values():
                 if physical_table(source):
-                    parts = [source.catalog, source.db, source.name]
-                    name = ".".join(part for part in parts if part)
+                    name = physical_name(source)
                     if name:
                         names.append(name)
     return names

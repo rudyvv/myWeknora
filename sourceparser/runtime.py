@@ -1,6 +1,7 @@
 """Locked Tree-sitter runtime and a provenance adapter over the mature chunker."""
 import hashlib
 from bisect import bisect_left
+import heapq
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -40,7 +41,7 @@ def load_runtime(cache):
         grammar = cache / relative
         if grammar.resolve().parent != (cache / expected).resolve() or any(p.is_symlink() for p in [grammar, grammar.parent, grammar.parent.parent, grammar.parent.parent.parent]) or hashlib.sha256(grammar.read_bytes()).hexdigest() != entry['grammar_sha256']:
             raise RuntimeError('grammar checksum mismatch')
-        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-5-' + entry['grammar_sha256']
+        versions[language] = language + '-pack-' + PACK_VERSION + '-rules-7-' + entry['grammar_sha256']
     pack.configure(pack.PackConfig(cache_dir=str(cache)))
     for language in versions:
         # Only already verified libraries can reach the language registry.
@@ -54,7 +55,7 @@ def runtime_version(versions):
         return ''
     processing = {'grammars': versions, 'sqlglot': version('sqlglot'), 'xml_rules': 'mybatis-expat-rules-1'}
     fingerprint = hashlib.sha256(json.dumps(processing, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    return 'source-pack-' + PACK_VERSION + '-rules-5-' + fingerprint[:32]
+    return 'source-pack-' + PACK_VERSION + '-rules-7-' + fingerprint[:32]
 
 
 def parse_source(raw, max_bytes, parser_version, language, path):
@@ -181,19 +182,63 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         facts, diagnostics = extract_java_facts(raw, tree, path)
     elif xml_result is not None:
         facts, diagnostics = xml_result['facts'], xml_result['diagnostics']
+    facts.sort(key=lambda fact: (fact['range']['start_byte'], fact['range']['end_byte'], fact['kind'], fact.get('name', '')))
     chunks = []
     cursor = 0
-    for chunk in parsed.chunks:
-        start, end = chunk.start_byte, chunk.end_byte
-        if start != cursor or end <= start or end > len(raw) or raw[start:end].decode('utf-8') != chunk.content:
+    chunk_ranges = [(chunk.start_byte, chunk.end_byte) for chunk in parsed.chunks]
+    expected_chunk_content = {(chunk.start_byte, chunk.end_byte): chunk.content for chunk in parsed.chunks}
+    if xml_result is not None and xml_result['quality'] == 'structural':
+        regions = sorted((fact['range']['start_byte'], fact['range']['end_byte']) for fact in facts
+                         if fact['kind'] in ('mybatis_statement', 'mybatis_sql_fragment', 'mybatis_result_map'))
+        non_overlapping = []
+        for start, end in regions:
+            if non_overlapping and start < non_overlapping[-1][1]:
+                non_overlapping[-1] = (non_overlapping[-1][0], max(end, non_overlapping[-1][1]))
+            else:
+                non_overlapping.append((start, end))
+        chunk_ranges = []
+        def append_bounded(start, end):
+            while start < end:
+                cut = min(end, start + max_bytes)
+                while cut < end and cut > start and raw[cut] & 0xC0 == 0x80:
+                    cut -= 1
+                if cut <= start:
+                    cut = min(end, start + max_bytes)
+                    while cut < end and raw[cut] & 0xC0 == 0x80:
+                        cut += 1
+                chunk_ranges.append((start, cut))
+                start = cut
+        region_cursor = 0
+        for region_start, region_end in non_overlapping:
+            append_bounded(region_cursor, region_start)
+            append_bounded(region_start, region_end)
+            region_cursor = region_end
+        append_bounded(region_cursor, len(raw))
+
+    fact_starts = [fact['range']['start_byte'] for fact in facts]
+    fact_ends = [fact['range']['end_byte'] for fact in facts]
+    fact_cursor, active_facts, active_fact_ends = 0, set(), []
+    for start, end in chunk_ranges:
+        expected = raw[start:end].decode('utf-8') if xml_result is not None and xml_result['quality'] == 'structural' else expected_chunk_content.get((start, end))
+        if start != cursor or end <= start or end > len(raw) or expected is None or raw[start:end].decode('utf-8') != expected:
             raise RuntimeError('chunker produced a non-verifiable source range')
+        content = raw[start:end].decode('utf-8')
         cursor = end
+        while fact_cursor < len(facts) and fact_starts[fact_cursor] < end:
+            if fact_ends[fact_cursor] > start:
+                active_facts.add(fact_cursor)
+                heapq.heappush(active_fact_ends, (fact_ends[fact_cursor], fact_cursor))
+            fact_cursor += 1
+        while active_fact_ends and active_fact_ends[0][0] <= start:
+            _, expired = heapq.heappop(active_fact_ends)
+            active_facts.discard(expired)
+        overlapping_facts = [facts[index] for index in sorted(active_facts)]
         chunks.append({
-            'content': chunk.content, 'range': span(start, end), 'quality': quality,
+            'content': content, 'range': span(start, end), 'quality': quality,
             'symbols': ([s['qualified_name'] for s in symbols if s['range']['start_byte'] < end and s['range']['end_byte'] > start]
                         + [((fact.get('namespace', '') + '.') if fact.get('namespace') else '')
                            + fact.get('name', fact.get('statement_type', fact['kind']))
-                           for fact in facts if fact['range']['start_byte'] < end and fact['range']['end_byte'] > start]),
+                           for fact in overlapping_facts]),
             'context': [context(s) for s in symbols
                         if s['range']['start_byte'] <= start and s['range']['end_byte'] >= end][-2:],
         })
