@@ -57,4 +57,4 @@ T14 独立提交 `bd7a43ac` 已推送，以 `aaf7cb58` 合入功能分支；其�
 
 ## 第二批组织调整
 
-用户已选择三个独立对话，各自调用子 Agent 做 Standards / Spec 审查；T05、T08、T10 的创建请求已接受，三个新 worktree 和分支已从用户确认的 3adaa587 准备。正式对话 ID 待应用列表返回，详细队列映射、所有权及协调要求见 [第二批协调记录](gitlab-code-wiki-rag-batch-two-coordination.md)。原任务保留接口协调、集成验证及 GitHub 收尾。
+用户已选择三个独立对话，T05、T08、T10 使用独立 worktree 和分支，从用户确认的 3adaa587 开始。正式对话 ID 已核实。最新模型与分工：三个实现对话使用 GPT-6 Luna + 极高思考；规划、接口决策和 Standards / Spec 审查由当前 GPT-6 Sol + 高思考总协调对话处理，审查后向实现对话下达修复清单。此安排取代原“各自调用审查子 Agent”安排。详细映射、所有权及协调要求见 [第二批协调记录](gitlab-code-wiki-rag-batch-two-coordination.md)。原任务继续负责集成验证及 GitHub 收尾。
