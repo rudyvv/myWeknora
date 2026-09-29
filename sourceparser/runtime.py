@@ -248,8 +248,9 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
                                      region_for(block, block_quality)))
         region = region_for(block, block_quality)
         region_range = span(start, end)
+        marker_signature_range = span(start, start)
         symbols.append({'kind': 'sfc_region', 'name': kind, 'qualified_name': path + '#' + kind + '[' + str(index) + ']',
-                        'signature': '', 'signature_range': region_range, 'range': region_range,
+                        'signature': '', 'signature_range': marker_signature_range, 'range': region_range,
                         'annotations': [], 'region': region})
         for symbol in block_symbols:
             symbol['region'] = region

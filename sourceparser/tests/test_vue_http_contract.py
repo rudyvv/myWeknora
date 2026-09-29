@@ -97,6 +97,10 @@ class VueHTTPContract(unittest.TestCase):
             self.assertEqual(raw[:span['start_byte']].count(b'\n') + 1, span['start_line'])
             line_end = max(span['start_byte'], span['end_byte'] - 1)
             self.assertEqual(raw[:line_end].count(b'\n') + 1, span['end_line'])
+        for symbol in parsed['symbols']:
+            signature_range = symbol['signature_range']
+            self.assertEqual(raw[signature_range['start_byte']:signature_range['end_byte']].decode(),
+                             symbol['signature'], symbol['qualified_name'])
         self.assertTrue(any((chunk.get('region') or {}).get('kind') == 'style' for chunk in parsed['chunks']))
         self.assertTrue(any(chunk.get('region') is None and '<template' in chunk['content']
                             for chunk in parsed['chunks']))
