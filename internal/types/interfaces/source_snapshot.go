@@ -20,3 +20,19 @@ type SourceSnapshotRepository interface {
 type SourceFileRepository interface {
 	ReadPublishedSourceFile(context.Context, uint64, string, ...string) (*types.SourceFileView, error)
 }
+
+// SourceFileInfoRepository projects pinned provenance without loading file bytes.
+type SourceFileInfoRepository interface {
+	ReadPublishedSourceFileInfo(context.Context, uint64, string) (*types.SourceFileView, error)
+}
+
+// SourceReadService pins the published repository versions for one question.
+// Callers retain the returned context for every read and release it on completion.
+type SourceReadService interface {
+	BeginSourceRead(context.Context, types.SearchTargets) (context.Context, func(), error)
+}
+
+type SourceReadRepository interface {
+	AcquireSourceRead(context.Context, types.SearchTargets) (types.SourceReadLease, func(), error)
+	CheckSourceRead(context.Context, string) error
+}

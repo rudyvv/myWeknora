@@ -42,8 +42,12 @@ func NewSourceAwareChunkRepository(db *gorm.DB) interfaces.ChunkRepository {
 
 func (r *chunkRepository) readDB(ctx context.Context) *gorm.DB {
 	query := r.db.WithContext(ctx)
+	if err := source.ValidateReadScope(ctx); err != nil {
+		query.AddError(err)
+		return query
+	}
 	if r.sourceVisibility {
-		query = query.Where(source.PublishedChunkSQL("chunks.id"))
+		query = query.Where(source.PublishedChunkSQL(ctx, "chunks.id", "chunks.knowledge_id"))
 	}
 	return query
 }

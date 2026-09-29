@@ -154,7 +154,7 @@ func (h *KnowledgeHandler) resolveKnowledgeAndValidateKBAccess(
 	if request.Caller.TenantID == 0 {
 		return nil, ctx, errors.NewUnauthorizedError("Unauthorized")
 	}
-	knowledge, err := h.kgService.GetKnowledgeByIDOnly(ctx, knowledgeID)
+	knowledge, err := access.KnowledgeIdentity(ctx, h.kgService, knowledgeID)
 	if err != nil || knowledge == nil {
 		return nil, ctx, errors.NewNotFoundError("Knowledge not found")
 	}
@@ -165,7 +165,9 @@ func (h *KnowledgeHandler) resolveKnowledgeAndValidateKBAccess(
 		if grant.EffectiveTenantID != knowledge.TenantID {
 			return nil, ctx, errors.NewForbiddenError("Permission denied to access this knowledge")
 		}
-		return knowledge, grant.Context(ctx), nil
+		scoped := grant.Context(ctx)
+		knowledge, err = h.kgService.GetKnowledgeByIDOnly(scoped, knowledgeID)
+		return knowledge, scoped, err
 	}
 	kb := &types.KnowledgeBase{ID: knowledge.KnowledgeBaseID, TenantID: knowledge.TenantID}
 	grant, err := access.ResolveKB(ctx, request, kb, requiredPermission, h.kbShareService, h.agentShareService)
@@ -175,7 +177,9 @@ func (h *KnowledgeHandler) resolveKnowledgeAndValidateKBAccess(
 	if err != nil {
 		return nil, ctx, kbAccessHTTPError(err)
 	}
-	return knowledge, grant.Context(ctx), nil
+	scoped := grant.Context(ctx)
+	knowledge, err = h.kgService.GetKnowledgeByIDOnly(scoped, knowledgeID)
+	return knowledge, scoped, err
 }
 
 // handleDuplicateKnowledgeError handles cases where duplicate knowledge is detected

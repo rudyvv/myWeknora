@@ -207,10 +207,13 @@ func (g *pgRepository) Retrieve(ctx context.Context, params types.RetrieveParams
 func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	params types.RetrieveParams,
 ) ([]*types.RetrieveResult, error) {
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return nil, err
+	}
 	logger.GetLogger(ctx).Infof("[Postgres] Keywords retrieval: query=%s, topK=%d", params.Query, params.TopK)
 	conds := make([]clause.Expression, 0)
 	if g.sourceVisibility {
-		conds = append(conds, clause.Expr{SQL: source.PublishedChunkSQL("embeddings.chunk_id")})
+		conds = append(conds, clause.Expr{SQL: source.PublishedChunkSQL(ctx, "embeddings.chunk_id", "embeddings.knowledge_id")})
 	}
 	if len(params.SourceIDs) > 0 {
 		if !g.sourceVisibility {
@@ -321,6 +324,9 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	params types.RetrieveParams,
 ) ([]*types.RetrieveResult, error) {
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return nil, err
+	}
 	logger.GetLogger(ctx).Infof("[Postgres] Vector retrieval: dim=%d, topK=%d, threshold=%.4f",
 		len(params.Embedding), params.TopK, params.Threshold)
 
@@ -330,7 +336,7 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	// Build WHERE conditions for filtering
 	whereParts := make([]string, 0)
 	if g.sourceVisibility {
-		whereParts = append(whereParts, source.PublishedChunkSQL("embeddings.chunk_id"))
+		whereParts = append(whereParts, source.PublishedChunkSQL(ctx, "embeddings.chunk_id", "embeddings.knowledge_id"))
 	}
 	allVars := make([]interface{}, 0)
 	if len(params.SourceIDs) > 0 && !g.sourceVisibility {
@@ -447,8 +453,16 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	subqueryLimitParam := len(allVars) + 1
 	thresholdParam := len(allVars) + 2
 	finalLimitParam := len(allVars) + 3
+	queryPrefix, candidateTable := "", "embeddings"
+	if g.sourceVisibility && (len(params.SourceIDs) > 0 || source.HasPinnedSources(ctx)) {
+		// HNSW's global candidate walk can exhaust its approximation budget
+		// before a sparse manifest/file/tag filter finds a valid source. Rank
+		// the authorized relation itself; it must precede both candidate LIMITs.
+		queryPrefix = "WITH source_candidates AS MATERIALIZED (SELECT * FROM embeddings " + whereClause + ") "
+		candidateTable, whereClause = "source_candidates", ""
+	}
 
-	querySQL := fmt.Sprintf(`
+	querySQL := queryPrefix + fmt.Sprintf(`
 		SELECT 
 			id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
 			(1 - distance) as score
@@ -456,7 +470,7 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 			SELECT 
 				id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
 				embedding::halfvec(%[1]d) <=> $1::halfvec(%[1]d) as distance
-			FROM embeddings
+			FROM %[6]s
 			%[2]s
 			ORDER BY embedding::halfvec(%[1]d) <=> $1::halfvec(%[1]d)
 			LIMIT $%[3]d
@@ -464,7 +478,7 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 		WHERE distance <= $%[4]d
 		ORDER BY distance ASC
 		LIMIT $%[5]d
-	`, dimension, whereClause, subqueryLimitParam, thresholdParam, finalLimitParam)
+	`, dimension, whereClause, subqueryLimitParam, thresholdParam, finalLimitParam, candidateTable)
 
 	allVars = append(allVars, expandedTopK)       // LIMIT in subquery
 	allVars = append(allVars, 1-params.Threshold) // Distance threshold

@@ -489,12 +489,16 @@ func (s *knowledgeService) GetKnowledgeByID(ctx context.Context, id string) (*ty
 	}
 
 	logger.Infof(ctx, "Knowledge retrieved successfully, ID: %s, type: %s", knowledge.ID, knowledge.Type)
-	return knowledge, nil
+	return s.sourceKnowledgeInfo(ctx, knowledge)
 }
 
 // GetKnowledgeByIDOnly retrieves knowledge by ID without tenant filter (for permission resolution).
 func (s *knowledgeService) GetKnowledgeByIDOnly(ctx context.Context, id string) (*types.Knowledge, error) {
-	return s.repo.GetKnowledgeByIDOnly(ctx, id)
+	knowledge, err := s.repo.GetKnowledgeByIDOnly(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.sourceKnowledgeInfo(ctx, knowledge)
 }
 
 // GetOwningKBCreatorID walks knowledge_id -> kb_id -> KB.CreatorID for
@@ -532,7 +536,8 @@ func (s *knowledgeService) GetOwningKBCreatorID(ctx context.Context, knowledgeID
 func (s *knowledgeService) ListKnowledgeByKnowledgeBaseID(ctx context.Context,
 	kbID string,
 ) ([]*types.Knowledge, error) {
-	return s.repo.ListKnowledgeByKnowledgeBaseID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), kbID)
+	rows, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), kbID)
+	return s.sourceKnowledgeInfos(ctx, rows, err)
 }
 
 // ListPagedKnowledgeByKnowledgeBaseID returns paginated knowledge entries in a knowledge base
@@ -541,6 +546,7 @@ func (s *knowledgeService) ListPagedKnowledgeByKnowledgeBaseID(ctx context.Conte
 ) (*types.PageResult, error) {
 	knowledges, total, err := s.repo.ListPagedKnowledgeByKnowledgeBaseID(ctx,
 		ctx.Value(types.TenantIDContextKey).(uint64), kbID, page, filter)
+	knowledges, err = s.sourceKnowledgeInfos(ctx, knowledges, err)
 	if err != nil {
 		return nil, err
 	}
@@ -809,7 +815,8 @@ func (s *knowledgeService) GetKnowledgeBatch(ctx context.Context,
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	return s.repo.GetKnowledgeBatch(ctx, tenantID, ids)
+	rows, err := s.repo.GetKnowledgeBatch(ctx, tenantID, ids)
+	return s.sourceKnowledgeInfos(ctx, rows, err)
 }
 
 // GetKnowledgeBatchWithSharedAccess retrieves knowledge by IDs, including items from shared KBs the user has access to.
@@ -856,7 +863,7 @@ func (s *knowledgeService) GetKnowledgeBatchWithSharedAccess(ctx context.Context
 		}
 		foundSet[id] = true
 	}
-	return ownList, nil
+	return s.sourceKnowledgeInfos(ctx, ownList, nil)
 }
 
 // SetKnowledgeTags replaces all tags for a single knowledge entry.

@@ -13,6 +13,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
 	"github.com/Tencent/WeKnora/internal/searchutil"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -518,7 +519,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 				var fullKBIDs []string
 				var knowledgeTargets []*types.SearchTarget
 				for _, st := range targets {
-					if st.Type == types.SearchTargetTypeKnowledgeBase && len(st.TagIDs) == 0 {
+					if searchTargetIsWholeKB(st) {
 						fullKBIDs = append(fullKBIDs, st.KnowledgeBaseID)
 					} else {
 						knowledgeTargets = append(knowledgeTargets, st)
@@ -578,6 +579,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 							KnowledgeIDs:     st.KnowledgeIDs,
 							TagIDs:           st.TagIDs,
 							ScopeTagIDs:      st.ScopeTagIDs,
+							SourceIDs:        st.SourceIDs,
 						}
 						kbResults, err := t.knowledgeBaseService.HybridSearch(ctx, st.KnowledgeBaseID, searchParams)
 						if err != nil {
@@ -789,6 +791,9 @@ func (t *KnowledgeSearchTool) deduplicateResults(results []*searchResultWithMeta
 
 		// Check content signature for near-duplicate content
 		sig := t.buildContentSignature(r.Content)
+		if sig != "" {
+			sig = source.ContentIdentity(r.ChunkMetadata) + sig
+		}
 		if sig != "" {
 			if contentSig[sig] {
 				continue
@@ -1062,6 +1067,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 		}
 
 		formattedResults = append(formattedResults, map[string]interface{}{
+			"source_evidence":     source.Evidence(result.ChunkMetadata),
 			"result_index":        i + 1,
 			"content":             result.Content,
 			"knowledge_id":        result.KnowledgeID,

@@ -42,6 +42,7 @@ type ImageAttachment struct {
 
 // CreateKnowledgeQARequest defines the request structure for knowledge QA
 type CreateKnowledgeQARequest struct {
+	SourceIDs             []string                     `json:"source_ids,omitempty" binding:"max=100,dive,uuid"`
 	Query                 string                       `json:"query"              binding:"required"` // Query text for knowledge base search
 	KnowledgeBaseIDs      []string                     `json:"knowledge_base_ids"`                    // Selected knowledge base ID for this request
 	KnowledgeIds          []string                     `json:"knowledge_ids"`                         // Selected knowledge ID for this request

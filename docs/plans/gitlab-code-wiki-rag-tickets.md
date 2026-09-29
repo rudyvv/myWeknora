@@ -37,6 +37,6 @@
 
 ## 执行状态
 
-ready-for-agent 是 triage 标记，只有 blockers 已完成的 ticket 才进入执行 frontier。T01 [#9](https://github.com/rudyvv/myWeknora/issues/9) 已实现、验证并完成双轴复审，代码已推送到 `codex/gitlab-code-wiki-rag`，Issue 已关闭；[验证记录](gitlab-code-wiki-rag-t01-validation.md)明确全量测试的环境限制。当前 frontier 为 T02 [#10](https://github.com/rudyvv/myWeknora/issues/10)，已开始核验真实解析与数据库运行时。尚未完成的 ticket 保持 open。
+ready-for-agent 是 triage 标记，只有 blockers 已完成的 ticket 才进入执行 frontier。T01 [#9](https://github.com/rudyvv/myWeknora/issues/9) 已实现、验证并完成双轴复审，代码已推送到 `codex/gitlab-code-wiki-rag`，Issue 已关闭；[验证记录](gitlab-code-wiki-rag-t01-validation.md)明确全量测试的环境限制。T02 [#10](https://github.com/rudyvv/myWeknora/issues/10) 及 T03 [#11](https://github.com/rudyvv/myWeknora/issues/11) 均已实现并完成针对性验收与双轴复审，见 [T02](gitlab-code-wiki-rag-t02-validation.md) 和 [T03](gitlab-code-wiki-rag-t03-progress.md) 的验证记录及全量环境限制。T03 收尾后按用户批准的 [并行安排](gitlab-code-wiki-rag-parallel-execution.md)，从同一提交分别启动 T04、T07、T14；其余已解除阻塞的 T08、T10、T13 按空闲工作线排期。尚未完成的 ticket 保持 open。
 
-发布映射见 [记录](gitlab-code-wiki-rag-publication.json)。Spec 和 22 项 tickets 通过用户恢复的浏览器登录发布并逐项核验；父 Spec 正文未被 tickets 发布改写。父 Spec 与 T02–T22 仍保持 open。
+发布映射见 [记录](gitlab-code-wiki-rag-publication.json)。Spec 和 22 项 tickets 通过用户恢复的浏览器登录发布并逐项核验；父 Spec 正文未被 tickets 发布改写。父 Spec 与未完成 tickets 仍保持 open。

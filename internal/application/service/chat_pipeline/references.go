@@ -6,6 +6,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/modelcontext"
 	"github.com/Tencent/WeKnora/internal/models/chat"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -48,6 +49,7 @@ func prepareMessagesWithModelContext(
 		}
 		knowledgeResults = append(knowledgeResults, result)
 		knowledgeRows = append(knowledgeRows, map[string]interface{}{
+			"source_evidence":   source.Evidence(result.ChunkMetadata),
 			"chunk_id":          result.ID,
 			"knowledge_id":      result.KnowledgeID,
 			"knowledge_base_id": result.KnowledgeBaseID,

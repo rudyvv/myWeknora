@@ -20,6 +20,14 @@ codes, RBAC rollout behavior, and response projection at their existing boundari
 
 ## Ownership and write roles
 
+Source-backed document/chunk HTTP routes resolve only resource ownership through
+`KnowledgeIdentity` / `ChunkIdentity` before the KB grant exists. The handler then
+performs the authorized read, including source publication/snapshot visibility.
+Ownership identity must never be projected as document content. Source questions
+preserve the exact shared-agent identity and original caller across contexts;
+their read lease rechecks current KB sharing rather than treating a cached grant
+as permission after revocation.
+
 URL middleware and body-based handlers use the same lazy ownership decision.
 The middleware adapter resolves identity, RBAC rollout configuration and the
 configuration-gated superuser flag. API-key principals, sufficient roles,

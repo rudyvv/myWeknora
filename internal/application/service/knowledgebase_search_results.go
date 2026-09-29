@@ -7,6 +7,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -318,7 +319,7 @@ func (s *knowledgeBaseService) buildSearchResult(chunk *types.Chunk,
 		Seq:                     chunk.ChunkIndex,
 		Score:                   score,
 		MatchType:               matchType,
-		Metadata:                knowledge.GetMetadata(),
+		Metadata:                searchResultMetadata(knowledge, chunk),
 		ChunkType:               string(chunk.ChunkType),
 		ParentChunkID:           chunk.ParentChunkID,
 		ImageInfo:               chunk.ImageInfo,
@@ -350,4 +351,23 @@ func (s *knowledgeBaseService) isSearchableChunk(chunk *types.Chunk) bool {
 		types.ChunkTypeFAQ,
 		types.ChunkTypeImageOCR, types.ChunkTypeImageCaption,
 	}, chunk.ChunkType)
+}
+
+// Code citations use immutable chunk provenance, including after publication.
+func searchResultMetadata(knowledge *types.Knowledge, chunk *types.Chunk) map[string]string {
+	metadata := knowledge.GetMetadata()
+	if knowledge.Type != types.KnowledgeTypeSource {
+		return metadata
+	}
+	evidence := source.Evidence(chunk.Metadata)
+	if evidence == nil {
+		return nil
+	}
+	metadata["datasource_id"] = evidence.DataSourceID
+	metadata["source_snapshot_id"] = evidence.SnapshotID
+	metadata["source_file_version_id"] = evidence.FileVersionID
+	metadata["commit_sha"] = evidence.CommitSHA
+	metadata["source_path"] = evidence.Path
+	metadata["project_id"] = evidence.ProjectID
+	return metadata
 }

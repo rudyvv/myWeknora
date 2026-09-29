@@ -192,6 +192,7 @@ func (r *sourceRegistry) ExpandText(text string) string {
 			if chunkRef.KnowledgeBaseID != "" {
 				attrs += fmt.Sprintf(` kb_id="%s"`, escapeAttr(chunkRef.KnowledgeBaseID))
 			}
+			attrs += sourceEvidenceAttrs(chunkRef.SourceEvidence)
 			return "<kb " + attrs + " />"
 		}
 		if rawURL, web, ok := r.webs.resolve(handle); ok {

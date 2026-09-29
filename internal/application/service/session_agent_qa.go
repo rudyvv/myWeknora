@@ -408,6 +408,9 @@ func (s *sessionService) buildAgentConfig(
 	if err != nil {
 		return nil, fmt.Errorf("build search targets: %w", err)
 	}
+	for _, target := range searchTargets {
+		target.SourceIDs = append([]string(nil), req.SourceIDs...)
+	}
 	agentConfig.SearchTargets = searchTargets
 	// Document tags are stored in knowledge_tag_relations, so document-KB tag
 	// scopes are resolved to concrete knowledge IDs before retrieval. Preserve

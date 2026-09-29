@@ -47,6 +47,7 @@ type qaRequestContext struct {
 	assistantMessage      *types.Message
 	knowledgeBaseIDs      []string
 	knowledgeIDs          []string
+	sourceIDs             []string
 	tagScopes             []types.TagScope
 	tagIDs                []string
 	mcpServiceIDs         []string
@@ -106,6 +107,7 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 		SharedAgentReadOnly: rc.sharedAgentReadOnly,
 		KnowledgeBaseIDs:    rc.knowledgeBaseIDs,
 		KnowledgeIDs:        rc.knowledgeIDs,
+		SourceIDs:           rc.sourceIDs,
 		TagScopes:           rc.tagScopes,
 		MCPServiceIDs:       rc.mcpServiceIDs,
 		SkillNames:          rc.skillNames,
@@ -380,6 +382,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	)
 
 	executionContext.LocalBrowserEnabled = request.LocalBrowserEnabled
+	executionContext.SourceIDs = append([]string(nil), request.SourceIDs...)
 
 	// Build request context
 	reqCtx := &qaRequestContext{
@@ -412,6 +415,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		webSearchEnabled:      request.WebSearchEnabled,
 		localBrowserEnabled:   request.LocalBrowserEnabled,
 		mentionedItems:        convertMentionedItems(request.MentionedItems),
+		sourceIDs:             append([]string(nil), request.SourceIDs...),
 		effectiveTenantID:     effectiveTenantID,
 		sharedAgentReadOnly:   sharedAgentReadOnly,
 		images:                request.Images,
@@ -1653,6 +1657,7 @@ func (h *Handler) persistLastRequestState(parentCtx context.Context, reqCtx *qaR
 		KnowledgeBaseIDs:    reqCtx.knowledgeBaseIDs,
 		KnowledgeIDs:        reqCtx.knowledgeIDs,
 		TagIDs:              reqCtx.tagIDs,
+		SourceIDs:           reqCtx.sourceIDs,
 		MCPServiceIDs:       reqCtx.mcpServiceIDs,
 		SkillNames:          reqCtx.skillNames,
 		MentionedItems:      reqCtx.mentionedItems,

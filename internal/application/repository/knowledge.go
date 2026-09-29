@@ -61,8 +61,12 @@ func NewSourceAwareKnowledgeRepository(db *gorm.DB) interfaces.KnowledgeReposito
 
 func (r *knowledgeRepository) readDB(ctx context.Context) *gorm.DB {
 	query := r.db.WithContext(ctx)
+	if err := source.ValidateReadScope(ctx); err != nil {
+		query.AddError(err)
+		return query
+	}
 	if r.sourceVisibility {
-		query = query.Where(source.PublishedKnowledgeSQL("knowledges.id"))
+		query = query.Where(source.PublishedKnowledgeSQL(ctx, "knowledges.id"))
 	}
 	return query
 }

@@ -146,6 +146,10 @@ func (r *sourceRegistry) modelDocumentInfoOutput(rows []map[string]interface{}, 
 			fmt.Fprintf(&b, " file_type=\"%s\"", escapeAttr(fileType))
 		}
 		fmt.Fprintf(&b, " chunk_count=\"%d\">\n", intValue(row, "chunk_count"))
+		if metadata, ok := row["metadata"].(map[string]interface{}); ok && stringValue(row, "type") == types.KnowledgeTypeSource {
+			fmt.Fprintf(&b, "    <source snapshot=\"%s\" commit=\"%s\" path=\"%s\" />\n",
+				escapeAttr(stringValue(metadata, "source_snapshot_id")), escapeAttr(stringValue(metadata, "commit_sha")), escapeAttr(stringValue(metadata, "source_path")))
+		}
 		if description := stringValue(row, "description"); description != "" {
 			fmt.Fprintf(&b, "    <description>%s</description>\n", escapeText(description))
 		}
@@ -160,6 +164,7 @@ func (r *sourceRegistry) modelDocumentInfoOutput(rows []map[string]interface{}, 
 }
 
 type modelChunk struct {
+	evidence   *types.SourceEvidence
 	handle     string
 	docHandle  string
 	kbHandle   string
@@ -194,6 +199,7 @@ func (r *sourceRegistry) modelKnowledgeOutput(mode string, rows []map[string]int
 			chunkType = "faq"
 		}
 		chunkIndex := intValue(row, "chunk_index")
+		evidence := sourceEvidenceValue(row["source_evidence"])
 		if chunkIndex == 0 {
 			chunkIndex = intValue(row, "index")
 		}
@@ -204,8 +210,10 @@ func (r *sourceRegistry) modelKnowledgeOutput(mode string, rows []map[string]int
 			DocumentTitle:   title,
 			ChunkIndex:      chunkIndex,
 			ChunkType:       chunkType,
+			SourceEvidence:  evidence,
 		})
 		chunks = append(chunks, modelChunk{
+			evidence:   evidence,
 			handle:     chunkHandle,
 			docHandle:  r.RegisterDocument(knowledgeID),
 			kbHandle:   r.RegisterKnowledgeBase(kbID),
@@ -320,6 +328,9 @@ func renderKnowledgeChunks(mode string, chunks []modelChunk) string {
 				fmt.Fprintf(&b, " type=\"%s\"", escapeAttr(chunk.chunkType))
 			}
 			b.WriteString(">\n")
+			if chunk.evidence != nil {
+				fmt.Fprintf(&b, "      <source%s />\n", sourceEvidenceAttrs(chunk.evidence))
+			}
 			if chunk.question != "" {
 				fmt.Fprintf(&b, "      <question>%s</question>\n", escapeText(chunk.question))
 			}

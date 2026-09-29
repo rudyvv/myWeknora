@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/searchutil"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -213,6 +214,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	formattedChunks := make([]map[string]interface{}, 0, len(chunks))
 	for idx, c := range chunks {
 		chunkData := map[string]interface{}{
+			"source_evidence": source.Evidence(c.Metadata),
 			"seq":             idx + 1,
 			"chunk_id":        c.ID,
 			"chunk_index":     c.ChunkIndex,
@@ -301,13 +303,14 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 
 	formattedChunks := []map[string]interface{}{
 		{
-			"seq":            1,
-			"chunk_id":       chunk.ID,
-			"chunk_index":    chunk.ChunkIndex,
-			"content":        chunk.Content,
-			"chunk_type":     chunk.ChunkType,
-			"knowledge_id":   chunk.KnowledgeID,
-			"knowledge_base": chunk.KnowledgeBaseID,
+			"source_evidence": source.Evidence(chunk.Metadata),
+			"seq":             1,
+			"chunk_id":        chunk.ID,
+			"chunk_index":     chunk.ChunkIndex,
+			"content":         chunk.Content,
+			"chunk_type":      chunk.ChunkType,
+			"knowledge_id":    chunk.KnowledgeID,
+			"knowledge_base":  chunk.KnowledgeBaseID,
 		},
 	}
 	appendFAQChunkData(formattedChunks[0], chunk)

@@ -34,6 +34,8 @@ type SearchTarget struct {
 	// KnowledgeIDs is the list of specific knowledge IDs to search within the knowledge base
 	// Only used when Type is SearchTargetTypeKnowledge
 	KnowledgeIDs []string `json:"knowledge_ids,omitempty"`
+	// SourceIDs intersects repository identities with this target's file/tag scope.
+	SourceIDs []string `json:"source_ids,omitempty"`
 	// TagIDs limits retrieval to chunks/documents carrying any of these KB-local tags.
 	TagIDs []string `json:"tag_ids,omitempty"`
 	// ScopeTagIDs records the logical tag scope selected by the user. For

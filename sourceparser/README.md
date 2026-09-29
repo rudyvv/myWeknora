@@ -10,7 +10,7 @@ Use the normal PostgreSQL/ParadeDB deployment and the opt-in overlay:
 docker compose -f docker-compose.yml -f docker-compose.source.yml up --build -d
 ```
 
-The app must be built from this branch and migrated through `000102`. The worker has no host port and shares an internal network only with the app. Runtime is non-root, read-only, with CPU/memory/process limits. Build acquires the pinned dependencies and grammar archive; runtime performs no downloads. Keep the grammar image intact: missing or changed grammar makes health and parsing unavailable. The app runtime now includes Git; local app processes also need Git on PATH.
+The app must be built from this branch and migrated through `000103`. The worker has no host port and shares an internal network only with the app. Runtime is non-root, read-only, with CPU/memory/process limits. Build acquires the pinned dependencies and grammar archive; runtime performs no downloads. Keep the grammar image intact: missing or changed grammar makes health and parsing unavailable. The app runtime now includes Git; local app processes also need Git on PATH.
 
 In knowledge-base data sources, choose GitLab source mode, one project and branch, and explicit Java paths. Preview must show all readiness checks passing. T02 allows 1–100 selected Java files and at most 16 MiB in total, UTF-8/BOM only, on the built-in PostgreSQL store with keyword and vector indexing enabled and an active embedding model. Selected unreadable members fail the run; explicitly excluded members remain in its inventory. Larger/mixed-language repositories and distributed index stores are handled by subsequent tickets.
 
@@ -19,6 +19,14 @@ Start manual sync, open its run details, and follow fetching → parsing → ind
 `GET /api/v1/knowledge/:id/source?version_id=...` reads a published file after existing KB authorization and verifies its stored checksum. An explicit version must match current publication; it never silently substitutes another version. Retained historical-reference reading comes in later tickets. Raw download preserves the original bytes. Chunk `chunk_metadata.source` carries original byte/line ranges, separate contexts, symbols, quality, snapshot/version and GitLab URL. It does not describe the derived index header as contiguous source.
 
 The current index-text ceiling is 2,000 tokens using the existing `cl100k_base` tokenizer. This is an approximation for other model families, not a claim to match every remote model tokenizer. The mature chunker budgets bytes; Go checks the complete derived text and reduces that budget when needed. Oversized context that cannot fit is rejected. Parser HTTP is a bounded first slice; large-file streaming and broader language handling are later work.
+
+## Reproducible checks
+
+## Scoped questions (T03)
+
+HybridSearch and knowledge-QA requests accept `source_ids` alongside their existing KB, file and tag selections. These selectors intersect. A question pins each contributing source's published snapshot before retrieval or model work; code reads, grep, chunk pages, enrichment and citations use those same members. Publishing a newer snapshot does not switch an in-progress question. Current permission revocation and explicit source clearing stop further reads and output. The durable lease expires within 30 minutes or at an earlier request deadline, and normally releases when the question/stream finishes. Historical code references and garbage collection remain separate later tickets.
+
+Migration `000103` is required for this behavior. Source-scoped vectors rank the complete relationally eligible candidate set before topK, so narrow file/tag scopes cannot disappear behind an ANN candidate budget. Representative-repository latency is still to be measured. See [T03 validation](../docs/plans/gitlab-code-wiki-rag-t03-progress.md) for real-index coverage and Windows full-suite limitations.
 
 ## Reproducible checks
 

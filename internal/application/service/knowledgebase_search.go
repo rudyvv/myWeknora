@@ -170,6 +170,15 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 	if err := s.authorizeKBAccess(ctx, kbs); err != nil {
 		return nil, err
 	}
+	targets := make(types.SearchTargets, 0, len(kbs))
+	for _, candidate := range kbs {
+		targets = append(targets, &types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: candidate.ID, TenantID: candidate.TenantID, SourceIDs: params.SourceIDs, KnowledgeIDs: params.KnowledgeIDs, TagIDs: params.TagIDs, ScopeTagIDs: params.ScopeTagIDs})
+	}
+	ctx, release, err := s.BeginSourceRead(ctx, targets)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	// Explicit embedding-model consistency check. Multi-KB searches that
 	// span different embedding spaces would otherwise silently produce

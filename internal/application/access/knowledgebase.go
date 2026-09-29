@@ -35,6 +35,8 @@ type KBAccess struct {
 	Permission        types.OrgMemberRole
 	// A read resolution must not mint a write grant even for the KB owner.
 	operationPermission types.OrgMemberRole
+	agentID             string
+	agentTenantID       uint64
 }
 
 // Context scopes resource operations without changing the authenticated caller.
@@ -65,7 +67,7 @@ func (a *KBAccess) WithGrant(ctx context.Context) context.Context {
 	}
 	grants = append(
 		append([]kbGrant(nil), grants...),
-		kbGrant{caller: caller, kbID: a.KnowledgeBase.ID, tenantID: a.EffectiveTenantID, permission: permission},
+		kbGrant{caller: caller, kbID: a.KnowledgeBase.ID, tenantID: a.EffectiveTenantID, permission: permission, agentID: a.agentID, agentTenantID: a.agentTenantID},
 	)
 	return context.WithValue(types.WithCaller(ctx, caller), types.KBGrantsContextKey, grants)
 }
@@ -140,7 +142,9 @@ func ResolveKB(ctx context.Context, request KBRequest, kb *types.KnowledgeBase, 
 			source,
 		)
 		if err == nil && types.SharedAgentIncludesKB(agent, kb) {
-			return grant(types.OrgRoleViewer)
+			resolved, err := grant(types.OrgRoleViewer)
+			resolved.agentID, resolved.agentTenantID = agent.ID, agent.TenantID
+			return resolved, err
 		}
 	} else {
 		allowed,

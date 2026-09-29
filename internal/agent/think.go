@@ -14,6 +14,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -35,6 +36,9 @@ func (e *AgentEngine) streamLLMToEventBus(
 	opts *chat.ChatOptions,
 	emitFunc func(chunk *types.StreamResponse, fullContent string),
 ) (*streamLLMResult, error) {
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return nil, err
+	}
 	logger.Debugf(ctx, "[Agent][Stream] Starting LLM stream with %d messages", len(messages))
 
 	// No wall-clock deadline here: a round that streams a large tool-call
@@ -73,6 +77,9 @@ func (e *AgentEngine) streamLLMToEventBus(
 	defer stopWatchdog()
 
 	for chunk := range stream {
+		if err := source.ValidateReadScope(ctx); err != nil {
+			return nil, err
+		}
 		lastChunkAt.Store(time.Now().UnixNano())
 		chunkCount++
 		if chunkCount == 1 {
@@ -135,6 +142,9 @@ func (e *AgentEngine) streamLLMToEventBus(
 		if emitFunc != nil {
 			emitFunc(&chunk, result.Content)
 		}
+	}
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return nil, err
 	}
 	answerTail := answerDecoder.Flush()
 	thinkingTail := thinkingDecoder.Flush()

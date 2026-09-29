@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Tencent/WeKnora/internal/source"
 
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -39,6 +40,9 @@ func (p *PluginChatCompletionStream) ActivationEvents() []types.EventType {
 func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return ErrModelCall.WithError(err)
+	}
 	pipelineInfo(ctx, "Stream", "input", map[string]interface{}{
 		"session_id":     chatManage.SessionID,
 		"user_question":  chatManage.UserContent,
@@ -81,8 +85,10 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	pipelineInfo(ctx, "Stream", "model_call", map[string]interface{}{
 		"chat_model": chatManage.ChatModelID,
 	})
-	responseChan, err := chatModel.ChatStream(ctx, chatMessages, opt)
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	responseChan, err := chatModel.ChatStream(streamCtx, chatMessages, opt)
 	if err != nil {
+		cancelStream()
 		pipelineError(ctx, "Stream", "model_call", map[string]interface{}{
 			"chat_model": chatManage.ChatModelID,
 			"error":      err.Error(),
@@ -90,6 +96,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		return ErrModelCall.WithError(err)
 	}
 	if responseChan == nil {
+		cancelStream()
 		pipelineError(ctx, "Stream", "model_call", map[string]interface{}{
 			"chat_model": chatManage.ChatModelID,
 			"error":      "nil_channel",
@@ -106,7 +113,14 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	// and plain answer text to EventAgentFinalAnswer, matching the Agent pipeline.
 	// The goroutine monitors ctx.Done() to avoid leaking when the context is cancelled
 	// and the upstream channel is not closed promptly.
+	releaseRead, retainErr := source.RetainReadScope(ctx)
+	if retainErr != nil {
+		cancelStream()
+		return ErrModelCall.WithError(retainErr)
+	}
 	go func() {
+		defer cancelStream()
+		defer releaseRead()
 		answerDecoder := modelContext.StreamDecoder()
 		thinkingDecoder := modelContext.StreamDecoder()
 		thinkingID := fmt.Sprintf("%s-thinking", uuid.New().String()[:8])
@@ -158,7 +172,9 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		for {
 			select {
 			case <-ctx.Done():
-				flushDecoders()
+				if source.ValidateReadScope(ctx) == nil {
+					flushDecoders()
+				}
 				closeThinking()
 				pipelineInfo(ctx, "Stream", "context_cancelled", map[string]interface{}{
 					"session_id": chatManage.SessionID,
@@ -166,6 +182,10 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 				return
 
 			case response, ok := <-responseChan:
+				if err := source.ValidateReadScope(ctx); err != nil {
+					_ = eventBus.Emit(ctx, types.Event{ID: fmt.Sprintf("%s-error", uuid.New().String()[:8]), Type: types.EventType(event.EventError), SessionID: chatManage.SessionID, Data: event.ErrorData{Error: err.Error(), Stage: "source_read_scope", SessionID: chatManage.SessionID}})
+					return
+				}
 				if !ok {
 					flushDecoders()
 					closeThinking()

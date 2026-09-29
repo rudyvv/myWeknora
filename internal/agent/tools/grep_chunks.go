@@ -93,6 +93,9 @@ func NewSourceAwareGrepChunksTool(db *gorm.DB, searchTargets types.SearchTargets
 
 // Execute executes the grep chunks tool
 func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return nil, err
+	}
 	logger.Infof(ctx, "[Tool][GrepChunks] Execute started")
 
 	var input GrepChunksInput
@@ -278,6 +281,10 @@ func (t *GrepChunksTool) resolveGrepScope() (fullKBIDs, knowledgeIDs []string, t
 		// search to every document carrying the tag.
 		targetKnowledgeIDs, targetTagIDs := searchTargetScope(target)
 		switch {
+		case len(target.SourceIDs) > 0:
+			copy := *target
+			copy.TagIDs = effectiveSearchTargetTagIDs(target)
+			tagTargets = append(tagTargets, &copy)
 		case len(targetTagIDs) > 0:
 			tenantID := target.TenantID
 			if tenantID == 0 {
@@ -344,7 +351,7 @@ func scopeClause(
 		args = append(args, knowledgeIDs)
 	}
 	for _, target := range tagTargets {
-		if target == nil || target.KnowledgeBaseID == "" || len(target.TagIDs) == 0 {
+		if target == nil || target.KnowledgeBaseID == "" || (len(target.TagIDs) == 0 && len(target.SourceIDs) == 0) {
 			continue
 		}
 		tenantID := target.TenantID
@@ -352,6 +359,20 @@ func scopeClause(
 			tenantID = kbTenantMap[target.KnowledgeBaseID]
 		}
 		if tenantID == 0 {
+			continue
+		}
+		if len(target.SourceIDs) > 0 {
+			parts := []string{"chunks.knowledge_base_id=?", "chunks.tenant_id=?", "EXISTS(SELECT 1 FROM source_files sf WHERE sf.id=chunks.knowledge_id AND sf.data_source_id IN ?)"}
+			args = append(args, target.KnowledgeBaseID, tenantID, target.SourceIDs)
+			if len(target.KnowledgeIDs) > 0 {
+				parts = append(parts, "chunks.knowledge_id IN ?")
+				args = append(args, target.KnowledgeIDs)
+			}
+			if len(target.TagIDs) > 0 {
+				parts = append(parts, "EXISTS(SELECT 1 FROM knowledge_tag_relations ktr WHERE ktr.knowledge_id=chunks.knowledge_id AND ktr.tag_id IN ?)")
+				args = append(args, target.TagIDs)
+			}
+			clauses = append(clauses, "("+strings.Join(parts, " AND ")+")")
 			continue
 		}
 		clauses = append(clauses,
@@ -400,7 +421,7 @@ func (t *GrepChunksTool) searchChunks(
 		Where("chunks.deleted_at IS NULL").
 		Where("knowledges.deleted_at IS NULL")
 	if t.sourceVisibility {
-		query = query.Where(source.PublishedChunkSQL("chunks.id"))
+		query = query.Where(source.PublishedChunkSQL(ctx, "chunks.id", "chunks.knowledge_id"))
 	}
 
 	// Combine specific knowledge IDs, tag scopes, and full-KB scopes with OR so
@@ -457,7 +478,7 @@ func (t *GrepChunksTool) searchChunks(
 		var counts []countRow
 		countQuery := t.db.WithContext(ctx).Table("chunks")
 		if t.sourceVisibility {
-			countQuery = countQuery.Where(source.PublishedChunkSQL("chunks.id"))
+			countQuery = countQuery.Where(source.PublishedChunkSQL(ctx, "chunks.id", "chunks.knowledge_id"))
 		}
 		if err := countQuery.
 			Select("knowledge_id, COUNT(*) AS cnt").
@@ -684,18 +705,19 @@ func (t *GrepChunksTool) aggregateByKnowledge(
 }
 
 type grepChunkResult struct {
-	ChunkID         string  `json:"chunk_id,omitempty"`
-	FAQID           string  `json:"faq_id,omitempty"`
-	KnowledgeID     string  `json:"knowledge_id"`
-	KnowledgeBaseID string  `json:"knowledge_base_id"`
-	KnowledgeTitle  string  `json:"knowledge_title"`
-	ChunkType       string  `json:"chunk_type"`
-	Index           int     `json:"index,omitempty"`
-	ChunkIndex      int     `json:"chunk_index,omitempty"`
-	FAQQuestion     string  `json:"faq_question,omitempty"`
-	TitleMatch      bool    `json:"title_match,omitempty"`
-	MatchSnippet    string  `json:"match_snippet,omitempty"`
-	Score           float64 `json:"score"`
+	SourceEvidence  *types.SourceEvidence `json:"source_evidence,omitempty"`
+	ChunkID         string                `json:"chunk_id,omitempty"`
+	FAQID           string                `json:"faq_id,omitempty"`
+	KnowledgeID     string                `json:"knowledge_id"`
+	KnowledgeBaseID string                `json:"knowledge_base_id"`
+	KnowledgeTitle  string                `json:"knowledge_title"`
+	ChunkType       string                `json:"chunk_type"`
+	Index           int                   `json:"index,omitempty"`
+	ChunkIndex      int                   `json:"chunk_index,omitempty"`
+	FAQQuestion     string                `json:"faq_question,omitempty"`
+	TitleMatch      bool                  `json:"title_match,omitempty"`
+	MatchSnippet    string                `json:"match_snippet,omitempty"`
+	Score           float64               `json:"score"`
 }
 
 func buildGrepChunkResults(results []chunkWithTitle, compiled []*regexp.Regexp) []grepChunkResult {
@@ -705,6 +727,7 @@ func buildGrepChunkResults(results []chunkWithTitle, compiled []*regexp.Regexp) 
 	out := make([]grepChunkResult, 0, len(results))
 	for _, r := range results {
 		item := grepChunkResult{
+			SourceEvidence:  source.Evidence(r.Metadata),
 			KnowledgeID:     r.KnowledgeID,
 			KnowledgeBaseID: r.KnowledgeBaseID,
 			KnowledgeTitle:  r.KnowledgeTitle,
@@ -871,6 +894,9 @@ func (t *GrepChunksTool) deduplicateChunks(ctx context.Context, results []chunkW
 		}
 
 		sig := t.buildContentSignature(r.Content)
+		if sig != "" {
+			sig = source.ContentIdentity(r.Metadata) + sig
+		}
 		if sig != "" {
 			if contentSig[sig] {
 				continue

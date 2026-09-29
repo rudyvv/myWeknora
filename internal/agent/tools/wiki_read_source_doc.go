@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/searchutil"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -195,6 +196,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 			return
 		}
 		formattedChunks = append(formattedChunks, map[string]interface{}{
+			"source_evidence": source.Evidence(chunk.Metadata),
 			"chunk_id":        chunk.ID,
 			"chunk_index":     chunk.ChunkIndex,
 			"chunk_type":      chunk.ChunkType,

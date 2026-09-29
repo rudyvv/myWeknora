@@ -92,6 +92,15 @@ func (s *sessionService) KnowledgeQA(
 		return fmt.Errorf("build search targets: %w", err)
 	}
 
+	for _, target := range searchTargets {
+		target.SourceIDs = append([]string(nil), req.SourceIDs...)
+	}
+	ctx, release, err := beginSourceRead(ctx, s.knowledgeBaseService, searchTargets)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	// Create chat management object with session settings
 	logger.Infof(
 		ctx,
@@ -832,6 +841,12 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
 		logger.Warn(ctx, "No search targets available, returning empty results")
 		return []*types.SearchResult{}, nil
 	}
+
+	ctx, release, err := beginSourceRead(ctx, s.knowledgeBaseService, searchTargets)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	// Create default retrieval parameters — prefer tenant RetrievalConfig, fallback to built-in defaults
 	userID := types.SessionOwnerIDFromContext(ctx)

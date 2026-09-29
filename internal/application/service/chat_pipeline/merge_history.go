@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/searchutil"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -52,6 +53,12 @@ func filterHistoryResults(
 
 	var filtered []*types.SearchResult
 	for _, r := range raw {
+		// Historical source evidence is not eligible for current-source RAG.
+		// History may still display it; authoritative code is retrieved again
+		// through this question's pinned manifest and current permissions.
+		if r.Metadata["source_snapshot_id"] != "" || source.Evidence(r.ChunkMetadata) != nil {
+			continue
+		}
 		if _, exists := existingIDs[r.ID]; exists {
 			continue
 		}

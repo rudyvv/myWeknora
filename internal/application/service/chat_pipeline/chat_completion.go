@@ -2,6 +2,7 @@ package chatpipeline
 
 import (
 	"context"
+	"github.com/Tencent/WeKnora/internal/source"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -33,6 +34,9 @@ func (p *PluginChatCompletion) ActivationEvents() []types.EventType {
 func (p *PluginChatCompletion) OnEvent(
 	ctx context.Context, eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return ErrModelCall.WithError(err)
+	}
 	pipelineInfo(ctx, "Completion", "input", map[string]interface{}{
 		"session_id":     chatManage.SessionID,
 		"user_question":  chatManage.UserContent,
@@ -64,6 +68,9 @@ func (p *PluginChatCompletion) OnEvent(
 			"chat_model": chatManage.ChatModelID,
 			"error":      err.Error(),
 		})
+		return ErrModelCall.WithError(err)
+	}
+	if err := source.ValidateReadScope(ctx); err != nil {
 		return ErrModelCall.WithError(err)
 	}
 	modelContext.DecodeResponse(chatResponse)

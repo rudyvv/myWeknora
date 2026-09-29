@@ -9,16 +9,20 @@ import (
 // Context grants contain values, not mutable KB objects. Deriving a context
 // copies the grant slice so parallel search branches cannot widen each other.
 type kbGrant struct {
-	caller     types.Caller
-	kbID       string
-	tenantID   uint64
-	permission types.OrgMemberRole
-	task       bool
+	caller        types.Caller
+	kbID          string
+	tenantID      uint64
+	permission    types.OrgMemberRole
+	task          bool
+	agentID       string
+	agentTenantID uint64
 }
 
 type agentGrant struct {
-	caller types.Caller
-	scope  types.SharedAgentKBScope
+	caller   types.Caller
+	scope    types.SharedAgentKBScope
+	agentID  string
+	tenantID uint64
 }
 
 // WithSharedAgent scopes execution after the caller has authorized this exact
@@ -26,11 +30,30 @@ type agentGrant struct {
 // and the source tenant's organization memberships are not inherited.
 func WithSharedAgent(ctx context.Context, agent *types.CustomAgent) context.Context {
 	grant := agentGrant{caller: types.CallerFromContext(ctx), scope: types.NewSharedAgentKBScope(agent)}
+	if agent != nil {
+		grant.agentID, grant.tenantID = agent.ID, agent.TenantID
+	}
 	ctx = context.WithValue(ctx, types.SharedAgentGrantContextKey, grant)
 	if agent == nil {
 		return ctx
 	}
 	return types.WithExecutionTenant(ctx, agent.TenantID)
+}
+
+// SharedAgentIdentity preserves the exact authorized agent for fresh checks;
+// another reachable agent must not replace it after its share is revoked.
+func SharedAgentIdentity(ctx context.Context) (string, uint64) {
+	grant, ok := ctx.Value(types.SharedAgentGrantContextKey).(agentGrant)
+	if ok && grant.caller == types.CallerFromContext(ctx) {
+		return grant.agentID, grant.tenantID
+	}
+	grants, _ := ctx.Value(types.KBGrantsContextKey).([]kbGrant)
+	for _, grant := range grants {
+		if grant.caller == types.CallerFromContext(ctx) && grant.agentID != "" {
+			return grant.agentID, grant.agentTenantID
+		}
+	}
+	return "", 0
 }
 
 // HasKBGrant checks only previously resolved resource access. It never infers

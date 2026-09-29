@@ -21,6 +21,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
 	"github.com/Tencent/WeKnora/internal/sandbox"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -194,6 +195,16 @@ func (s *agentService) CreateAgentEngine(
 	if chatModel == nil {
 		return nil, fmt.Errorf("chat model is nil after initialization")
 	}
+	ctx, release, err := beginSourceRead(ctx, s.knowledgeBaseService, config.SearchTargets)
+	if err != nil {
+		return nil, err
+	}
+	created := false
+	defer func() {
+		if !created {
+			release()
+		}
+	}()
 
 	if config.LocalBrowserEnabled && (!s.browserSkill.Enabled() || config.SkillInstallMode()) {
 		return nil, fmt.Errorf("local browser is unavailable for this turn; " +
@@ -291,7 +302,27 @@ func (s *agentService) CreateAgentEngine(
 		toolRegistry.RegisterTool(tools.NewBrowserSkillTool(s.browserSkill, scope, sessionID, instructions))
 	}
 
-	return engine, nil
+	created = true
+	if !source.HasReadScope(ctx) {
+		release()
+		return engine, nil
+	}
+	return &sourceScopedAgentEngine{AgentEngine: engine, ctx: ctx, release: release}, nil
+}
+
+type sourceScopedAgentEngine struct {
+	interfaces.AgentEngine
+	ctx     context.Context
+	release func()
+}
+
+func (e *sourceScopedAgentEngine) Execute(ctx context.Context, sessionID, messageID, query string, llmContext []chat.Message, imageURLs ...[]string) (*types.AgentState, error) {
+	defer e.release()
+	ctx = source.InheritReadScope(ctx, e.ctx)
+	if err := source.ValidateReadScope(ctx); err != nil {
+		return nil, err
+	}
+	return e.AgentEngine.Execute(ctx, sessionID, messageID, query, llmContext, imageURLs...)
 }
 
 // registerMCPTools registers MCP tools from enabled services for this tenant.
@@ -1217,7 +1248,7 @@ func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string
 		// authorized; this only widens the metadata query, never the KB set.
 		metaCtx := ctx
 		if scopeTenantID := kbTenantMap[kbID]; scopeTenantID != 0 {
-			metaCtx = context.WithValue(ctx, types.TenantIDContextKey, scopeTenantID)
+			metaCtx = types.WithExecutionTenant(ctx, scopeTenantID)
 		}
 
 		// Get document count and recent documents

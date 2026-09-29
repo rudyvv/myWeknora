@@ -92,7 +92,7 @@ func KBIDFromKnowledgeIDParam(param string, kgService KnowledgeLookup) KBIDResol
 		if v == "" {
 			return "", apperrors.NewBadRequestError("missing " + param + " in path")
 		}
-		k, err := kgService.GetKnowledgeByIDOnly(c.Request.Context(), v)
+		k, err := access.KnowledgeIdentity(c.Request.Context(), kgService, v)
 		if err != nil {
 			if isResourceNotFound(err) {
 				return "", apperrors.NewNotFoundError("Knowledge not found")
@@ -118,7 +118,7 @@ func KBIDFromChunkIDParam(param string, chunkService ChunkLookup) KBIDResolver {
 		if v == "" {
 			return "", apperrors.NewBadRequestError("missing " + param + " in path")
 		}
-		ch, err := chunkService.GetChunkByIDOnly(c.Request.Context(), v)
+		ch, err := access.ChunkIdentity(c.Request.Context(), chunkService, v)
 		if err != nil {
 			if isResourceNotFound(err) {
 				return "", apperrors.NewNotFoundError("Chunk not found")

@@ -29,6 +29,7 @@ type chunkService struct {
 	chunkRepository interfaces.ChunkRepository // Repository for chunk data persistence
 	knowledgeRepo   interfaces.KnowledgeRepository
 	kbRepository    interfaces.KnowledgeBaseRepository
+	kbService       interfaces.KnowledgeBaseService
 	modelService    interfaces.ModelService
 	retrieveEngine  interfaces.RetrieveEngineRegistry
 	ownership       retriever.TenantStoreOwnership
@@ -52,6 +53,7 @@ func NewChunkService(
 	ownership retriever.TenantStoreOwnership,
 	task interfaces.TaskEnqueuer,
 	spanTracker SpanTracker,
+	kbService interfaces.KnowledgeBaseService,
 ) interfaces.ChunkService {
 	return &chunkService{
 		chunkRepository: chunkRepository,
@@ -62,6 +64,7 @@ func NewChunkService(
 		ownership:       ownership,
 		task:            task,
 		spanTracker:     spanTracker,
+		kbService:       kbService,
 	}
 }
 
@@ -123,10 +126,18 @@ func (s *chunkService) GetChunkByID(ctx context.Context, id string) (*types.Chun
 	}
 
 	logger.Info(ctx, "Chunk retrieved successfully")
-	return chunk, nil
+	return s.sourceChunkRead(ctx, chunk)
 }
 
 // GetChunkByIDOnly retrieves a chunk by ID without tenant filter (for permission resolution).
+func (s *chunkService) GetChunkAccessInfo(ctx context.Context, id string) (*types.Chunk, error) {
+	row, err := s.chunkRepository.GetChunkByIDOnly(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &types.Chunk{ID: row.ID, KnowledgeID: row.KnowledgeID, KnowledgeBaseID: row.KnowledgeBaseID, TenantID: row.TenantID}, nil
+}
+
 func (s *chunkService) GetChunkByIDOnly(ctx context.Context, id string) (*types.Chunk, error) {
 	chunk, err := s.chunkRepository.GetChunkByIDOnly(ctx, id)
 	if err != nil {
@@ -138,7 +149,26 @@ func (s *chunkService) GetChunkByIDOnly(ctx context.Context, id string) (*types.
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{"chunk_id": id})
 		return nil, err
 	}
-	return chunk, nil
+	return s.sourceChunkRead(ctx, chunk)
+}
+
+func (s *chunkService) sourceChunkRead(ctx context.Context, chunk *types.Chunk) (*types.Chunk, error) {
+	knowledge, err := s.knowledgeRepo.GetKnowledgeByIDOnly(ctx, chunk.KnowledgeID)
+	if err != nil {
+		return nil, err
+	}
+	if knowledge.Type != types.KnowledgeTypeSource {
+		return chunk, nil
+	}
+	if s.kbService == nil {
+		return nil, fmt.Errorf("source authorization is unavailable")
+	}
+	pinned, release, err := beginSourceRead(ctx, s.kbService, types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: chunk.KnowledgeBaseID, KnowledgeIDs: []string{chunk.KnowledgeID}}})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return s.chunkRepository.GetChunkByIDOnly(pinned, chunk.ID)
 }
 
 // ListChunksByKnowledgeID lists all chunks for a knowledge ID

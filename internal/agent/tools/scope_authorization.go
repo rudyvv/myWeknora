@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -49,7 +50,7 @@ func searchTargetIsWholeKB(target *types.SearchTarget) bool {
 	}
 	knowledgeIDs, tagIDs := searchTargetScope(target)
 	return target.Type == types.SearchTargetTypeKnowledgeBase &&
-		len(knowledgeIDs) == 0 && len(tagIDs) == 0
+		len(knowledgeIDs) == 0 && len(tagIDs) == 0 && len(target.SourceIDs) == 0
 }
 
 // authorizeKnowledgeInSearchTargets is the shared authorization boundary for
@@ -202,12 +203,36 @@ func searchTargetsAllowKnowledgeID(
 			continue
 		}
 		matchedKB = true
+		if len(target.SourceIDs) > 0 {
+			if knowledgeService == nil {
+				continue
+			}
+			knowledge, err := knowledgeService.GetKnowledgeByIDOnly(ctx, knowledgeID)
+			if err != nil {
+				return false, err
+			}
+			if knowledge.Type != types.KnowledgeTypeSource || !slices.Contains(target.SourceIDs, knowledge.GetMetadata()["datasource_id"]) {
+				continue
+			}
+			if len(target.KnowledgeIDs) == 0 && len(effectiveSearchTargetTagIDs(target)) == 0 {
+				return true, nil
+			}
+		}
 		if searchTargetIsWholeKB(target) {
 			return true, nil
 		}
 		targetKnowledgeIDs, targetTagIDs := searchTargetScope(target)
 		for _, allowedID := range targetKnowledgeIDs {
 			if allowedID == knowledgeID {
+				if len(target.SourceIDs) > 0 && len(effectiveSearchTargetTagIDs(target)) > 0 {
+					matches, err := knowledgeIDsMatchingAnyTag(ctx, []string{knowledgeID}, effectiveSearchTargetTagIDs(target), knowledgeService.GetKnowledgeTags)
+					if err != nil {
+						return false, err
+					}
+					if !matches[knowledgeID] {
+						continue
+					}
+				}
 				return true, nil
 			}
 		}
@@ -235,6 +260,28 @@ func filterSearchResultsInSearchTargets(
 	results []*types.SearchResult,
 	knowledgeService interfaces.KnowledgeService,
 ) ([]*types.SearchResult, error) {
+	for _, target := range searchTargets {
+		if target == nil || len(target.SourceIDs) == 0 {
+			continue
+		}
+		var scoped []*types.SearchResult
+		for _, result := range results {
+			if result == nil || result.KnowledgeID == "" {
+				continue
+			}
+			if result.KnowledgeBaseID != "" && result.KnowledgeBaseID != kbID {
+				return nil, fmt.Errorf("graph result belongs to another knowledge base")
+			}
+			allowed, err := searchTargetsAllowKnowledgeID(ctx, searchTargets, result.KnowledgeID, kbID, knowledgeService)
+			if err != nil {
+				return nil, err
+			}
+			if allowed {
+				scoped = append(scoped, result)
+			}
+		}
+		return scoped, nil
+	}
 	var explicitIDs []string
 	var tagIDs []string
 	matchedKB := false

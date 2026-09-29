@@ -153,7 +153,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			for j := range pathParts {
 				pathParts[j] = url.PathEscape(pathParts[j])
 			}
-			evidence := types.SourceEvidence{SnapshotID: snapshot.ID, FileVersionID: fileVersion.ID, ProjectID: snapshot.ProjectID, CommitSHA: snapshot.CommitSHA, Path: member.Path, Range: part.Range, Symbols: part.Symbols, Quality: part.Quality, Context: part.Context, GitLabURL: snapshot.RepositoryURL + "/-/blob/" + snapshot.CommitSHA + "/" + strings.Join(pathParts, "/") + fmt.Sprintf("#L%d-%d", part.Range.StartLine, part.Range.EndLine)}
+			evidence := types.SourceEvidence{DataSourceID: ds.ID, SnapshotID: snapshot.ID, FileVersionID: fileVersion.ID, ProjectID: snapshot.ProjectID, CommitSHA: snapshot.CommitSHA, Path: member.Path, Range: part.Range, Symbols: part.Symbols, Quality: part.Quality, Context: part.Context, GitLabURL: snapshot.RepositoryURL + "/-/blob/" + snapshot.CommitSHA + "/" + strings.Join(pathParts, "/") + fmt.Sprintf("#L%d-%d", part.Range.StartLine, part.Range.EndLine)}
 			metadata, _ := json.Marshal(map[string]any{"source": evidence})
 			chunk := &types.Chunk{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, KnowledgeID: fileID, Content: part.Content, SourceContent: part.Content, ChunkIndex: index, ChunkType: types.ChunkTypeText, IsEnabled: false, IndexStatus: "pending", StartAt: utf8.RuneCount(raw[:part.Range.StartByte]), EndAt: utf8.RuneCount(raw[:part.Range.EndByte]), Metadata: types.JSON(metadata)}
 			chunks[index] = chunk

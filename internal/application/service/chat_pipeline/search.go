@@ -9,6 +9,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -194,6 +195,9 @@ func removeDuplicateResults(results []*types.SearchResult) []*types.SearchResult
 		}
 		sig := buildContentSignature(r.Content)
 		if sig != "" {
+			sig = source.ContentIdentity(r.ChunkMetadata) + sig
+		}
+		if sig != "" {
 			if firstChunk, exists := contentSig[sig]; exists {
 				logger.Debugf(context.Background(), "Dedup: chunk %s removed due to content signature (dup of %s, sig prefix: %.50s...)", r.ID, firstChunk, sig)
 				continue
@@ -251,6 +255,11 @@ func removePartialOverlaps(ctx context.Context, results []*types.SearchResult) [
 		}
 		for j := i + 1; j < len(entries); j++ {
 			if removed[j] {
+				continue
+			}
+			// Repository file identity is part of source evidence. Equal text
+			// in another file or repository must keep its independent citation.
+			if source.ContentIdentity(entries[i].result.ChunkMetadata) != source.ContentIdentity(entries[j].result.ChunkMetadata) {
 				continue
 			}
 
@@ -444,7 +453,7 @@ func (p *PluginSearch) searchByTargets(
 			var fullKBIDs []string
 			var knowledgeTargets []*types.SearchTarget
 			for _, t := range searchableTargets {
-				if t.Type == types.SearchTargetTypeKnowledgeBase && len(t.TagIDs) == 0 {
+				if t.Type == types.SearchTargetTypeKnowledgeBase && len(t.TagIDs) == 0 && len(t.KnowledgeIDs) == 0 && len(t.SourceIDs) == 0 && len(t.ScopeTagIDs) == 0 {
 					fullKBIDs = append(fullKBIDs, t.KnowledgeBaseID)
 				} else {
 					knowledgeTargets = append(knowledgeTargets, t)
@@ -552,6 +561,7 @@ func (p *PluginSearch) searchSingleTarget(
 		MatchCount:            chatManage.EmbeddingTopK,
 		TagIDs:                t.TagIDs,
 		ScopeTagIDs:           t.ScopeTagIDs,
+		SourceIDs:             t.SourceIDs,
 		SkipContextEnrichment: true,
 		DisableVectorMatch:    disableVector,
 	}

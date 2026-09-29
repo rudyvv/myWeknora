@@ -122,6 +122,7 @@ type SourceRunResult struct {
 }
 
 type SourceEvidence struct {
+	DataSourceID  string          `json:"data_source_id"`
 	SnapshotID    string          `json:"snapshot_id"`
 	FileVersionID string          `json:"file_version_id"`
 	ProjectID     string          `json:"project_id"`
@@ -134,8 +135,15 @@ type SourceEvidence struct {
 	Context       []SourceContext `json:"context"`
 }
 
+type SourceReadLease struct {
+	ID         string
+	HasSources bool
+}
+
 // SourceFileView is a single published, fixed-commit read of the complete file.
 type SourceFileView struct {
+	FileSize      int64  `json:"file_size"`
+	DataSourceID  string `json:"data_source_id"`
 	KnowledgeID   string `json:"knowledge_id"`
 	SnapshotID    string `json:"snapshot_id"`
 	FileVersionID string `json:"file_version_id"`

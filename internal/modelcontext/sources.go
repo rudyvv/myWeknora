@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/models/chat"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -24,6 +25,7 @@ type ChunkReference struct {
 	DocumentTitle   string
 	ChunkIndex      int
 	ChunkType       string
+	SourceEvidence  *types.SourceEvidence
 }
 
 // webMeta is the per-web-page metadata stored next to the raw URL.
@@ -100,6 +102,9 @@ func (r *sourceRegistry) registerChunk(ref ChunkReference, evidence bool) string
 }
 
 func mergeChunkReference(dst *ChunkReference, src ChunkReference) {
+	if dst.SourceEvidence == nil {
+		dst.SourceEvidence = src.SourceEvidence
+	}
 	if dst.KnowledgeID == "" {
 		dst.KnowledgeID = src.KnowledgeID
 	}
@@ -187,6 +192,7 @@ func (r *sourceRegistry) RegisterSearchResults(results []*types.SearchResult) {
 			DocumentTitle:   firstNonEmpty(result.KnowledgeTitle, result.KnowledgeFilename),
 			ChunkIndex:      result.ChunkIndex,
 			ChunkType:       result.ChunkType,
+			SourceEvidence:  source.Evidence(result.ChunkMetadata),
 		})
 	}
 }

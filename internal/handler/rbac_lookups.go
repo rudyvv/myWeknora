@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"github.com/Tencent/WeKnora/internal/application/access"
 
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service"
@@ -156,7 +157,7 @@ func (h *ChunkHandler) KBCreatorLookupFromChunkIDParam(c *gin.Context) (string, 
 	if !ok {
 		return "", errors.New("workspace context missing")
 	}
-	chunk, err := h.service.GetChunkByIDOnly(ctx, chunkID)
+	chunk, err := access.ChunkIdentity(ctx, h.service, chunkID)
 	if err != nil {
 		if errors.Is(err, service.ErrChunkNotFound) {
 			return "", middleware.ErrResourceNotFound

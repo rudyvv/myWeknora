@@ -282,6 +282,7 @@ type SessionLastRequestState struct {
 	ModelID             string         `json:"model_id,omitempty"`
 	KnowledgeBaseIDs    []string       `json:"knowledge_base_ids,omitempty"`
 	KnowledgeIDs        []string       `json:"knowledge_ids,omitempty"`
+	SourceIDs           []string       `json:"source_ids,omitempty"`
 	TagIDs              []string       `json:"tag_ids,omitempty"`
 	MCPServiceIDs       []string       `json:"mcp_service_ids,omitempty"`
 	SkillNames          []string       `json:"skill_names,omitempty"`

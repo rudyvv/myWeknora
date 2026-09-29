@@ -52,6 +52,7 @@ type QARequest struct {
 	KnowledgeBaseIDs    []string           // Knowledge base IDs to search (from request + @mentions)
 	KnowledgeIDs        []string           // Specific knowledge (file) IDs to search
 	TagScopes           []TagScope         // Tag-constrained KB scopes from @mentions
+	SourceIDs           []string           // GitLab repository identities intersecting this question's KB/file/tag targets
 	MCPServiceIDs       []string           // Per-request MCP service IDs from @mentions
 	SkillNames          []string           // Per-request skill names from @mentions
 	ImageURLs           []string           // Image URLs for multimodal input
