@@ -15,10 +15,10 @@ import urllib.error
 import urllib.request
 
 try:
-    from sourceparser.runtime import load_runtime, load_sfc_runtime
+    from sourceparser.runtime import load_runtime, load_sfc_runtime, runtime_version
     from sourceparser.server import Handler, SLOTS
 except ModuleNotFoundError:
-    from runtime import load_runtime, load_sfc_runtime
+    from runtime import load_runtime, load_sfc_runtime, runtime_version
     from server import Handler, SLOTS
 
 
@@ -53,8 +53,11 @@ class VueHTTPContract(unittest.TestCase):
             versions = load_runtime(cache)
         except Exception as error:
             raise unittest.SkipTest('locked Tree-sitter runtime is unavailable: ' + str(error))
-        if not {'javascript', 'typescript'}.issubset(versions) or not load_sfc_runtime():
+        sfc = load_sfc_runtime()
+        if not {'javascript', 'typescript'}.issubset(versions) or not sfc:
             raise unittest.SkipTest('locked Vue, JavaScript, and TypeScript runtimes are required')
+        cls.sfc_runtime = sfc['runtime']
+        cls.versions = dict(versions, vue=cls.sfc_runtime)
         cls.process = subprocess.Popen(
             [sys.executable, str(Path(__file__).parents[1] / 'server.py'), '--host', '127.0.0.1', '--port', '0'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
@@ -93,7 +96,12 @@ class VueHTTPContract(unittest.TestCase):
         self.assertEqual(status, 200, health)
         self.assertIn('vue', health['languages'])
         self.assertIn('rules-4-', health['parser_version'])
-        self.assertIn('vue-sfc-node-24.19.0-compiler-2.7.16-rules-2', health['parser_version'])
+        self.assertEqual(self.sfc_runtime, 'vue-sfc-node-24.19.0-compiler-2.7.16-rules-2')
+        self.assertEqual(health['parser_version'], runtime_version(self.versions))
+        previous_rules = dict(self.versions)
+        previous_rules['vue'] = self.sfc_runtime.removesuffix('-rules-2') + '-rules-1'
+        self.assertNotEqual(health['parser_version'], runtime_version(previous_rules),
+                            'the SFC rules fingerprint must affect the complete parser fingerprint')
         status, parsed = self.parse(b'<template><div>ok</div></template>\r\n')
         self.assertEqual(status, 200, parsed)
         self.assertEqual(parsed['parser_version'], health['parser_version'])
