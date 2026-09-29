@@ -147,7 +147,21 @@ def extract_java_facts(raw, tree, path):
             return name[len(MYBATIS_ANNOTATION_PREFIX):]
         if "." in name:
             return "unrelated"
-        if declared_types.get(name):
+        current_owner_types = []
+        current_type = enclosing_type(annotation)
+        while current_type is not None:
+            current_name = current_type.child_by_field_name("name")
+            if current_name is not None:
+                current_owner_types.append(text(current_name))
+            current_type = enclosing_type(current_type)
+        def declaration_is_visible(candidate):
+            candidate_container = enclosing_type(candidate)
+            if candidate_container is None:
+                return True
+            container_name = candidate_container.child_by_field_name("name")
+            return container_name is not None and text(container_name) in current_owner_types
+
+        if any(declaration_is_visible(candidate) for candidate in declared_types.get(name, [])):
             diagnostics.append({"code": "java_mapper_annotation_identity_shadowed",
                                 "message": "A source-declared type shadows the short mapper annotation name",
                                 "range": output_range})
@@ -246,12 +260,9 @@ def extract_java_facts(raw, tree, path):
                 except Exception:
                     table_names, sql_dynamic = [], True
                     diagnostics.append({"code": "java_annotation_sql_parse_uncertain", "message": "SQLGlot could not parse mapper annotation SQL as MySQL", "range": annotation_range})
-                for table_name in table_names:
-                    if table_name != "__mybatis_dynamic_identifier__":
-                        facts.append({"kind": "sql_table", "name": table_name, "namespace": mapper_namespace,
-                                      "statement_id": method_name, "owner_kind": "java_annotation",
-                                      "dynamic": sql_dynamic, "certainty": "uncertain" if sql_dynamic else "certain",
-                                      "range": annotation_range, "quality": "structural"})
+                facts.extend({"kind": "sql_table", **values, "range": annotation_range, "quality": "structural"}
+                             for values in _sql_table_fact_values(table_names, mapper_namespace, method_name,
+                                                                  "java_annotation", sql_dynamic))
         elif node.type in ("field_declaration", "constant_declaration"):
             type_node = node.child_by_field_name("type")
             if type_node is not None:
@@ -328,7 +339,8 @@ def _tables(sql):
         if statement is None:
             continue
         if statement.key in ("insert", "update", "delete", "merge"):
-            cte_names = {cte.alias_or_name.casefold() for cte in statement.find_all(exp.CTE)}
+            root_with = statement.args.get("with_")
+            cte_names = {cte.alias_or_name.casefold() for cte in root_with.expressions} if isinstance(root_with, exp.With) else set()
             using_sources = statement.args.get("using")
             if statement.key == "delete" and using_sources:
                 # MySQL `DELETE FROM alias USING physical_source ...`: the
@@ -340,13 +352,20 @@ def _tables(sql):
                     source = source.this
                 sources = [source] if source is not None else []
             seen = set()
-            for source in sources:
+            for source_index, source in enumerate(sources):
                 if source is None:
                     continue
-                candidates = [source] if isinstance(source, exp.Table) else []
-                candidates.extend(source.find_all(exp.Table) if hasattr(source, "find_all") else ())
-                for table in candidates:
-                    if not physical_table(table) or table.name.casefold() in cte_names:
+                root_table = source.this if isinstance(source, exp.Schema) else source
+                candidates = []
+                if isinstance(root_table, exp.Table):
+                    candidates.append((root_table, source_index == 0 and statement.key in ("insert", "update", "delete", "merge") and not (statement.key == "delete" and using_sources)))
+                    for join in root_table.args.get("joins") or []:
+                        joined = join.this
+                        if isinstance(joined, exp.Table):
+                            candidates.append((joined, False))
+                for table, is_target in candidates:
+                    cte_reference = (not is_target and not table.db and not table.catalog and table.name.casefold() in cte_names)
+                    if not physical_table(table) or cte_reference:
                         continue
                     name = physical_name(table)
                     if name and name not in seen:
@@ -357,7 +376,7 @@ def _tables(sql):
             # physical tables themselves.
             for scope in traverse_scope(statement):
                 for source_value in scope.sources.values():
-                    if physical_table(source_value) and source_value.name.casefold() not in cte_names:
+                    if physical_table(source_value):
                         name = physical_name(source_value)
                         if name and name not in seen:
                             seen.add(name)
@@ -380,6 +399,18 @@ def _sql_tables_and_diagnostics(sql):
     normalized = dynamic_identifier.sub("__mybatis_dynamic_identifier__", sql)
     normalized = bind_parameter.sub("?", normalized)
     return _tables(normalized), dynamic
+
+
+def _sql_table_fact_values(table_names, namespace, statement_id, owner_kind, dynamic):
+    """Share table identity and certainty across Java, statements, and fragments."""
+    return [{
+        "name": name,
+        "namespace": namespace,
+        "statement_id": statement_id,
+        "owner_kind": owner_kind,
+        "dynamic": dynamic,
+        "certainty": "uncertain" if dynamic else "certain",
+    } for name in table_names if name != "__mybatis_dynamic_identifier__"]
 
 
 def parse_mybatis_xml(raw):
@@ -406,9 +437,10 @@ def parse_mybatis_xml(raw):
             raise ValueError("XML structural limit exceeded")
         start = parser.CurrentByteIndex
         node = {"name": name.split("}")[-1].lower(), "attrs": attrs, "start": start,
-                "start_end": _tag_end(raw, start), "end": None, "children": [], "text": []}
+                "start_end": _tag_end(raw, start), "end": None, "children": [], "text": [], "content": []}
         if nodes:
             nodes[-1]["children"].append(node)
+            nodes[-1]["content"].append(node)
         else:
             roots.append(node)
         nodes.append(node)
@@ -428,6 +460,7 @@ def parse_mybatis_xml(raw):
     def char_data(value):
         if nodes:
             nodes[-1]["text"].append(value)
+            nodes[-1]["content"].append(value)
 
     parser.StartDoctypeDeclHandler = start_doctype
     parser.ExternalEntityRefHandler = reject_external
@@ -459,6 +492,9 @@ def parse_mybatis_xml(raw):
         for child in node["children"]:
             yield child
             yield from descendants(child)
+
+    def text_content(node):
+        return "".join(text_content(part) if isinstance(part, dict) else part for part in node["content"])
 
     namespace = root["attrs"].get("namespace", "")
     facts.append(node_fact("mybatis_mapper", root, namespace=namespace))
@@ -508,23 +544,20 @@ def parse_mybatis_xml(raw):
                 facts.append(node_fact("mybatis_include", child, name=refid, namespace=namespace,
                                        statement_id=ident, target_namespace=(refid.rsplit(".", 1)[0] if "." in refid else namespace),
                                        target_name=(refid.rsplit(".", 1)[-1] if refid else "")))
-        sql = "".join(value for child in [node, *descendants_of_statement] for value in child["text"])
+        sql = text_content(node)
         try:
             table_names, sql_dynamic = _sql_tables_and_diagnostics(sql)
         except Exception:
             table_names = []
             sql_dynamic = True
             diagnostics.append({"code": "sql_parse_uncertain", "message": "SQLGlot could not parse mapper SQL as MySQL", "range": node_range(node)})
-        for table_name in table_names:
-            if table_name == "__mybatis_dynamic_identifier__":
-                continue
-            facts.append(node_fact("sql_table", node, name=table_name, namespace=namespace,
-                                   statement_id=ident, dynamic=dynamic or sql_dynamic,
-                                   certainty="uncertain" if dynamic or sql_dynamic else "certain"))
+        facts.extend(node_fact("sql_table", node, **values)
+                     for values in _sql_table_fact_values(table_names, namespace, ident, "mybatis_statement",
+                                                          dynamic or sql_dynamic))
 
     for node in sql_nodes:
         ident = node["attrs"].get("id", "")
-        sql = "".join(value for child in [node, *descendants(node)] for value in child["text"])
+        sql = text_content(node)
         fragment_dynamic = any(child["name"] in DYNAMIC_TAGS for child in descendants(node))
         if fragment_dynamic:
             diagnostics.append({"code": "sql_fragment_dynamic", "message": "SQL fragment contains dynamic MyBatis branches", "range": node_range(node)})
@@ -534,12 +567,9 @@ def parse_mybatis_xml(raw):
             table_names = []
             sql_dynamic = True
             diagnostics.append({"code": "sql_parse_uncertain", "message": "SQLGlot could not parse SQL fragment as MySQL", "range": node_range(node)})
-        for table_name in table_names:
-            if table_name == "__mybatis_dynamic_identifier__":
-                continue
-            facts.append(node_fact("sql_table", node, name=table_name, namespace=namespace,
-                                   statement_id=ident, owner_kind="mybatis_sql_fragment", dynamic=fragment_dynamic or sql_dynamic,
-                                   certainty="uncertain" if fragment_dynamic or sql_dynamic else "certain"))
+        facts.extend(node_fact("sql_table", node, **values)
+                     for values in _sql_table_fact_values(table_names, namespace, ident, "mybatis_sql_fragment",
+                                                          fragment_dynamic or sql_dynamic))
 
     fragment_counts = {}
     for node in sql_nodes:

@@ -196,6 +196,18 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertFalse(any(f['kind'] == 'sql_table' for f in result['facts']))
         self.assertIn('java_mapper_annotation_identity_shadowed', [d['code'] for d in result['diagnostics']])
 
+    def test_sibling_member_annotation_does_not_shadow_import_in_other_type(self):
+        raw = (b'import org.apache.ibatis.annotations.Select; interface Good { '
+               b'@Select("SELECT * FROM real_table") Object find(); } '
+               b'class Other { @interface Select { String value(); } }')
+        status, result = self.request('/v1/parse', {
+            'path': 'Mapper.java', 'language': 'java', 'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        self.assertTrue(any(f['kind'] == 'sql_table' and f['name'] == 'real_table' for f in result['facts']))
+        self.assertNotIn('java_mapper_annotation_identity_shadowed', [d['code'] for d in result['diagnostics']])
+
     def test_nested_mapper_namespace_preserves_enclosing_binary_type(self):
         raw = (b'package p; class Outer { interface M { String Q="SELECT * FROM nested_table"; '
                b'@org.apache.ibatis.annotations.Select(Q) Object find(); } }')
@@ -270,6 +282,13 @@ class JavaHTTPContract(unittest.TestCase):
                b'<update id="updateJoin">UPDATE orders o JOIN customers c ON o.id=c.id SET o.x=1</update>'
                b'<select id="query">WITH active AS (SELECT * FROM base_table) '
                b'SELECT * FROM active a JOIN JSON_TABLE(a.value, \'$\' COLUMNS(id INT PATH \'$.id\')) jt ON 1=1</select>'
+               b'<update id="qualifiedDml">WITH orders AS (SELECT * FROM staging) UPDATE db.orders '
+               b'SET x=(SELECT MAX(id) FROM orders)</update>'
+               b'<update id="cteTableReference">WITH c AS (SELECT * FROM db.c) UPDATE target '
+               b'SET x=(SELECT MAX(id) FROM c)</update>'
+               b'<update id="nestedCteScope">WITH outer_cte AS (SELECT * FROM real_a) UPDATE target '
+               b'SET x=(WITH target AS (SELECT * FROM shadow) SELECT MAX(id) FROM target)</update>'
+               b'<update id="cteJoin">WITH orders AS (SELECT * FROM staging) UPDATE target JOIN orders ON 1=1 SET target.x=1</update>'
                b'</mapper>')
         status, result = self.request('/v1/parse', {
             'path': 'src/mapper.xml', 'language': 'mybatis-xml',
@@ -281,7 +300,11 @@ class JavaHTTPContract(unittest.TestCase):
                                        ('delete', 'old_schedule'), ('deleteUsing', 'orders'),
                                        ('deleteUsing', 'customers'), ('deleteMulti', 'orders'),
                                        ('deleteMulti', 'customers'), ('updateJoin', 'orders'),
-                                       ('updateJoin', 'customers'), ('query', 'base_table')])
+                                       ('updateJoin', 'customers'), ('query', 'base_table'),
+                                       ('qualifiedDml', 'db.orders'), ('qualifiedDml', 'staging'),
+                                       ('cteTableReference', 'target'), ('cteTableReference', 'db.c'),
+                                       ('nestedCteScope', 'target'), ('nestedCteScope', 'real_a'),
+                                       ('nestedCteScope', 'shadow'), ('cteJoin', 'target'), ('cteJoin', 'staging')])
 
     def test_large_mybatis_mapper_keeps_every_statement(self):
         statements = ''.join(f'<select id="s{i}">SELECT id FROM table_{i}</select>' for i in range(1200))
