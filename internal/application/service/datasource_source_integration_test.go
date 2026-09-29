@@ -406,21 +406,23 @@ func TestSourceStagingChunksCannotBeReadWhileEmbeddingIsPending(t *testing.T) {
 }
 
 type javaSourceFixture struct {
-	ctx          context.Context
-	db           *gorm.DB
-	service      *DataSourceService
-	kbs          interfacesKnowledgeBaseService
-	ds           *types.DataSource
-	kb           *types.KnowledgeBase
-	sha          string
-	chunks       interfaces.ChunkService
-	knowledge    interfaces.KnowledgeService
-	embedStarted chan struct{}
-	embedRelease chan struct{}
-	embedVector  []float32
-	advanceJava  func(string) string
-	shares       interfaces.KBShareService
-	agentShares  interfaces.AgentShareService
+	ctx              context.Context
+	db               *gorm.DB
+	service          *DataSourceService
+	kbs              interfacesKnowledgeBaseService
+	ds               *types.DataSource
+	kb               *types.KnowledgeBase
+	sha              string
+	chunks           interfaces.ChunkService
+	knowledge        interfaces.KnowledgeService
+	embedStarted     chan struct{}
+	embedRelease     chan struct{}
+	embedVector      []float32
+	embeddingForText func(string) []float32
+	advanceJava      func(string) string
+	advanceFiles     func(map[string][]byte) string
+	shares           interfaces.KBShareService
+	agentShares      interfaces.AgentShareService
 }
 
 // A local alias keeps the fixture's public boundary explicit.
@@ -527,6 +529,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 			vector = []float32{1, 0, 0}
 		}
 		for i := range items {
+			if f.embeddingForText != nil {
+				vector = f.embeddingForText(request.Input[i])
+			}
 			items[i] = map[string]any{"index": i, "embedding": vector}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -572,12 +577,19 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	git("add", ".")
 	git("commit", "-m", "Java source fixture")
 	sha := git("rev-parse", "HEAD")
-	f.advanceJava = func(content string) string {
-		require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "Service.java"), []byte(content), 0644))
+	f.advanceFiles = func(files map[string][]byte) string {
+		for name, content := range files {
+			target := filepath.Join(repoDir, filepath.FromSlash(name))
+			require.NoError(t, os.MkdirAll(filepath.Dir(target), 0755))
+			require.NoError(t, os.WriteFile(target, content, 0644))
+		}
 		git("add", ".")
 		git("commit", "-m", "Advance external GitLab fixture")
 		sha = git("rev-parse", "HEAD")
 		return sha
+	}
+	f.advanceJava = func(content string) string {
+		return f.advanceFiles(map[string][]byte{"src/Service.java": []byte(content)})
 	}
 	var gitlabServer *httptest.Server
 	gitlabServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

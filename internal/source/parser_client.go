@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,9 +19,37 @@ import (
 	"github.com/tiktoken-go/tokenizer"
 )
 
-// ParseJava uses the deployment-owned worker URL, never one supplied by GitLab.
+// LanguageForPath selects only deployed source grammars. No project plugins run.
+func LanguageForPath(logicalPath string) string {
+	switch strings.ToLower(path.Ext(logicalPath)) {
+	case ".java":
+		return "java"
+	case ".js", ".jsx", ".mjs", ".cjs":
+		return "javascript"
+	case ".ts", ".mts", ".cts":
+		return "typescript"
+	case ".tsx":
+		return "tsx"
+	default:
+		return ""
+	}
+}
+
+// ParseJava retains the initial Java caller contract.
+func ParseJava(ctx context.Context, endpoint, logicalPath string, raw []byte) (*types.ParsedSourceFile, error) {
+	if LanguageForPath(logicalPath) != "java" {
+		return nil, fmt.Errorf("Java source path required")
+	}
+	return ParseFile(ctx, endpoint, logicalPath, raw)
+}
+
+// ParseFile uses the deployment-owned worker URL, never one supplied by GitLab.
 // The worker sees a logical path, verified bytes and hash, without credentials.
-func ParseJava(ctx context.Context, endpoint, path string, raw []byte) (*types.ParsedSourceFile, error) {
+func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.ParsedSourceFile, error) {
+	language := LanguageForPath(path)
+	if language == "" {
+		return nil, fmt.Errorf("source language is not supported")
+	}
 	codec, err := tokenizer.Get(tokenizer.Cl100kBase)
 	if err != nil {
 		return nil, fmt.Errorf("source tokenizer unavailable")
@@ -32,7 +61,7 @@ func ParseJava(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 	// The library budgets bytes. Verify the actual index text with the existing
 	// BPE tokenizer and reduce the library budget if it exceeds 2,000 tokens.
 	for budget := 4096; budget >= 64; budget /= 2 {
-		body, _ := json.Marshal(map[string]any{"path": path, "language": "java", "sha256": digest, "content_base64": base64.StdEncoding.EncodeToString(raw), "chunk_max_bytes": budget})
+		body, _ := json.Marshal(map[string]any{"path": path, "language": language, "sha256": digest, "content_base64": base64.StdEncoding.EncodeToString(raw), "chunk_max_bytes": budget})
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/v1/parse", bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("source parser URL is invalid")

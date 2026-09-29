@@ -72,31 +72,42 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 	if err != nil {
 		return nil, err
 	}
+	requiredLanguages := []string{}
+	seenLanguages := map[string]bool{}
+	for _, file := range files {
+		if file.Status == "included" {
+			language := source.LanguageForPath(file.Path)
+			if language != "" && !seenLanguages[language] {
+				requiredLanguages = append(requiredLanguages, language)
+				seenLanguages[language] = true
+			}
+		}
+	}
 	preview := &types.SourcePreview{ProjectID: repository.ProjectID, Branch: repository.Branch, CommitSHA: repository.CommitSHA,
 		RulesVersion: version, Files: files, Warnings: []string{}, Checks: []types.SourcePreviewCheck{
 			{Name: "gitlab_branch", Ready: true, Message: "specified branch resolved and fixed commit fetched"},
 			{Name: "indexes", Ready: s.sourceIndexesReady(ctx, kb), Message: "source mode requires a resolved PostgreSQL backend with keyword and vector indexes and an embedding model"},
-			{Name: "parser", Ready: sourceParserReady(ctx), Message: "source mode requires a healthy, versioned Java parser service"},
+			{Name: "parser", Ready: sourceParserReady(ctx, requiredLanguages...), Message: "source mode requires a healthy, versioned parser with every selected language grammar"},
 			{Name: "source_pipeline", Ready: false, Message: "source ingestion pipeline is not available; configuration and preview can be saved"},
 		}}
 	if !kb.IsWikiEnabled() {
 		preview.Warnings = append(preview.Warnings, "Wiki is disabled for this knowledge base")
 	}
 	if s.sourceSnapshots != nil && s.sourceModelService != nil {
-		count, size, javaOnly := 0, int64(0), true
+		count, size, supportedOnly := 0, int64(0), true
 		for _, file := range files {
 			if file.Status != "included" && file.Status != "excluded" {
-				javaOnly = false
+				supportedOnly = false
 			}
 			if file.Status == "included" {
 				count++
 				size += file.Size
-				javaOnly = javaOnly && strings.HasSuffix(strings.ToLower(file.Path), ".java")
+				supportedOnly = supportedOnly && source.LanguageForPath(file.Path) != ""
 			}
 		}
 		pipeline := &preview.Checks[3]
-		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && javaOnly && count > 0 && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
-		pipeline.Message = "initial sync requires explicit paths, 1–100 Java files, at most 16 MiB and the built-in PostgreSQL indexes"
+		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && supportedOnly && count > 0 && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
+		pipeline.Message = "initial sync requires explicit paths, 1–100 Java/JavaScript/TypeScript files, at most 16 MiB and the built-in PostgreSQL indexes"
 		preview.CanSync = true
 		for _, check := range preview.Checks {
 			preview.CanSync = preview.CanSync && check.Ready
@@ -132,7 +143,7 @@ func (s *DataSourceService) sourceIndexesReady(ctx context.Context, kb *types.Kn
 	return err == nil && model != nil && (model.IsBuiltin || model.TenantID == kb.TenantID) && model.Type == types.ModelTypeEmbedding && model.Status == types.ModelStatusActive && model.Parameters.EmbeddingParameters.Dimension > 0
 }
 
-func sourceParserReady(ctx context.Context) bool {
+func sourceParserReady(ctx context.Context, requiredLanguages ...string) bool {
 	endpoint := strings.TrimRight(strings.TrimSpace(os.Getenv("SOURCE_PARSER_URL")), "/")
 	if endpoint == "" {
 		return false
@@ -158,10 +169,17 @@ func sourceParserReady(ctx context.Context) bool {
 	if json.NewDecoder(http.MaxBytesReader(nil, response.Body, 16384)).Decode(&health) != nil || !health.Ready || health.ParserVersion == "" {
 		return false
 	}
+	if len(requiredLanguages) == 0 {
+		requiredLanguages = []string{"java"}
+	}
+	available := map[string]bool{}
 	for _, language := range health.Languages {
-		if language == "java" {
-			return true
+		available[language] = true
+	}
+	for _, language := range requiredLanguages {
+		if !available[language] {
+			return false
 		}
 	}
-	return false
+	return true
 }

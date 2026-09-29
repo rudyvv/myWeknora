@@ -12,7 +12,7 @@ services:
   source-parser:
     build:
       context: ./sourceparser
-    image: weknora-source-parser:java-1.19.0
+    image: weknora-source-parser:source-1.19.0-rules3
     restart: unless-stopped
     read_only: true
     init: true

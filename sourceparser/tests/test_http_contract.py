@@ -48,7 +48,7 @@ class JavaHTTPContract(unittest.TestCase):
         status, health = self.request('/health')
         self.assertEqual(status, 200)
         self.assertTrue(health['ready'])
-        self.assertEqual(health['languages'], ['java'])
+        self.assertIn('java', health['languages'])
         status, result = self.request('/v1/parse', {
             'path': 'nsb/src/main/java/demo/Service.java', 'language': 'java',
             'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
