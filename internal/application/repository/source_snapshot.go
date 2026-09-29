@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -45,6 +47,9 @@ func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
 
 func (r *sourceSnapshotRepository) Create(ctx context.Context, snapshot *types.SourceSnapshot, members []types.SourceSnapshotMember) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
 		if !snapshot.ManifestComplete || snapshot.MemberCount != len(members) {
 			return fmt.Errorf("source manifest is incomplete")
 		}
@@ -64,6 +69,9 @@ func (r *sourceSnapshotRepository) SetState(ctx context.Context, id, state, mess
 
 func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.SourceFile, version *types.SourceFileVersion, chunks []*types.Chunk) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(file).Error; err != nil {
 			return err
 		}
@@ -96,6 +104,9 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 
 func (r *sourceSnapshotRepository) StageIndexes(ctx context.Context, indexes []*types.IndexInfo, vectors map[string][]float32) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
 		if err := pgrepo.NewPostgresRetrieveEngineRepository(tx).BatchSave(ctx, indexes, map[string]any{"embedding": vectors}); err != nil {
 			return err
 		}
@@ -109,6 +120,9 @@ func (r *sourceSnapshotRepository) StageIndexes(ctx context.Context, indexes []*
 
 func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.SourceSnapshot, expected *types.DataSource, kb *types.KnowledgeBase, dimension int) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
 		var ds types.DataSource
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=?", expected.ID, expected.TenantID).First(&ds).Error; err != nil {
 			return err
@@ -196,6 +210,28 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 			return err
 		}
 		snapshot.State, snapshot.PublishedAt = "published", &now
+		if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
+			payload, _ := json.Marshal(map[string]any{
+				"tenant_id": kb.TenantID, "knowledge_base_id": kb.ID,
+				"data_source_id": ds.ID, "snapshot_id": snapshot.ID,
+				"commit_sha": snapshot.CommitSHA,
+			})
+			if err := tx.Exec(`INSERT INTO source_publication_outbox
+				(id,tenant_id,knowledge_base_id,data_source_id,snapshot_id,event_type,payload,status,created_at)
+				VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(data_source_id,snapshot_id,event_type) DO NOTHING`,
+				uuid.NewString(), kb.TenantID, kb.ID, ds.ID, snapshot.ID, "source.wiki.update", string(payload), "pending", now).Error; err != nil {
+				return err
+			}
+			if err := tx.Table("source_sync_states").Where(`data_source_id=? AND config_generation=? AND fencing_token=? AND active_sync_log_id=?`,
+				lease.DataSourceID, lease.ConfigGeneration, lease.FencingToken, lease.SyncLogID).
+				Updates(map[string]any{"last_successful_snapshot_id": snapshot.ID, "last_successful_published_at": now, "updated_at": now}).Error; err != nil {
+				return err
+			}
+			if err := tx.Table("source_sync_runs").Where("sync_log_id=? AND fencing_token=?", lease.SyncLogID, lease.FencingToken).
+				Updates(map[string]any{"phase": "published", "updated_at": now}).Error; err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -203,6 +239,9 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 func (r *sourceSnapshotRepository) GetRun(ctx context.Context, tenant uint64, sourceID, logID string) (*types.SourceRunResult, error) {
 	var snapshot types.SourceSnapshot
 	if err := r.db.WithContext(ctx).Where("tenant_id=? AND data_source_id=? AND sync_log_id=?", tenant, sourceID, logID).First(&snapshot).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var members []types.SourceSnapshotMember
@@ -210,4 +249,13 @@ func (r *sourceSnapshotRepository) GetRun(ctx context.Context, tenant uint64, so
 		return nil, err
 	}
 	return &types.SourceRunResult{Snapshot: &snapshot, Members: members}, nil
+}
+
+func (r *sourceSnapshotRepository) GetStagedChunkIDs(ctx context.Context, snapshotID, fileVersionID string) ([]string, error) {
+	var ids []string
+	err := r.db.WithContext(ctx).Table("source_chunk_references cr").
+		Joins("JOIN chunks c ON c.id=cr.chunk_id").
+		Where("cr.snapshot_id=? AND cr.file_version_id=?", snapshotID, fileVersionID).
+		Order("c.chunk_index ASC, c.id ASC").Pluck("cr.chunk_id", &ids).Error
+	return ids, err
 }

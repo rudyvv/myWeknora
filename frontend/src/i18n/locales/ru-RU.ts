@@ -912,6 +912,7 @@ export default {
       failed: 'ошибок'
     },
     logStatus: {
+      queued: 'Ожидает синхронизации',
       running: 'Синхронизация',
       success: 'Успешно',
       partial: 'Частично',

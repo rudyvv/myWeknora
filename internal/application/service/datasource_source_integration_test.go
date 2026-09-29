@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,10 +119,172 @@ func TestSourceSchedulerRecoversPendingManualTriggerAfterRestart(t *testing.T) {
 		var payload types.DataSourceSyncPayload
 		require.NoError(t, json.Unmarshal(task.Payload(), &payload))
 		require.Equal(t, log.ID, payload.SyncLogID, "restart recovery must redeliver the registered run")
-		require.Equal(t, "recovery", payload.Trigger)
+		require.Equal(t, "manual", payload.Trigger)
 	case <-time.After(2 * time.Second):
 		t.Fatal("scheduler did not redeliver the durable source trigger")
 	}
+}
+
+func TestSourceManualTriggersSerializeAndCatchUpToLatestCommit(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.parseStarted = make(chan struct{}, 1)
+	f.parseRelease = make(chan struct{}, 1)
+	delivered := make(chan *asynq.Task, 4)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: delivered}
+
+	firstLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, firstLog.Status)
+	var firstTask *asynq.Task
+	select {
+	case firstTask = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial source trigger was not enqueued")
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- f.service.ProcessSync(f.ctx, firstTask) }()
+	select {
+	case <-f.parseStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first source run did not reach the controlled parse stage")
+	}
+
+	commitC := f.advanceJava("package demo; public class Service { int versionC() { return 3; } }\n")
+	logC, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, logC.Status)
+	commitD := f.advanceJava("package demo; public class Service { int versionD() { return 4; } }\n")
+	logD, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, logD.Status)
+	coalesced, err := f.service.GetSyncLog(f.ctx, logC.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, coalesced.Status, "C should be replaced by the latest pending trigger D")
+
+	f.parseRelease <- struct{}{}
+	require.NoError(t, <-firstDone)
+	var catchupTask *asynq.Task
+	select {
+	case catchupTask = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("latest pending trigger was not dispatched after B published")
+	}
+	f.parseStarted, f.parseRelease = nil, nil
+	require.NoError(t, f.service.ProcessSync(f.ctx, catchupTask))
+
+	publication, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.NotNil(t, publication)
+	require.Equal(t, commitD, publication.Snapshot.CommitSHA, "the catch-up run must publish D, not intermediate C")
+	var intermediateCount int64
+	require.NoError(t, f.db.Table("source_snapshots").Where("data_source_id=? AND commit_sha=? AND state='published'", f.ds.ID, commitC).Count(&intermediateCount).Error)
+	require.Zero(t, intermediateCount, "coalesced commit C should not publish")
+	var outboxCount int64
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("data_source_id=? AND event_type='source.wiki.update' AND status='pending'", f.ds.ID).Count(&outboxCount).Error)
+	require.EqualValues(t, 2, outboxCount, "each committed publication must atomically leave a recoverable Wiki update signal")
+}
+
+func TestSourceLeaseSerializesWorkersAndFencesExpiredOwner(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	delivered := make(chan *asynq.Task, 1)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: delivered}
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	task := <-delivered
+	var payload types.DataSourceSyncPayload
+	require.NoError(t, json.Unmarshal(task.Payload(), &payload))
+	control := f.service.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	claimDS, err := f.service.GetDataSource(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+
+	const workers = 12
+	leases := make(chan types.SourceSyncLease, workers)
+	var claimed atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lease, ok, claimErr := control.ClaimSourceRun(f.ctx, claimDS, log.ID, payload.DeliveryGeneration, uuid.NewString(), time.Minute)
+			require.NoError(t, claimErr)
+			if ok {
+				claimed.Add(1)
+				leases <- lease
+			}
+		}()
+	}
+	wg.Wait()
+	require.EqualValues(t, 1, claimed.Load(), "a source run has one concurrent database lease owner")
+	oldLease := <-leases
+	_, staleDeliveryClaimed, err := control.ClaimSourceRun(f.ctx, claimDS, log.ID, payload.DeliveryGeneration+1, uuid.NewString(), time.Minute)
+	require.NoError(t, err)
+	require.False(t, staleDeliveryClaimed, "a mismatched queue generation is only a no-op")
+	var statusAfterStaleDelivery string
+	require.NoError(t, f.db.Raw("SELECT status FROM sync_logs WHERE id=?", log.ID).Scan(&statusAfterStaleDelivery).Error)
+	require.Equal(t, types.SyncLogStatusRunning, statusAfterStaleDelivery, "stale delivery must not cancel the active run")
+	// Advance the database lease clock deterministically to model a crashed
+	// worker without sleeping for the production lease TTL.
+	require.NoError(t, f.db.Exec("UPDATE source_sync_states SET lease_expires_at=now()-interval '1 second' WHERE data_source_id=?", f.ds.ID).Error)
+	newLease, ok, err := control.ClaimSourceRun(f.ctx, claimDS, log.ID, payload.DeliveryGeneration, uuid.NewString(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok, "a worker can reclaim the run after lease expiry")
+	require.Greater(t, newLease.FencingToken, oldLease.FencingToken)
+	require.ErrorIs(t, control.RecordSourceRunPhase(f.ctx, oldLease, "ready", ""), types.ErrSourceSyncLeaseLost)
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(claimDS.Config, &config))
+	settings, ok := config["settings"].(map[string]any)
+	require.True(t, ok)
+	settings["coordination_test_generation"] = true
+	updatedConfig, err := json.Marshal(config)
+	require.NoError(t, err)
+	updatedDS := *claimDS
+	updatedDS.Config = updatedConfig
+	require.NoError(t, control.AdvanceSourceConfig(f.ctx, &updatedDS, true))
+	require.ErrorIs(t, control.RecordSourceRunPhase(f.ctx, newLease, "ready", ""), types.ErrSourceSyncLeaseLost,
+		"a configuration generation change fences the current owner")
+}
+
+func TestSourceRetryReusesCompletedParseStage(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.embedStarted = make(chan struct{}, 1)
+	f.embedRelease = make(chan struct{})
+	delivered := make(chan *asynq.Task, 2)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: delivered}
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	task := <-delivered
+	runCtx, cancel := context.WithCancel(f.ctx)
+	done := make(chan error, 1)
+	go func() { done <- f.service.ProcessSync(runCtx, task) }()
+	select {
+	case <-f.embedStarted:
+	case <-time.After(20 * time.Second):
+		cancel()
+		t.Fatal("source run did not reach embedding after parsing and file staging")
+	}
+	var staged struct {
+		ID string `gorm:"column:id"`
+	}
+	require.NoError(t, f.db.Table("source_snapshots").Select("id").Where("sync_log_id=?", log.ID).Take(&staged).Error)
+	var parsedMembers int64
+	require.NoError(t, f.db.Table("source_snapshot_members").Where("snapshot_id=? AND status='parsed'", staged.ID).Count(&parsedMembers).Error)
+	require.EqualValues(t, 1, parsedMembers, "the completed file stage must be checkpointed before embedding")
+	cancel()
+	require.Error(t, <-done, "the canceled worker should leave the run recoverable")
+	f.embedStarted, f.embedRelease = nil, nil
+	require.NoError(t, f.service.ProcessSync(f.ctx, task))
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+	require.EqualValues(t, 1, f.parseCount.Load(), "retry should reuse the persisted parse artifact")
+	var snapshotCount, versionCount int64
+	require.NoError(t, f.db.Table("source_snapshots").Where("sync_log_id=?", log.ID).Count(&snapshotCount).Error)
+	require.NoError(t, f.db.Table("source_file_versions").Where("snapshot_id=?", staged.ID).Count(&versionCount).Error)
+	require.EqualValues(t, 1, snapshotCount, "retry should resume the same immutable run snapshot")
+	require.EqualValues(t, 1, versionCount, "retry should reuse the already staged file version")
+	var outboxCount int64
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("snapshot_id=? AND status='pending'", staged.ID).Count(&outboxCount).Error)
+	require.EqualValues(t, 1, outboxCount, "retry publication should produce one durable Wiki signal")
 }
 
 type sourceTestTaskEnqueuer struct {
@@ -710,6 +873,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	incrementalMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000104_source_incremental_artifacts.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(incrementalMigration)).Error)
+	coordinationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000108_source_sync_coordination.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(coordinationMigration)).Error)
 	parser := exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
 	parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
 	stdout, err := parser.StdoutPipe()

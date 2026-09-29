@@ -74,6 +74,9 @@ func (s *Scheduler) Start(ctx context.Context) error {
 				ds.ID, schedule, err)
 		}
 	}
+	if _, err := s.cron.AddFunc("@every 30s", func() { s.reconcileSourceTriggers(context.Background()) }); err != nil {
+		logger.Warnf(ctx, "[Scheduler] failed to register source-trigger reconciliation: %v", err)
+	}
 
 	s.cron.Start()
 	logger.Infof(ctx, "[Scheduler] started with %d cron entries", len(s.entries))
@@ -88,6 +91,12 @@ func (s *Scheduler) Stop() {
 
 // AddOrUpdate registers (or re-registers) a cron entry for the given data source.
 func (s *Scheduler) AddOrUpdate(ds *types.DataSource) error {
+	schedule, sourceMode := scheduledSync(ds)
+	if ds.Status == types.DataSourceStatusActive && sourceMode {
+		if err := s.recoverQueuedSourceRuns(context.Background(), ds); err != nil {
+			logger.Errorf(context.Background(), "[Scheduler] failed to recover source triggers for ds=%s: %v", ds.ID, err)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -96,7 +105,6 @@ func (s *Scheduler) AddOrUpdate(ds *types.DataSource) error {
 		delete(s.entries, ds.ID)
 	}
 
-	schedule, _ := scheduledSync(ds)
 	if ds.Status != types.DataSourceStatusActive || schedule == "" {
 		return nil
 	}
@@ -163,6 +171,21 @@ func scheduledSync(ds *types.DataSource) (string, bool) {
 // restart but were not yet delivered to the task queue. The stable task ID
 // makes recovery idempotent when the original enqueue actually succeeded.
 func (s *Scheduler) recoverQueuedSourceRuns(ctx context.Context, ds *types.DataSource) error {
+	if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+		dispatches, err := control.RecoverSourceTriggers(ctx, ds)
+		if err != nil {
+			return err
+		}
+		for _, dispatch := range dispatches {
+			if dispatch.SyncLog == nil {
+				continue
+			}
+			if _, err := EnqueueSourceSync(ctx, s.taskEnqueuer, dispatch, ds.TenantID, ds.ID, types.TaskInitiator{}); err != nil {
+				logger.Errorf(ctx, "[Scheduler] failed to redeliver source trigger ds=%s syncLog=%s: %v", ds.ID, dispatch.SyncLog.ID, err)
+			}
+		}
+		return nil
+	}
 	logs, err := s.syncLogRepo.FindByDataSource(ctx, ds.ID, 1000, 0)
 	if err != nil {
 		return err
@@ -171,26 +194,30 @@ func (s *Scheduler) recoverQueuedSourceRuns(ctx context.Context, ds *types.DataS
 		if syncLog == nil || syncLog.Status != types.SyncLogStatusQueued || syncLog.TenantID != ds.TenantID {
 			continue
 		}
-		payload := &types.DataSourceSyncPayload{
-			DataSourceID: ds.ID,
-			TenantID:     ds.TenantID,
-			SyncLogID:    syncLog.ID,
-			Trigger:      "recovery",
-		}
-		langfuse.InjectTracing(ctx, payload)
-		payloadJSON, _ := json.Marshal(payload)
-		task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON)
-		_, err := s.taskEnqueuer.Enqueue(task,
-			asynq.Queue(types.QueueSync),
-			asynq.MaxRetry(5),
-			asynq.Timeout(2*time.Hour),
-			asynq.TaskID("dssource:"+syncLog.ID),
-		)
+		dispatch := types.SourceSyncDispatch{SyncLog: syncLog, Trigger: "recovery", DeliveryGeneration: 1}
+		_, err := EnqueueSourceSync(ctx, s.taskEnqueuer, dispatch, ds.TenantID, ds.ID, types.TaskInitiator{})
 		if err != nil && err != asynq.ErrTaskIDConflict {
 			logger.Errorf(ctx, "[Scheduler] failed to redeliver source trigger ds=%s syncLog=%s: %v", ds.ID, syncLog.ID, err)
 		}
 	}
 	return nil
+}
+
+func (s *Scheduler) reconcileSourceTriggers(ctx context.Context) {
+	dataSources, err := s.dsRepo.FindActive(ctx)
+	if err != nil {
+		logger.Errorf(ctx, "[Scheduler] failed to list sources for trigger reconciliation: %v", err)
+		return
+	}
+	for _, ds := range dataSources {
+		_, sourceMode := scheduledSync(ds)
+		if !sourceMode {
+			continue
+		}
+		if err := s.recoverQueuedSourceRuns(ctx, ds); err != nil {
+			logger.Errorf(ctx, "[Scheduler] failed to reconcile source triggers for ds=%s: %v", ds.ID, err)
+		}
+	}
 }
 
 // triggerSync is called by the cron runner on each tick.
@@ -208,6 +235,27 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
 	if err != nil || ds == nil || ds.Status != types.DataSourceStatusActive {
 		logger.Infof(ctx, "[Scheduler] skipping sync for ds=%s (not active or not found)", dataSourceID)
 		return
+	}
+	_, sourceMode := scheduledSync(ds)
+	if sourceMode {
+		if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+			syncLog := &types.SyncLog{DataSourceID: dataSourceID, TenantID: tenantID, Status: types.SyncLogStatusQueued, StartedAt: time.Now().UTC()}
+			shouldDispatch, generation, err := control.RegisterSourceTrigger(ctx, ds, syncLog, "schedule")
+			if err != nil {
+				logger.Errorf(ctx, "[Scheduler] failed to register scheduled source trigger for ds=%s: %v", dataSourceID, err)
+				return
+			}
+			if !shouldDispatch {
+				return
+			}
+			_, err = EnqueueSourceSync(ctx, s.taskEnqueuer, types.SourceSyncDispatch{
+				SyncLog: syncLog, Trigger: "schedule", DeliveryGeneration: generation,
+			}, tenantID, dataSourceID, types.TaskInitiator{})
+			if err != nil {
+				logger.Errorf(ctx, "[Scheduler] scheduled source trigger remains pending after queue error ds=%s: %v", dataSourceID, err)
+			}
+			return
+		}
 	}
 
 	// Layer 1: prevent overlap with a still-running sync

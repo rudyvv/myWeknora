@@ -6425,6 +6425,7 @@ export default {
     refreshLogs: 'Refresh logs',
     noLogs: 'No sync records yet',
     logStatus: {
+      queued: 'Waiting to catch up',
       running: 'Syncing',
       success: 'Success',
       partial: 'Partial',

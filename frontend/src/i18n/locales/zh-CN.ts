@@ -914,6 +914,7 @@ export default {
       failed: '失败'
     },
     logStatus: {
+      queued: '等待追赶',
       running: '同步中',
       success: '成功',
       partial: '部分成功',

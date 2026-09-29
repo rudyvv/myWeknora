@@ -270,23 +270,28 @@ func (r *SyncLogRepository) UpdateResult(ctx context.Context, log *types.SyncLog
 	if log.ID == "" {
 		return errors.New("sync log id is empty")
 	}
-	if err := r.db.WithContext(ctx).
-		Model(&types.SyncLog{}).
-		Where("id = ?", log.ID).
-		Updates(map[string]interface{}{
-			"status":        log.Status,
-			"finished_at":   log.FinishedAt,
-			"items_total":   log.ItemsTotal,
-			"items_created": log.ItemsCreated,
-			"items_updated": log.ItemsUpdated,
-			"items_deleted": log.ItemsDeleted,
-			"items_skipped": log.ItemsSkipped,
-			"items_failed":  log.ItemsFailed,
-			"error_message": log.ErrorMessage,
-			"result":        log.Result,
-			"updated_at":    time.Now().UTC(),
-		}).Error; err != nil {
-		return err
+	query := r.db.WithContext(ctx).Model(&types.SyncLog{}).Where("id = ?", log.ID)
+	if log.SourceFencingToken > 0 {
+		query = query.Where("source_config_generation = ? AND source_fencing_token = ?", log.SourceConfigGeneration, log.SourceFencingToken)
+	}
+	result := query.Updates(map[string]interface{}{
+		"status":        log.Status,
+		"finished_at":   log.FinishedAt,
+		"items_total":   log.ItemsTotal,
+		"items_created": log.ItemsCreated,
+		"items_updated": log.ItemsUpdated,
+		"items_deleted": log.ItemsDeleted,
+		"items_skipped": log.ItemsSkipped,
+		"items_failed":  log.ItemsFailed,
+		"error_message": log.ErrorMessage,
+		"result":        log.Result,
+		"updated_at":    time.Now().UTC(),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if log.SourceFencingToken > 0 && result.RowsAffected != 1 {
+		return types.ErrSourceSyncLeaseLost
 	}
 	return nil
 }

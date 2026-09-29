@@ -13,6 +13,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 )
 
@@ -76,6 +77,21 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err != nil {
 		return err
 	}
+	existingRun, err := s.sourceSnapshots.GetRun(ctx, ds.TenantID, ds.ID, log.ID)
+	if err != nil {
+		return err
+	}
+	if existingRun != nil && existingRun.Snapshot != nil && existingRun.Snapshot.State == "published" {
+		result.Source = existingRun
+		snapshot = existingRun.Snapshot
+		result.Total = snapshot.FileCount
+		result.Created = snapshot.AddedCount
+		result.Updated = snapshot.ChangedCount + snapshot.RenamedCount
+		result.Deleted = snapshot.DeletedCount
+		data, _ := result.ToJSON()
+		s.updateSyncRunResult(ctx, ds, log, result, data, types.SyncLogStatusSuccess, "", wasPaused)
+		return nil
+	}
 	snapshot.PublicationChecked = true
 	if previous != nil && previous.Snapshot != nil {
 		snapshot.PreviousSnapshotID = previous.Snapshot.ID
@@ -98,11 +114,29 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err != nil {
 		return err
 	}
+	if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
+		if lease.TargetCommitSHA != "" {
+			repository.CommitSHA = lease.TargetCommitSHA
+		} else if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+			if err := control.RecordSourceRunPhase(ctx, lease, "target_resolved", repository.CommitSHA); err != nil {
+				return err
+			}
+			lease.TargetCommitSHA = repository.CommitSHA
+			ctx = types.WithSourceSyncLease(ctx, lease)
+		}
+	}
 	snapshot.ProjectID, snapshot.CommitSHA, snapshot.RulesVersion = repository.ProjectID, repository.CommitSHA, version
 	snapshot.DetectedCommitSHA, snapshot.TargetCommitSHA = repository.CommitSHA, repository.CommitSHA
 	snapshot.RepositoryURL = strings.TrimSuffix(repository.CloneURL, ".git")
 	progress := func(state string) error {
 		snapshot.State = state
+		if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
+			if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+				if e := control.RecordSourceRunPhase(ctx, lease, state, snapshot.CommitSHA); e != nil {
+					return e
+				}
+			}
+		}
 		data, e := result.ToJSON()
 		if e != nil {
 			return e
@@ -158,19 +192,31 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	manifestHash := sha256.Sum256(manifestBytes)
 	snapshot.ManifestDigest = hex.EncodeToString(manifestHash[:])
 	for _, file := range manifest {
-		result.Source.Members = append(result.Source.Members, types.SourceSnapshotMember{SnapshotID: snapshot.ID, Path: file.Path, BlobSHA: file.BlobSHA, Size: file.Size, Status: file.Status, Reason: file.Reason, Encoding: file.Encoding, Generated: file.Generated})
-	}
-	for _, file := range manifest {
 		if file.Status != "included" && file.Status != "excluded" {
 			return fmt.Errorf("selected source member is not readable: %s (%s)", file.Path, file.Status)
 		}
 	}
-	reconcileSourceMembers(snapshot, result.Source.Members, previous)
-	snapshot.State = "parsing"
-	if err := s.sourceSnapshots.Create(ctx, snapshot, result.Source.Members); err != nil {
-		return err
+	if existingRun != nil && existingRun.Snapshot != nil {
+		if existingRun.Snapshot.CommitSHA != repository.CommitSHA || existingRun.Snapshot.ManifestDigest != snapshot.ManifestDigest || existingRun.Snapshot.RulesVersion != version {
+			return fmt.Errorf("persisted source stage no longer matches its fixed target")
+		}
+		snapshot = existingRun.Snapshot
+		result.Source.Snapshot = snapshot
+		result.Source.Members = existingRun.Members
+		snapshot.DetectedCommitSHA, snapshot.TargetCommitSHA = repository.CommitSHA, repository.CommitSHA
+		snapshot.PublicationChecked = true
+		created = true
+	} else {
+		for _, file := range manifest {
+			result.Source.Members = append(result.Source.Members, types.SourceSnapshotMember{SnapshotID: snapshot.ID, Path: file.Path, BlobSHA: file.BlobSHA, Size: file.Size, Status: file.Status, Reason: file.Reason, Encoding: file.Encoding, Generated: file.Generated})
+		}
+		reconcileSourceMembers(snapshot, result.Source.Members, previous)
+		if err := s.sourceSnapshots.Create(ctx, snapshot, result.Source.Members); err != nil {
+			return err
+		}
+		created = true
 	}
-	created = true
+	snapshot.State = "parsing"
 	if err := progress("parsing"); err != nil {
 		return err
 	}
@@ -204,6 +250,27 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		if err != nil {
 			return err
 		}
+		if member.Status == "parsed" {
+			reader, ok := s.sourceSnapshots.(interface {
+				GetStagedChunkIDs(context.Context, string, string) ([]string, error)
+			})
+			if !ok {
+				return datasource.ErrSourcePipelineUnavailable
+			}
+			chunkIDs, err := reader.GetStagedChunkIDs(ctx, snapshot.ID, member.FileVersionID)
+			if err != nil {
+				return err
+			}
+			if len(chunkIDs) != len(parsed.Chunks) {
+				return fmt.Errorf("persisted source stage has incomplete chunks for %s", member.Path)
+			}
+			for index, part := range parsed.Chunks {
+				indexes = append(indexes, &types.IndexInfo{SourceID: chunkIDs[index], ChunkID: chunkIDs[index], SourceType: types.ChunkSourceType,
+					KnowledgeID: member.SourceFileID, KnowledgeBaseID: kb.ID, KnowledgeType: types.KnowledgeTypeSource,
+					Content: source.SourceIndexText(member.Path, part), IsEnabled: false})
+			}
+			continue
+		}
 		fileID := member.SourceFileID
 		file := &types.SourceFile{ID: fileID, TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, Path: member.Path}
 		symbols, _ := json.Marshal(parsed.Symbols)
@@ -222,6 +289,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		member.SourceFileID, member.FileVersionID, member.Status = fileID, fileVersion.ID, "parsed"
 		snapshot.ChunkCount += len(chunks)
 	}
+	snapshot.ChunkCount = len(indexes)
 	if err := progress("indexing"); err != nil {
 		return err
 	}

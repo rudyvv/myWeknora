@@ -65,7 +65,7 @@ export interface SyncResultDetail {
 export interface SyncLog {
   id: string
   data_source_id: string
-  status: 'running' | 'success' | 'partial' | 'failed' | 'canceled'
+  status: 'queued' | 'running' | 'success' | 'partial' | 'failed' | 'canceled'
   started_at: string
   finished_at: string | null
   items_total: number

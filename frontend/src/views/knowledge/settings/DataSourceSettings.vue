@@ -60,7 +60,7 @@ async function loadList(silent = false) {
     dataSources.value = res?.data || res || []
     emit('count', dataSources.value.length)
 
-    const hasRunningSync = dataSources.value.some(ds => ds.latest_sync_log?.status === 'running')
+    const hasRunningSync = dataSources.value.some(ds => ds.latest_sync_log?.status === 'running' || ds.latest_sync_log?.status === 'queued')
     if (hasRunningSync) {
       schedulePolling()
     } else {
@@ -256,6 +256,14 @@ function isSyncRunning(ds: DataSource) {
   return ds.latest_sync_log?.status === 'running'
 }
 
+function hasPendingSync(ds: DataSource) {
+  return ds.latest_sync_log?.status === 'running' || ds.latest_sync_log?.status === 'queued'
+}
+
+function isSourceMode(ds: DataSource) {
+  return ds.config?.settings?.content_mode === 'source'
+}
+
 function onEditorSaved() {
   editorVisible.value = false
   loadList()
@@ -316,11 +324,11 @@ onBeforeUnmount(stopPolling)
                       </t-dropdown-item>
                       <t-dropdown-item
                         v-if="canManageDataSource"
-                        :disabled="isSyncRunning(ds)"
+                        :disabled="hasPendingSync(ds) && !isSourceMode(ds)"
                         @click="handleSync(ds)"
                       >
                         <t-icon name="refresh" :class="{ 'ds-icon-spin': isSyncRunning(ds) }" />
-                        {{ isSyncRunning(ds) ? t('datasource.logStatus.running') : t('datasource.syncNow') }}
+                        {{ ds.latest_sync_log?.status === 'queued' ? t('datasource.logStatus.queued') : isSyncRunning(ds) ? t('datasource.logStatus.running') : t('datasource.syncNow') }}
                       </t-dropdown-item>
                       <t-dropdown-item @click="openLogs(ds)">
                         <t-icon name="root-list" /> {{ t('datasource.logs') }}

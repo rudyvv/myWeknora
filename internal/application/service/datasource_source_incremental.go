@@ -190,10 +190,12 @@ func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.Da
 				snapshot.EmbeddedChunkCount++
 			}
 		}
-		if err := s.sourceSnapshots.StageIndexes(ctx, batch, mapped); err != nil {
+		// Persist provider results before staging index rows so a worker restart
+		// after indexing can reuse the same vectors without another model call.
+		if err := s.sourceSnapshots.SaveEmbeddingArtifacts(ctx, ds.TenantID, ds.ID, newVectors); err != nil {
 			return 0, err
 		}
-		if err := s.sourceSnapshots.SaveEmbeddingArtifacts(ctx, ds.TenantID, ds.ID, newVectors); err != nil {
+		if err := s.sourceSnapshots.StageIndexes(ctx, batch, mapped); err != nil {
 			return 0, err
 		}
 	}
