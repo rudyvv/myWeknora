@@ -28,6 +28,8 @@ Standards 轴：最终复审 0 项剩余问题。Spec 轴：最终复审 0 项�
 
 ## 验证
 
+- 最终 `go test -tags=integration ./internal/application/service -run '^TestSource' -count=1 -v` 全部通过（143.100 秒）：23 个匹配测试，包含 18 项真实源码集成路径及既有 Source 命名回归。文件/tag 交集与 FAQ 两项单独复验通过（14.268 秒）。
+
 - 真实 Git、锁定 Java 解析器和独立 PostgreSQL/ParadeDB schema；测试数据库扩展为 `pg_search 0.22.2`、`vector 0.8.1`。外部 GitLab HTTP、模型与队列可控，不替换内部检索实现。
 - 验证同次问答期间新版本发布仍读旧 SHA、读取保护、授权撤销/明确清除、共享 Agent HTTP/工具链、直接句柄越权、同名路径、多仓库及普通文档/FAQ 混合范围。
 - 真实查询计划包含两仓库 162 个混淆块，其中范围外块向量分数更高，超过原全局候选预算。两路公开 topK=1 均命中范围内块；记录实际 SQL 的范围条件在 LIMIT 前，并执行真实 `EXPLAIN ANALYZE`，不以返回后过滤替代验证。
