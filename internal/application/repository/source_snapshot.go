@@ -29,6 +29,7 @@ type sourcePublicationOutboxRow struct {
 	EventType        string `gorm:"column:event_type"`
 	ConfigGeneration int64  `gorm:"column:config_generation"`
 	AttemptCount     int    `gorm:"column:attempt_count"`
+	Status           string `gorm:"column:status"`
 }
 
 func NewSourceSnapshotRepository(db *gorm.DB) interfaces.SourceSnapshotRepository {
@@ -246,6 +247,122 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 				Updates(map[string]any{"phase": "published", "updated_at": now}).Error; err != nil {
 				return err
 			}
+		}
+		return nil
+	})
+}
+
+// EnsurePublishedSourceWikiUpdate restores durable notification work after a
+// source run has revalidated that the current published snapshot still matches
+// the source. It only registers pending work; the T15/T16 consumer owns Wiki
+// generation.
+func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.Context, expected *types.DataSource, snapshot *types.SourceSnapshot) error {
+	lease, ok := types.SourceSyncLeaseFromContext(ctx)
+	if !ok || expected == nil || snapshot == nil || expected.ID == "" || snapshot.ID == "" ||
+		lease.DataSourceID != expected.ID || lease.TenantID != expected.TenantID {
+		return types.ErrSourceSyncLeaseLost
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Match the relay's event→coordinator→datasource lock order. In
+		// particular, don't acquire the coordinator row before a pending event
+		// that the relay may already have locked.
+		var event sourcePublicationOutboxRow
+		eventErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("source_publication_outbox").
+			Where("data_source_id=? AND snapshot_id=? AND event_type=?", expected.ID, snapshot.ID, "source.wiki.update").
+			Take(&event).Error
+		if eventErr != nil && !errors.Is(eventErr, gorm.ErrRecordNotFound) {
+			return eventErr
+		}
+		eventExists := eventErr == nil
+
+		var state sourceSyncStateRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("source_sync_states").
+			Where("data_source_id=? AND tenant_id=?", lease.DataSourceID, lease.TenantID).Take(&state).Error; err != nil {
+			return types.ErrSourceSyncLeaseLost
+		}
+		if !sourceLeaseMatches(&state, lease, time.Now().UTC()) {
+			return types.ErrSourceSyncLeaseLost
+		}
+
+		var current types.DataSource
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
+			Where("id=? AND tenant_id=? AND knowledge_base_id=?", expected.ID, expected.TenantID, expected.KnowledgeBaseID).
+			Take(&current).Error; err != nil {
+			return fmt.Errorf("source is no longer available for Wiki notification: %w", err)
+		}
+		fingerprint := sourceConfigFingerprint(&current)
+		if sourceConfigFingerprint(expected) != fingerprint || state.ConfigFingerprint != fingerprint || !sourceModeEnabled(&current) {
+			return fmt.Errorf("source configuration changed before Wiki notification")
+		}
+
+		var kb types.KnowledgeBase
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=?", current.KnowledgeBaseID, current.TenantID).Take(&kb).Error; err != nil {
+			return fmt.Errorf("knowledge base is no longer available for Wiki notification: %w", err)
+		}
+		var publication types.SourcePublication
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
+			Where("data_source_id=? AND tenant_id=? AND knowledge_base_id=?", current.ID, current.TenantID, current.KnowledgeBaseID).
+			Take(&publication).Error; err != nil {
+			return fmt.Errorf("source publication is no longer current: %w", err)
+		}
+		if publication.SnapshotID != snapshot.ID {
+			return fmt.Errorf("source publication changed before Wiki notification")
+		}
+		var published types.SourceSnapshot
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
+			Where("id=? AND tenant_id=? AND data_source_id=? AND knowledge_base_id=? AND state='published' AND manifest_complete=true",
+				snapshot.ID, current.TenantID, current.ID, current.KnowledgeBaseID).
+			Take(&published).Error; err != nil {
+			return fmt.Errorf("published source snapshot is no longer available: %w", err)
+		}
+
+		now := time.Now().UTC()
+		if !eventExists {
+			event.ID = uuid.NewString()
+			event.TenantID, event.KnowledgeBaseID, event.DataSourceID = current.TenantID, current.KnowledgeBaseID, current.ID
+			event.SnapshotID, event.EventType = published.ID, "source.wiki.update"
+		}
+		payload, err := json.Marshal(types.SourceWikiUpdatePayload{
+			SchemaVersion: 1, EventID: event.ID, TenantID: current.TenantID,
+			KnowledgeBaseID: current.KnowledgeBaseID, DataSourceID: current.ID,
+			SnapshotID: published.ID, CommitSHA: published.CommitSHA, ConfigGeneration: state.ConfigGeneration,
+		})
+		if err != nil {
+			return err
+		}
+		if !eventExists {
+			result := tx.Exec(`INSERT INTO source_publication_outbox
+				(id,tenant_id,knowledge_base_id,data_source_id,snapshot_id,event_type,payload,status,created_at,config_generation,next_attempt_at)
+				VALUES(?,?,?,?,?,?,?::jsonb,'pending',?,?,?) ON CONFLICT(data_source_id,snapshot_id,event_type) DO NOTHING`,
+				event.ID, current.TenantID, current.KnowledgeBaseID, current.ID, published.ID, event.EventType, string(payload), now, state.ConfigGeneration, now)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 1 {
+				return nil
+			}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("source_publication_outbox").
+				Where("data_source_id=? AND snapshot_id=? AND event_type=?", current.ID, published.ID, event.EventType).
+				Take(&event).Error; err != nil {
+				return err
+			}
+		}
+		if event.Status == "delivered" {
+			return nil
+		}
+		if event.Status != "pending" && event.Status != "superseded" {
+			return fmt.Errorf("source Wiki notification has unsupported state %q", event.Status)
+		}
+		result := tx.Table("source_publication_outbox").Where("id=? AND status IN ?", event.ID, []string{"pending", "superseded"}).
+			Updates(map[string]any{
+				"payload": string(payload), "config_generation": state.ConfigGeneration, "status": "pending",
+				"attempt_count": 0, "last_error": "", "created_at": now, "delivered_at": nil, "next_attempt_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("source Wiki notification changed while being restored")
 		}
 		return nil
 	})

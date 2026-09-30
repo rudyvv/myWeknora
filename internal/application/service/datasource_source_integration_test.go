@@ -94,6 +94,7 @@ func TestManualSourceSyncRemainsPendingWhenQueueEnqueueFails(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "queued", stored.Status, "a transient enqueue failure must leave a recoverable pending run")
 	require.Empty(t, stored.ErrorMessage)
+	requireSourceRunPhase(t, f, log.ID, "queued")
 }
 
 func TestSourceSchedulerRecoversPendingManualTriggerAfterRestart(t *testing.T) {
@@ -347,6 +348,7 @@ func TestSourceManualTriggersSerializeAndCatchUpToLatestCommit(t *testing.T) {
 	logD, err := f.service.ManualSync(f.ctx, f.ds.ID)
 	require.NoError(t, err)
 	require.Equal(t, types.SyncLogStatusQueued, logD.Status)
+	requireSourceRunPhase(t, f, logD.ID, "waiting_for_catch_up")
 	coalesced, err := f.service.GetSyncLog(f.ctx, logC.ID)
 	require.NoError(t, err)
 	require.Equal(t, types.SyncLogStatusCanceled, coalesced.Status, "C should be replaced by the latest pending trigger D")
@@ -478,6 +480,7 @@ func TestSourceRetryableFailureKeepsDurableRecoveryAndVisibleResult(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, types.SyncLogStatusQueued, stored.Status, "retryable failure remains a durable queued run")
 	require.Contains(t, stored.ErrorMessage, "zero")
+	requireSourceRunPhase(t, f, log.ID, "retry_wait")
 
 	ds, err := f.service.GetDataSource(f.ctx, f.ds.ID)
 	require.NoError(t, err)
@@ -494,6 +497,25 @@ func TestSourceRetryableFailureKeepsDurableRecoveryAndVisibleResult(t *testing.T
 	require.Equal(t, 3, retained.Calls)
 	require.Equal(t, 4821, retained.Tokens)
 	require.Equal(t, 1, retained.Repairs, "source-run recovery must not reset a consumed T14 Wiki-attempt budget")
+}
+
+func requireSourceRunPhase(t *testing.T, f *javaSourceFixture, logID, want string) {
+	t.Helper()
+	logs, err := f.service.GetSyncLogs(f.ctx, f.ds.ID, 50, 0)
+	require.NoError(t, err)
+	for _, log := range logs {
+		if log.ID == logID {
+			encoded, err := json.Marshal(log)
+			require.NoError(t, err)
+			var response struct {
+				SourceRunPhase string `json:"source_run_phase"`
+			}
+			require.NoError(t, json.Unmarshal(encoded, &response))
+			require.Equal(t, want, response.SourceRunPhase, "public sync-log JSON should expose the durable phase")
+			return
+		}
+	}
+	require.FailNow(t, "sync log missing from public sync history", "log id %s", logID)
 }
 
 func TestSourceRetryRecoveryIncludesErrorAndPausedDataSources(t *testing.T) {
@@ -703,6 +725,66 @@ func TestSourceUnchangedTargetDoesNotRepublish(t *testing.T) {
 	require.Equal(t, before.Snapshot.ID, after.Snapshot.ID, "same target and effective processing/indexing identity must retain the existing publication")
 	require.EqualValues(t, 1, publications)
 	require.EqualValues(t, 1, signals)
+}
+
+func TestSourceWikiNotificationSurvivesCredentialRotationAndSameTargetSync(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	firstLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, firstLog)))
+	before, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+
+	var original struct {
+		ID               string `gorm:"column:id"`
+		SnapshotID       string `gorm:"column:snapshot_id"`
+		ConfigGeneration int64  `gorm:"column:config_generation"`
+		Status           string `gorm:"column:status"`
+	}
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("data_source_id=?", f.ds.ID).Take(&original).Error)
+	require.Equal(t, "pending", original.Status)
+
+	config, err := f.ds.ParseConfig()
+	require.NoError(t, err)
+	baseURL, ok := config.Credentials["base_url"].(string)
+	require.True(t, ok)
+	_, err = f.service.UpdateDataSourceCredentials(f.ctx, f.ds.ID, map[string]interface{}{
+		"base_url": baseURL, "access_token": "rotated-fixture-token",
+	})
+	require.NoError(t, err)
+	accepted, err := f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+	require.NoError(t, err)
+	require.Zero(t, accepted, "the old-generation event is fenced after the credential edit")
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("id=?", original.ID).Select("status").Scan(&original.Status).Error)
+	require.Equal(t, "superseded", original.Status)
+
+	secondLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, secondLog)))
+	after, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, before.Snapshot.ID, after.Snapshot.ID, "same-target sync must retain the published snapshot")
+
+	var current struct {
+		ConfigGeneration int64  `gorm:"column:config_generation"`
+		Status           string `gorm:"column:status"`
+	}
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("id=?", original.ID).Select("status, config_generation").Take(&current).Error)
+	require.Equal(t, "pending", current.Status, "a validated same-target run must restore durable notification work")
+	require.Greater(t, current.ConfigGeneration, original.ConfigGeneration)
+	var stateGeneration int64
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).Select("config_generation").Take(&stateGeneration).Error)
+	require.Equal(t, stateGeneration, current.ConfigGeneration)
+
+	accepted, err = f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, accepted)
+	var payload types.SourceWikiUpdatePayload
+	var op types.TaskPendingOp
+	require.NoError(t, f.db.Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, original.ID).Take(&op).Error)
+	require.NoError(t, json.Unmarshal(op.Payload, &payload))
+	require.Equal(t, original.SnapshotID, payload.SnapshotID)
+	require.Equal(t, current.ConfigGeneration, payload.ConfigGeneration)
 }
 
 func TestSourcePublicationOutboxAcceptsTypedPendingUpdateAtomically(t *testing.T) {

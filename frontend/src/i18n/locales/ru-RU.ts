@@ -913,6 +913,8 @@ export default {
     },
     logStatus: {
       queued: 'Ожидает синхронизации',
+      waiting_for_catch_up: 'Ожидает завершения текущей синхронизации',
+      retry_wait: 'Ожидает повторной попытки',
       running: 'Синхронизация',
       success: 'Успешно',
       partial: 'Частично',

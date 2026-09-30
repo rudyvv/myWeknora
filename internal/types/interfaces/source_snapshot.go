@@ -21,6 +21,7 @@ type SourceSnapshotRepository interface {
 	StageFile(context.Context, *types.SourceFile, *types.SourceFileVersion, []*types.Chunk) error
 	StageIndexes(context.Context, []*types.IndexInfo, map[string][]float32) error
 	Publish(context.Context, *types.SourceSnapshot, *types.DataSource, *types.KnowledgeBase, int) error
+	EnsurePublishedSourceWikiUpdate(context.Context, *types.DataSource, *types.SourceSnapshot) error
 	GetRun(context.Context, uint64, string, string) (*types.SourceRunResult, error)
 }
 

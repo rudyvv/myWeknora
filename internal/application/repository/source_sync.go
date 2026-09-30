@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -152,8 +153,8 @@ func sourceModeEnabled(ds *types.DataSource) bool {
 	if err != nil || config == nil {
 		return false
 	}
-	mode, ok := config.Settings["content_mode"].(string)
-	return ok && mode == "source"
+	mode, err := datasource.ContentMode(config)
+	return err == nil && mode == datasource.ContentModeSource
 }
 
 func (r *SyncLogRepository) invalidateDisabledSourceGeneration(tx *gorm.DB, state *sourceSyncStateRow, ds *types.DataSource) error {
@@ -217,12 +218,16 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 				return err
 			}
 		}
+		phase := "queued"
+		if derefSourceID(state.ActiveSyncLogID) != "" {
+			phase = "waiting_for_catch_up"
+		}
 		deliveryGeneration = state.PendingDeliveryGeneration + 1
 		state.PendingSyncLogID = stringPointer(log.ID)
 		state.PendingDeliveryGeneration = deliveryGeneration
 		state.PendingTrigger = trigger
 		if err := tx.Exec(`INSERT INTO source_sync_runs(sync_log_id,data_source_id,tenant_id,config_generation,delivery_generation,trigger,phase,updated_at)
-			VALUES(?,?,?,?,?,?,?,?)`, log.ID, ds.ID, ds.TenantID, state.ConfigGeneration, deliveryGeneration, trigger, "queued", time.Now().UTC()).Error; err != nil {
+			VALUES(?,?,?,?,?,?,?,?)`, log.ID, ds.ID, ds.TenantID, state.ConfigGeneration, deliveryGeneration, trigger, phase, time.Now().UTC()).Error; err != nil {
 			return err
 		}
 		shouldDispatch = state.ActiveSyncLogID == nil
@@ -372,7 +377,7 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 			return err
 		}
 		if err := tx.Table("source_sync_runs").Where("sync_log_id=?", logID).Updates(map[string]any{
-			"fencing_token": state.FencingToken, "phase": gorm.Expr("CASE WHEN phase IN ('queued','retry_wait') THEN 'running' ELSE phase END"), "updated_at": now,
+			"fencing_token": state.FencingToken, "phase": gorm.Expr("CASE WHEN phase IN ('queued','waiting_for_catch_up','retry_wait') THEN 'running' ELSE phase END"), "updated_at": now,
 		}).Error; err != nil {
 			return err
 		}
@@ -411,7 +416,7 @@ func (r *SyncLogRepository) coalesceSourceTriggerTx(tx *gorm.DB, state *sourceSy
 	state.PendingSyncLogID = stringPointer(log.ID)
 	state.PendingTrigger = run.Trigger
 	if err := tx.Table("source_sync_runs").Where("sync_log_id=?", log.ID).Updates(map[string]any{
-		"delivery_generation": state.PendingDeliveryGeneration, "updated_at": time.Now().UTC(),
+		"delivery_generation": state.PendingDeliveryGeneration, "phase": "waiting_for_catch_up", "updated_at": time.Now().UTC(),
 	}).Error; err != nil {
 		return err
 	}

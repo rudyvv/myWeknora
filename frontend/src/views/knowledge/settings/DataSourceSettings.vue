@@ -328,7 +328,7 @@ onBeforeUnmount(stopPolling)
                         @click="handleSync(ds)"
                       >
                         <t-icon name="refresh" :class="{ 'ds-icon-spin': isSyncRunning(ds) }" />
-                        {{ ds.latest_sync_log?.status === 'queued' ? t('datasource.logStatus.queued') : isSyncRunning(ds) ? t('datasource.logStatus.running') : t('datasource.syncNow') }}
+                        {{ ds.latest_sync_log?.status === 'queued' ? lastSyncStatusLabel(ds) : isSyncRunning(ds) ? t('datasource.logStatus.running') : t('datasource.syncNow') }}
                       </t-dropdown-item>
                       <t-dropdown-item @click="openLogs(ds)">
                         <t-icon name="root-list" /> {{ t('datasource.logs') }}

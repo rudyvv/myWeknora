@@ -185,6 +185,9 @@ func (r *SyncLogRepository) FindByID(ctx context.Context, id string) (*types.Syn
 		}
 		return nil, err
 	}
+	if err := r.attachSourceRunPhases(ctx, []*types.SyncLog{&log}); err != nil {
+		return nil, err
+	}
 	return &log, nil
 }
 
@@ -208,6 +211,9 @@ func (r *SyncLogRepository) FindByDataSource(ctx context.Context, dsID string, l
 		Find(&logs).Error; err != nil {
 		return nil, err
 	}
+	if err := r.attachSourceRunPhases(ctx, logs); err != nil {
+		return nil, err
+	}
 	return logs, nil
 }
 
@@ -227,7 +233,45 @@ func (r *SyncLogRepository) FindLatest(ctx context.Context, dsID string) (*types
 		}
 		return nil, err
 	}
+	if err := r.attachSourceRunPhases(ctx, []*types.SyncLog{&log}); err != nil {
+		return nil, err
+	}
 	return &log, nil
+}
+
+// attachSourceRunPhases adds coordinator state to public sync-log responses.
+// Older test databases and installations without the source-run migration
+// retain their historical response shape.
+func (r *SyncLogRepository) attachSourceRunPhases(ctx context.Context, logs []*types.SyncLog) error {
+	if len(logs) == 0 || !r.db.Migrator().HasTable("source_sync_runs") {
+		return nil
+	}
+	ids := make([]string, 0, len(logs))
+	for _, log := range logs {
+		if log != nil && log.ID != "" {
+			ids = append(ids, log.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var phases []struct {
+		SyncLogID string `gorm:"column:sync_log_id"`
+		Phase     string `gorm:"column:phase"`
+	}
+	if err := r.db.WithContext(ctx).Table("source_sync_runs").Select("sync_log_id, phase").Where("sync_log_id IN ?", ids).Scan(&phases).Error; err != nil {
+		return err
+	}
+	byID := make(map[string]string, len(phases))
+	for _, phase := range phases {
+		byID[phase.SyncLogID] = phase.Phase
+	}
+	for _, log := range logs {
+		if log != nil {
+			log.SourceRunPhase = byID[log.ID]
+		}
+	}
+	return nil
 }
 
 // HasRunningSync checks if a data source has any sync currently in "running" status.

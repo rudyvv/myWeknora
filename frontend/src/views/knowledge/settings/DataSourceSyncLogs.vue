@@ -85,6 +85,8 @@ const stats = computed(() => {
 function statusIcon(status: string) {
   switch (status) {
     case 'queued': return 'time'
+    case 'waiting_for_catch_up': return 'time'
+    case 'retry_wait': return 'refresh'
     case 'success': return 'check-circle-filled'
     case 'running': return 'loading'
     case 'failed': return 'close-circle-filled'
@@ -97,6 +99,8 @@ function statusIcon(status: string) {
 function statusColor(status: string) {
   switch (status) {
     case 'queued': return 'var(--td-text-color-placeholder)'
+    case 'waiting_for_catch_up': return 'var(--td-warning-color)'
+    case 'retry_wait': return 'var(--td-brand-color)'
     case 'success': return 'var(--td-success-color)'
     case 'running': return 'var(--td-brand-color)'
     case 'failed': return 'var(--td-error-color)'

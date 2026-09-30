@@ -161,6 +161,10 @@ type SyncLog struct {
 	// Sync status: running, success, partial, failed, canceled
 	Status string `json:"status" gorm:"type:varchar(32);index"`
 
+	// Durable source-run phase is joined from the source coordinator for API
+	// responses; it is not a column on sync_logs.
+	SourceRunPhase string `json:"source_run_phase,omitempty" gorm:"-"`
+
 	// Sync start time
 	StartedAt time.Time `json:"started_at"`
 

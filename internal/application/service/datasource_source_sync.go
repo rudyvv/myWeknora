@@ -211,6 +211,9 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			published.RepositoryURL == snapshot.RepositoryURL && published.ManifestDigest == snapshot.ManifestDigest &&
 			published.RulesVersion == snapshot.RulesVersion && published.ProcessingVersion == snapshot.ProcessingVersion &&
 			published.EmbeddingVersion == embeddingVersion {
+			if err := s.sourceSnapshots.EnsurePublishedSourceWikiUpdate(ctx, ds, published); err != nil {
+				return err
+			}
 			published.DetectedCommitSHA, published.TargetCommitSHA = repository.CommitSHA, repository.CommitSHA
 			published.PublicationChecked = true
 			result.Source = previous
