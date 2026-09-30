@@ -113,17 +113,15 @@ class VueHTTPContract(unittest.TestCase):
             return response.code, json.load(response)
 
     def parse(self, raw, maximum=128):
-        return self.request('/v1/parse', {
+        """Retry a transient worker-capacity response without changing request()."""
+        body = {
             'path': 'src/BookingPanel.vue', 'language': 'vue',
             'sha256': hashlib.sha256(raw).hexdigest(),
-            'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': maximum})
-
-    def parse_after_transient_capacity(self, raw, maximum=128):
-        """Retry only the bounded post-response cleanup window, never parser errors."""
+            'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': maximum}
         deadline = time.monotonic() + 4
         delay = 0.025
         while True:
-            status, parsed = self.parse(raw, maximum)
+            status, parsed = self.request('/v1/parse', body)
             if (status != 429 or not isinstance(parsed, dict) or
                     parsed.get('error') != 'parser capacity reached'):
                 return status, parsed
@@ -133,13 +131,13 @@ class VueHTTPContract(unittest.TestCase):
             time.sleep(min(delay, remaining))
             delay = min(delay * 2, 0.25)
 
-    def test_capacity_retry_returns_parser_errors_without_retrying(self):
+    def test_parse_retries_capacity_but_returns_parser_errors_without_retrying(self):
         parser_error = {'error': 'source parsing failed'}
-        with patch.object(self, 'parse', side_effect=[
-                (429, {'error': 'parser capacity reached'}), (422, parser_error), (200, {})]) as parse:
-            status, result = self.parse_after_transient_capacity(b'<script></script>')
+        with patch.object(self, 'request', side_effect=[
+                (429, {'error': 'parser capacity reached'}), (422, parser_error), (200, {})]) as request:
+            status, result = self.parse(b'<script></script>')
         self.assertEqual((status, result), (422, parser_error))
-        self.assertEqual(parse.call_count, 2, 'a parser error must not be retried')
+        self.assertEqual(request.call_count, 2, 'retry only capacity responses, never parser errors')
 
     def test_vue_health_and_sfc_artifact_share_the_verified_fingerprint(self):
         status, health = self.request('/health')
@@ -568,7 +566,7 @@ class VueHTTPContract(unittest.TestCase):
         )
         for raw in cases:
             with self.subTest(source=raw):
-                status, parsed = self.parse_after_transient_capacity(raw)
+                status, parsed = self.parse(raw)
                 self.assertEqual(status, 200, parsed)
                 self.assertEqual(parsed['quality'], 'unknown_preprocess')
                 self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
