@@ -122,6 +122,14 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.Equal(t, snapshot.ID, mapperRelation.SnapshotID)
 	var xmlVersion types.SourceFileVersion
 	require.NoError(t, f.db.Where("source_file_id=? AND snapshot_id=?", xmlFile.ID, snapshot.ID).Take(&xmlVersion).Error)
+	mapperTarget, err := f.knowledge.GetSourceFile(f.ctx, mapperRelation.ToFileID, mapperRelation.ToVersionID)
+	require.NoError(t, err, "a certain cross-file edge must resolve through the restricted fixed-version source read")
+	require.Equal(t, snapshot.ID, mapperTarget.SnapshotID)
+	require.Equal(t, xmlVersion.ID, mapperTarget.FileVersionID)
+	var mapperTargetRange types.SourceRange
+	require.NoError(t, json.Unmarshal(mapperRelation.ToRange, &mapperTargetRange))
+	require.LessOrEqual(t, mapperTargetRange.EndByte, len(mapperTarget.Content))
+	require.Contains(t, mapperTarget.Content[mapperTargetRange.StartByte:mapperTargetRange.EndByte], `<select id="getPushSchedule"`)
 	var storedFacts []types.ParsedSourceFact
 	require.NoError(t, json.Unmarshal(xmlVersion.Facts, &storedFacts))
 	factKinds := map[string]bool{}
@@ -341,6 +349,8 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.Contains(t, oldPinned.Relations, mapperRelation)
 	_, err = f.knowledge.GetSourceFile(f.ctx, javaFile.ID)
 	require.Error(t, err, "the empty current publication must not expose a removed source file")
+	_, err = f.knowledge.GetSourceFile(f.ctx, mapperRelation.ToFileID, mapperRelation.ToVersionID)
+	require.Error(t, err, "the former cross-file relation target must not bypass the published read scope after deletion")
 }
 
 func TestMalformedMyBatisXMLFallsBackAndPublishesReadableSnapshot(t *testing.T) {

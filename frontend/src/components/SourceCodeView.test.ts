@@ -20,6 +20,7 @@ test('published source is escaped, read-only, and links the selected symbol to t
   const compiled = ts.transpileModule(compileScript(descriptor, { id: path, inlineTemplate: true }).content,
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const requests: Array<[string, string | undefined, string | undefined]> = []
+  let rejectTarget = false
   const fileData = { knowledge_id: 'file-one', snapshot_id: 'snapshot-one', file_version_id: 'version-one',
     project_id: '123', commit_sha: 'a'.repeat(40), repository_url: 'https://gitlab.local/team/repo',
     path: 'src/Service.java', encoding: 'utf-8', quality: 'structural', parser_version: 'java-pack-locked',
@@ -27,13 +28,20 @@ test('published source is escaped, read-only, and links the selected symbol to t
     symbols: [{ kind: 'method', name: 'getPushSchedule', qualified_name: 'Service.getPushSchedule', range: { start_line: 2, end_line: 2 } }],
     facts: [{ kind: 'java_mapper_method', method_name: 'getPushSchedule', quality: 'structural', range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 } }],
     diagnostics: [{ code: 'statement_id_duplicate', message: 'Mapper statement id is duplicated', range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 } }],
-    relations: [{ id: 'relation-one', kind: 'mapper_statement', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'getPushSchedule', from_range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 }, to_file_id: 'file-one', to_version_id: 'version-one', to_path: 'src/Service.java', to_key: 'statement', to_range: { start_byte: 21, end_byte: 35, start_line: 2, end_line: 2 }, determinacy: 'certain', quality: 'structural' }],
+    relations: [
+      { id: 'relation-one', kind: 'mapper_statement', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'getPushSchedule', from_range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 }, to_file_id: 'file-one', to_version_id: 'version-one', to_path: 'src/Service.java', to_key: 'statement', to_range: { start_byte: 21, end_byte: 35, start_line: 2, end_line: 2 }, determinacy: 'certain', quality: 'structural' },
+      { id: 'relation-two', kind: 'mapper_statement', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'getPushSchedule', from_range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 }, to_file_id: 'file-xml', to_version_id: 'version-xml', to_path: 'src/mapper/ServiceMapper.xml', to_key: 'statement', to_range: { start_byte: 42, end_byte: 90, start_line: 3, end_line: 3 }, determinacy: 'certain', quality: 'structural' },
+    ],
     relations_truncated: true, relations_next_cursor: 'opaque-next' }
   const module = { exports: {} as any }
   new Function('require', 'module', 'exports', compiled)((name: string) => {
     if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence read') } }
     if (name === '@/api/knowledge-base') return { async getSourceFile(id: string, versionID?: string, cursor?: string) {
       requests.push([id, versionID, cursor])
+      if (id === 'file-xml') {
+        if (rejectTarget) throw new Error('source file is no longer readable')
+        return { data: { ...fileData, knowledge_id: id, file_version_id: versionID, path: 'src/mapper/ServiceMapper.xml', content: '<mapper>\n  <sql id="other">SELECT 0</sql>\n  <select id="getPushSchedule">SELECT 1</select>\n</mapper>', relations: [], relations_truncated: false, relations_next_cursor: '' } }
+      }
       return { data: cursor ? { ...fileData, relations: [{ ...fileData.relations[0], id: 'relation-two' }], relations_truncated: false, relations_next_cursor: '' } : { ...fileData, knowledge_id: id } }
     } }
     return require(name)
@@ -65,6 +73,26 @@ test('published source is escaped, read-only, and links the selected symbol to t
     for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
     assert.deepEqual(requests[1], ['file-one', 'version-one', 'opaque-next'])
     assert.equal(host.querySelectorAll('.source-relations li').length, 2)
+    const crossFile = Array.from(host.querySelectorAll<HTMLButtonElement>('.source-relations button')).find(b => b.textContent?.includes('src/mapper/ServiceMapper.xml'))
+    assert.ok(crossFile, 'cross-file relation should offer a fixed-version target-range action')
+    crossFile.click()
+    for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
+    assert.deepEqual(requests[2], ['file-xml', 'version-xml', undefined])
+    assert.ok(host.textContent?.includes('src/mapper/ServiceMapper.xml'))
+    assert.ok(host.querySelector('[data-line="3"]')?.classList.contains('selected'))
+    const back = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('返回来源文件'))
+    assert.ok(back)
+    back.click()
+    for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
+    assert.ok(host.textContent?.includes('src/Service.java'))
+    rejectTarget = true
+    const deniedCrossFile = Array.from(host.querySelectorAll<HTMLButtonElement>('.source-relations button')).find(b => b.textContent?.includes('src/mapper/ServiceMapper.xml'))
+    assert.ok(deniedCrossFile)
+    deniedCrossFile.click()
+    for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
+    assert.ok(host.querySelector('[role="alert"]')?.textContent?.includes('目标文件不可读取'))
+    assert.ok(host.textContent?.includes('src/Service.java'), 'failed target reads must preserve the source and must not reveal target content')
+    assert.ok(!host.textContent?.includes('SELECT 1'))
     props.fileVersionId = 'different-version'
     for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
     assert.ok(host.querySelector('[role="alert"]'))

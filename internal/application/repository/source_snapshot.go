@@ -106,26 +106,68 @@ func (r *sourceSnapshotRepository) StageRelations(ctx context.Context, tenant ui
 		if err := tx.Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenant, sourceID, snapshotID).Delete(&types.SourceCodeRelation{}).Error; err != nil {
 			return err
 		}
+		type endpointKey struct {
+			fileID    string
+			versionID string
+			path      string
+		}
+		validEndpoints := make(map[endpointKey]struct{})
+		if len(relations) > 0 {
+			fileIDs := make([]string, 0, len(relations)*2)
+			versionIDs := make([]string, 0, len(relations)*2)
+			seenFileIDs := make(map[string]struct{}, len(relations)*2)
+			seenVersionIDs := make(map[string]struct{}, len(relations)*2)
+			addEndpointIDs := func(fileID, versionID string) {
+				if fileID != "" {
+					if _, ok := seenFileIDs[fileID]; !ok {
+						seenFileIDs[fileID] = struct{}{}
+						fileIDs = append(fileIDs, fileID)
+					}
+				}
+				if versionID != "" {
+					if _, ok := seenVersionIDs[versionID]; !ok {
+						seenVersionIDs[versionID] = struct{}{}
+						versionIDs = append(versionIDs, versionID)
+					}
+				}
+			}
+			for _, relation := range relations {
+				addEndpointIDs(relation.FromFileID, relation.FromVersionID)
+				addEndpointIDs(relation.ToFileID, relation.ToVersionID)
+			}
+			var endpoints []struct {
+				SourceFileID  string
+				FileVersionID string
+				Path          string
+			}
+			if len(fileIDs) > 0 && len(versionIDs) > 0 {
+				if err := tx.Table("source_snapshot_members sm").
+					Select("sm.source_file_id, sm.file_version_id, sm.path").
+					Joins("JOIN source_file_versions sv ON sv.id=sm.file_version_id AND sv.source_file_id=sm.source_file_id").
+					Joins("JOIN source_files sf ON sf.id=sm.source_file_id").
+					Where("sm.snapshot_id=? AND sm.status='parsed' AND sm.source_file_id IN ? AND sm.file_version_id IN ? AND sv.snapshot_id=sm.snapshot_id AND sf.tenant_id=? AND sf.data_source_id=? AND sf.knowledge_base_id=?", snapshotID, fileIDs, versionIDs, tenant, sourceID, snapshot.KnowledgeBaseID).
+					Find(&endpoints).Error; err != nil {
+					return err
+				}
+			}
+			for _, endpoint := range endpoints {
+				validEndpoints[endpointKey{fileID: endpoint.SourceFileID, versionID: endpoint.FileVersionID, path: endpoint.Path}] = struct{}{}
+			}
+		}
 		for i := range relations {
 			relation := &relations[i]
 			relation.TenantID, relation.DataSourceID, relation.SnapshotID = tenant, sourceID, snapshotID
 			if relation.FromFileID == "" || relation.FromVersionID == "" || relation.FromPath == "" {
 				return fmt.Errorf("source relation has no verified source endpoint")
 			}
-			var fromCount int64
-			if err := tx.Table("source_snapshot_members sm").Joins("JOIN source_file_versions sv ON sv.id=sm.file_version_id").
-				Joins("JOIN source_files sf ON sf.id=sm.source_file_id").
-				Where("sm.snapshot_id=? AND sm.path=? AND sm.status='parsed' AND sm.source_file_id=? AND sm.file_version_id=? AND sv.snapshot_id=sm.snapshot_id AND sf.tenant_id=? AND sf.data_source_id=? AND sf.knowledge_base_id=?", snapshotID, relation.FromPath, relation.FromFileID, relation.FromVersionID, tenant, sourceID, snapshot.KnowledgeBaseID).Count(&fromCount).Error; err != nil || fromCount != 1 {
+			if _, ok := validEndpoints[endpointKey{fileID: relation.FromFileID, versionID: relation.FromVersionID, path: relation.FromPath}]; !ok {
 				return fmt.Errorf("source relation origin is outside its immutable snapshot")
 			}
 			if relation.ToFileID != "" || relation.ToVersionID != "" || relation.ToPath != "" {
 				if relation.ToFileID == "" || relation.ToVersionID == "" || relation.ToPath == "" {
 					return fmt.Errorf("source relation target endpoint is incomplete")
 				}
-				var toCount int64
-				if err := tx.Table("source_snapshot_members sm").Joins("JOIN source_file_versions sv ON sv.id=sm.file_version_id").
-					Joins("JOIN source_files sf ON sf.id=sm.source_file_id").
-					Where("sm.snapshot_id=? AND sm.path=? AND sm.status='parsed' AND sm.source_file_id=? AND sm.file_version_id=? AND sv.snapshot_id=sm.snapshot_id AND sf.tenant_id=? AND sf.data_source_id=? AND sf.knowledge_base_id=?", snapshotID, relation.ToPath, relation.ToFileID, relation.ToVersionID, tenant, sourceID, snapshot.KnowledgeBaseID).Count(&toCount).Error; err != nil || toCount != 1 {
+				if _, ok := validEndpoints[endpointKey{fileID: relation.ToFileID, versionID: relation.ToVersionID, path: relation.ToPath}]; !ok {
 					return fmt.Errorf("source relation target is outside its immutable snapshot")
 				}
 			} else if relation.Determinacy == "uncertain" && relation.ResolutionReason == "" {

@@ -8,10 +8,13 @@ const file = ref<SourceFileView | null>(null)
 const loading = ref(false)
 const relationsLoading = ref(false)
 const relationsFailed = ref(false)
+const targetLoading = ref(false)
+const targetFailed = ref(false)
 const failed = ref(false)
 const page = ref(0)
 const symbolQuery = ref('')
 const selected = ref<SourceRange | null>(null)
+const navigationStack = ref<Array<{ file: SourceFileView; selected: SourceRange | null }>>([])
 let requestGeneration = 0
 const pageSize = 200
 const lines = computed(() => file.value?.content.split('\n') || [])
@@ -43,6 +46,51 @@ function factLabel(fact: SourceFact) {
 function relationLabel(relation: SourceCodeRelation) {
   return relation.to_key ? `${relation.from_key} → ${relation.to_key}` : relation.from_key
 }
+function hasNavigableRange(range?: SourceRange) {
+  return !!range && range.end_byte > range.start_byte && range.start_line > 0 && range.end_line >= range.start_line
+}
+function canOpenRelationTarget(relation: SourceCodeRelation) {
+  return relation.determinacy === 'certain' && !!relation.to_file_id && !!relation.to_version_id && !!relation.to_path && hasNavigableRange(relation.to_range)
+}
+async function openRelationTarget(relation: SourceCodeRelation) {
+  const current = file.value
+  if (!current || !canOpenRelationTarget(relation) || targetLoading.value) return
+  const generation = ++requestGeneration
+  targetLoading.value = true
+  targetFailed.value = false
+  relationsLoading.value = false
+  relationsFailed.value = false
+  try {
+    // Resolve only by the immutable file/version IDs carried by the relation;
+    // the backend remains responsible for enforcing published tenant scope.
+    const response = await getSourceFile(relation.to_file_id, relation.to_version_id)
+    if (generation !== requestGeneration) return
+    const target = response.data
+    if (target.knowledge_id !== relation.to_file_id || target.file_version_id !== relation.to_version_id || target.path !== relation.to_path) {
+      targetFailed.value = true
+      return
+    }
+    navigationStack.value.push({ file: current, selected: selected.value })
+    file.value = target
+    selectSymbol(relation.to_range)
+  } catch {
+    if (generation === requestGeneration) targetFailed.value = true
+  } finally {
+    if (generation === requestGeneration) targetLoading.value = false
+  }
+}
+function returnToPreviousFile() {
+  const previous = navigationStack.value.pop()
+  if (!previous) return
+  requestGeneration++
+  targetLoading.value = false
+  targetFailed.value = false
+  relationsLoading.value = false
+  relationsFailed.value = false
+  file.value = previous.file
+  selected.value = previous.selected
+  page.value = previous.selected ? Math.floor((previous.selected.start_line - 1) / pageSize) : 0
+}
 async function loadMoreRelations() {
   const current = file.value
   if (!current?.relations_next_cursor || relationsLoading.value) return
@@ -71,6 +119,9 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
   file.value = null
   relationsLoading.value = false
   relationsFailed.value = false
+  targetLoading.value = false
+  targetFailed.value = false
+  navigationStack.value = []
   selected.value = null
   page.value = 0
   failed.value = false
@@ -93,6 +144,7 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
     <p v-if="loading" role="status">正在读取已发布源码…</p>
     <p v-else-if="failed" role="alert">源码不可读取，请确认同步已发布且仍有访问权限。</p>
     <template v-else-if="file">
+      <button v-if="navigationStack.length" type="button" @click="returnToPreviousFile">返回来源文件</button>
       <div class="source-details">
         <strong>{{ file.path }}</strong>
         <span>仓库：{{ file.repository_url }} · 项目 {{ file.project_id }}</span>
@@ -132,16 +184,20 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
           <li v-for="relation in file.relations" :key="relation.id">
             <code>{{ relation.kind }}</code> · {{ relationLabel(relation) }} · {{ relation.determinacy }} / {{ relation.quality }}
             <span v-if="relation.resolution_reason"> · {{ relation.resolution_reason }}</span>
-            <button v-if="relation.to_file_id === file.knowledge_id && relation.to_range && relation.to_range.end_byte > relation.to_range.start_byte" type="button" @click="selectSymbol(relation.to_range)">
+            <button v-if="relation.to_file_id === file.knowledge_id && relation.to_version_id === file.file_version_id && hasNavigableRange(relation.to_range)" type="button" @click="selectSymbol(relation.to_range)">
               跳到目标范围 L{{ relation.to_range.start_line }}–{{ relation.to_range.end_line }}
             </button>
-            <span v-else-if="relation.to_file_id"> · {{ relation.to_path }}（关系证据按当前读取范围提供）</span>
+            <button v-else-if="canOpenRelationTarget(relation)" type="button" :disabled="targetLoading" @click="openRelationTarget(relation)">
+              {{ targetLoading ? '正在读取目标文件…' : `打开 ${relation.to_path} 目标范围 L${relation.to_range.start_line}–${relation.to_range.end_line}` }}
+            </button>
+            <span v-else-if="relation.to_file_id"> · {{ relation.to_path }}（目标范围暂不可直接读取）</span>
           </li>
         </ul>
         <button v-if="file.relations_truncated" type="button" :disabled="relationsLoading" @click="loadMoreRelations">
           {{ relationsLoading ? '正在读取关系…' : '读取更多关系' }}
         </button>
         <p v-if="relationsFailed" role="alert">后续关系读取失败；当前文件证据仍保留，可重试。</p>
+        <p v-if="targetFailed" role="alert">目标文件不可读取；来源文件仍保留，且不会绕过访问限制。</p>
       </section>
       <nav aria-label="源码行分页">
         <button type="button" :disabled="page === 0" @click="page--">上一页</button>
