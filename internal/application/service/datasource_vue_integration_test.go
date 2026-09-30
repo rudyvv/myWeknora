@@ -348,20 +348,29 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	narrowRegion := findScriptRegion(narrowView)
 	require.NotNil(t, narrowRegion)
 	require.Equal(t, "./api.js", narrowRegion.ExternalSource)
-	require.Equal(t, "unchecked", narrowRegion.ExternalStatus,
-		"a one-file read must not reveal whether an out-of-scope target exists")
+	require.Equal(t, "unavailable", narrowRegion.ExternalStatus,
+		"a one-file read must explain that an out-of-scope target is unavailable")
 	require.Empty(t, narrowRegion.ResolvedPath)
+	missingNarrowView, err := f.knowledge.GetSourceFile(f.ctx, missingID)
+	require.NoError(t, err)
+	missingNarrowRegion := findScriptRegion(missingNarrowView)
+	require.NotNil(t, missingNarrowRegion)
+	require.Equal(t, "unavailable", missingNarrowRegion.ExternalStatus,
+		"an absent target must have the same public status as an out-of-scope target")
+	require.Equal(t, narrowRegion.ExternalStatus, missingNarrowRegion.ExternalStatus,
+		"source readers must not learn whether the target exists outside their scope")
+	require.Empty(t, missingNarrowRegion.ResolvedPath)
 	selfClosingNarrowView, err := f.knowledge.GetSourceFile(f.ctx, selfClosingExternalID)
 	require.NoError(t, err)
 	selfClosingNarrowRegion := findScriptRegion(selfClosingNarrowView)
 	require.NotNil(t, selfClosingNarrowRegion)
-	require.Equal(t, "unchecked", selfClosingNarrowRegion.ExternalStatus)
+	require.Equal(t, "unavailable", selfClosingNarrowRegion.ExternalStatus)
 	require.Empty(t, selfClosingNarrowRegion.ResolvedPath)
 	crossDirectoryNarrowView, err := f.knowledge.GetSourceFile(f.ctx, crossDirectoryExternalID)
 	require.NoError(t, err)
 	crossDirectoryNarrowRegion := findScriptRegion(crossDirectoryNarrowView)
 	require.NotNil(t, crossDirectoryNarrowRegion)
-	require.Equal(t, "unchecked", crossDirectoryNarrowRegion.ExternalStatus,
+	require.Equal(t, "unavailable", crossDirectoryNarrowRegion.ExternalStatus,
 		"path normalization does not bypass the caller's source-file scope")
 	require.Empty(t, crossDirectoryNarrowRegion.ResolvedPath)
 
@@ -402,8 +411,8 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	require.NoError(t, err)
 	missingRegion := findScriptRegion(missingView)
 	require.NotNil(t, missingRegion)
-	require.Equal(t, "unchecked", missingRegion.ExternalStatus,
-		"missing and out-of-scope external targets must remain indistinguishable")
+	require.Equal(t, "unavailable", missingRegion.ExternalStatus,
+		"a missing external target must be explicitly reported as unavailable")
 	require.Empty(t, missingRegion.ResolvedPath)
 
 	unknownView, err := f.knowledge.GetSourceFile(f.ctx, unknownID)
@@ -417,8 +426,8 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	require.NoError(t, err)
 	deletedTargetRegion := findScriptRegion(deletedTargetView)
 	require.NotNil(t, deletedTargetRegion)
-	require.Equal(t, "unchecked", deletedTargetRegion.ExternalStatus,
-		"a soft-deleted source target is no longer readable and must not be resolved")
+	require.Equal(t, "unavailable", deletedTargetRegion.ExternalStatus,
+		"a soft-deleted source target must be reported as unavailable and not resolved")
 	require.Empty(t, deletedTargetRegion.ResolvedPath)
 }
 

@@ -6,7 +6,7 @@ export interface SourceRange { start_byte: number; end_byte: number; start_line:
 export interface SourceRegion {
   kind: 'template' | 'script' | 'style' | 'custom'; language?: string;
   quality: 'structural' | 'syntax_error' | 'degraded' | 'text_fallback' | 'unknown_preprocess';
-  external_source?: string; external_status?: 'unchecked' | 'rejected' | 'resolved'; resolved_path?: string;
+  external_source?: string; external_status?: 'unchecked' | 'rejected' | 'unavailable' | 'resolved'; resolved_path?: string;
 }
 export interface SourceFileView {
   knowledge_id: string; snapshot_id: string; file_version_id: string; project_id: string;

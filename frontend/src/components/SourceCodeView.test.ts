@@ -38,7 +38,7 @@ test('published source is escaped, read-only, and links the selected symbol to t
         path: broken ? 'src/syntax_error.py' : 'src/Service.java', encoding: 'utf-8', quality: broken ? 'syntax_error' : 'structural', parser_version: 'java-pack-locked',
         content: broken ? 'async def broken(:\r\n    return "degraded_python_marker 中文😀"\r\n' : 'class Service {\r\n String getPushSchedule() { return "<img src=x onerror=alert(1)>"; }\r\n}',
         symbols: broken ? [] : [{ kind: 'method', name: 'getPushSchedule', qualified_name: 'Service.getPushSchedule', range: { start_line: 2, end_line: 2 },
-          region: { kind: 'script', language: 'ts', quality: 'structural' } }] } }
+          region: { kind: 'script', language: 'ts', quality: 'structural', external_source: './api.js', external_status: 'unavailable' } }] } }
     } }
     if (name === '@/components/SourceRegionBadge.vue') return badgeModule
     return require(name)
@@ -58,6 +58,8 @@ test('published source is escaped, read-only, and links the selected symbol to t
     const symbol = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Service.getPushSchedule'))
     assert.ok(symbol)
     assert.ok(symbol.textContent?.includes('script · ts · 结构解析'))
+    assert.ok(symbol.textContent?.includes('当前不可读取或未关联'))
+    assert.ok(!symbol.textContent?.includes('unavailable'))
     symbol.click()
     await nextTick()
     assert.equal(host.querySelector('a')?.getAttribute('href'), `https://gitlab.local/team/repo/-/blob/${'a'.repeat(40)}/src/Service.java#L2-2`)

@@ -25,6 +25,14 @@ class SFCAttributeLimitError(Exception):
     """A bounded, source-free rejection for oversized SFC block attributes."""
 
 
+def _sfc_node_environment():
+    environment = dict(os.environ)
+    environment.pop('NODE_OPTIONS', None)
+    environment.pop('NODE_PATH', None)
+    environment['NODE_ENV'] = 'development'
+    return environment
+
+
 def load_sfc_runtime():
     """Advertise Vue only when the locked Node executable and parser are usable."""
     root = Path(__file__).resolve().parent / 'sfc'
@@ -38,14 +46,10 @@ def load_sfc_runtime():
         node = os.environ.get('SOURCE_PARSER_NODE') or shutil.which('node')
         if not node or not (root / 'parse_sfc.cjs').is_file():
             return None
-        environment = dict(os.environ)
-        environment.pop('NODE_OPTIONS', None)
-        environment.pop('NODE_PATH', None)
-        environment['NODE_ENV'] = 'development'
         result = subprocess.run(
             [node, str(root / 'parse_sfc.cjs'), '--health'], cwd=root,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=3, check=False, text=True, encoding='utf-8', env=environment)
+            timeout=3, check=False, text=True, encoding='utf-8', env=_sfc_node_environment())
         health = json.loads(result.stdout) if result.returncode == 0 else {}
         if (health.get('node_version') != 'v' + lock.get('node_version', '') or
                 health.get('compiler_version') != lock.get('compiler_version') or
@@ -242,16 +246,12 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     text = raw.decode('utf-8')
     digest = hashlib.sha256(raw).hexdigest()
     request = json.dumps({'path': path, 'source': text, 'sha256': digest}, ensure_ascii=False)
-    environment = dict(os.environ)
-    environment.pop('NODE_OPTIONS', None)
-    environment.pop('NODE_PATH', None)
-    environment['NODE_ENV'] = 'development'
     try:
         result = subprocess.run(
             [node_runtime['node'], str(Path(node_runtime['root']) / 'parse_sfc.cjs')],
             cwd=node_runtime['root'], input=request, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, check=False, text=True,
-            encoding='utf-8', env=environment)
+            encoding='utf-8', env=_sfc_node_environment())
         response = json.loads(result.stdout) if result.stdout else {}
     except (OSError, ValueError, subprocess.SubprocessError):
         raise RuntimeError('SFC parser unavailable') from None

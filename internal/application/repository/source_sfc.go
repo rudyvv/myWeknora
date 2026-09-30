@@ -13,7 +13,7 @@ import (
 
 // enrichSFCReferences resolves only literal relative script references that
 // are members of this exact snapshot and pass the caller's current file/tag
-// scope. Missing and out-of-scope targets intentionally remain indistinguishable.
+// scope. Missing and out-of-scope targets intentionally share the unavailable status.
 func enrichSFCReferences(ctx context.Context, db *gorm.DB, file *types.SourceFileView) error {
 	if file == nil || !strings.EqualFold(path.Ext(file.Path), ".vue") || len(file.Symbols) == 0 {
 		return nil
@@ -38,7 +38,7 @@ func enrichSFCReferences(ctx context.Context, db *gorm.DB, file *types.SourceFil
 			if known {
 				region.ExternalStatus, region.ResolvedPath = "resolved", target
 			} else {
-				region.ExternalStatus, region.ResolvedPath = "unchecked", ""
+				region.ExternalStatus, region.ResolvedPath = "unavailable", ""
 			}
 			continue
 		}
@@ -58,7 +58,7 @@ func enrichSFCReferences(ctx context.Context, db *gorm.DB, file *types.SourceFil
 		if found {
 			region.ExternalStatus, region.ResolvedPath = "resolved", target
 		} else {
-			region.ExternalStatus, region.ResolvedPath = "unchecked", ""
+			region.ExternalStatus, region.ResolvedPath = "unavailable", ""
 		}
 	}
 	encoded, err := json.Marshal(symbols)
