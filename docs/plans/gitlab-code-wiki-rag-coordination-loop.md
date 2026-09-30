@@ -69,3 +69,5 @@ T10 15a289e0 root验证完成：source/modelcontext、真实PG14.850s、新引�
 2026-09-30 T09 0a595184 双轴 Sol/high 审查完：Standards ADR-0008 硬2（NODE_ENV=production 丢 SFC 告警、重复块 lang 被清空）/判断1 P3；Spec2 P2（自闭合顶层块被 invalid compiler range 拒绝、合法仓库内 ../ 相对外置 script 被预拒绝）。root 锁定 Node24 官方 SFC8/8、Go source/repository 两包 PASS，且自闭合反例实测失败；见 gitlab-code-wiki-rag-t09-0a595184-review.md。四项必修已派回原 T09 Luna/xhigh，不集成/关 #17。
 
 2026-09-30 T10 1d8c9978 双轴 Sol/high 审查完：Standards 硬0/判断1 P3，旧逐边查询已批量修复；Spec1 P2：从 XML statement 反向看 Java Mapper 时 UI 与 Agent 总选 to_* 自指 XML，不可读 from_* 固定位置。详见 gitlab-code-wiki-rag-t10-1d8c9978-review.md；已派回原 T10 Luna/xhigh，要求 UI/Agent/真实PG 双向回归，不集成/关 #18。root Go 独立运行仍在进行，结果稍后记录。额中断后用户确认恢复，原三个执行对话已按 Luna/xhigh 唤醒且紧凑快照均 active：T06 982c32f0-0d27-4566-aeb6-7b22f1a98238:2、T09 efd2c4b2-fa2e-4eea-97f7-aff026c3423f:2、T10 3eea0c77-0b5f-4fd7-b4e0-4cae44105dca:2。三票均待新完整干净SHA，父8/22。
+
+2026-09-30 root 独立 T10 Go source/modelcontext/repository 三包 PASS，具体时长已写 t10-1d8c9978-review.md。三个审查文档及协调记录已推送功能分支 d190d54c，T06/T09/T10 各自新审查摘要已通过登录的 GitHub 浏览器分别评论到 #14/#17/#18，票均保持 open。T06 活跃回报两项新增 PG 回归先红后绿、继续广泛套件；T09/T10 active。继续待各自新完整干净 SHA，不重复审或派票。

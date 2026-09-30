@@ -14,4 +14,4 @@
 
 ## 验证状态
 
-Worker 报告针对 245 条关系的单次快照成员批量读取、源文件固定版本阅读与删除目标的独立 PostgreSQL 集成测试、前端渲染与类型检查通过；Root 对上述实现路径静态核验，正在独立跑 Go source/modelcontext/repository 包。结果出炉前不记 Root PASS；现有 worker 证据无法覆盖反向 XML→Java 导航。
+Worker 报告针对 245 条关系的单次快照成员批量读取、源文件固定版本阅读与删除目标的独立 PostgreSQL 集成测试、前端渲染与类型检查通过。Root 独立运行 `go test -p 1 ./internal/source ./internal/modelcontext ./internal/application/repository -count=1` 三包 PASS（实际包测试分别 1.745s、4.726s、4.137s）；这不覆盖反向 XML→Java 导航，故保持 Spec finding。Root 未在此冻结 SHA 上重跑整套真实 PG。
