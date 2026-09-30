@@ -49,12 +49,35 @@ function relationLabel(relation: SourceCodeRelation) {
 function hasNavigableRange(range?: SourceRange) {
   return !!range && range.end_byte > range.start_byte && range.start_line > 0 && range.end_line >= range.start_line
 }
-function canOpenRelationTarget(relation: SourceCodeRelation) {
-  return relation.determinacy === 'certain' && !!relation.to_file_id && !!relation.to_version_id && !!relation.to_path && hasNavigableRange(relation.to_range)
+function relationOppositeEndpoint(relation: SourceCodeRelation) {
+  const current = file.value
+  if (!current || relation.determinacy !== 'certain') return null
+  const atFrom = relation.from_file_id === current.knowledge_id && relation.from_version_id === current.file_version_id
+  const atTo = relation.to_file_id === current.knowledge_id && relation.to_version_id === current.file_version_id
+  // Prefer To for same-file edges, where both ends share the current identity.
+  const endpoint = atFrom
+    ? { knowledgeId: relation.to_file_id, fileVersionId: relation.to_version_id, path: relation.to_path, range: relation.to_range }
+    : atTo
+      ? { knowledgeId: relation.from_file_id, fileVersionId: relation.from_version_id, path: relation.from_path, range: relation.from_range }
+      : null
+  return endpoint && endpoint.knowledgeId && endpoint.fileVersionId && endpoint.path && hasNavigableRange(endpoint.range) ? endpoint : null
+}
+function relationNavigationLabel(relation: SourceCodeRelation) {
+  const endpoint = relationOppositeEndpoint(relation)
+  if (!endpoint || !file.value) return ''
+  const range = `L${endpoint.range.start_line}–${endpoint.range.end_line}`
+  return endpoint.knowledgeId === file.value.knowledge_id && endpoint.fileVersionId === file.value.file_version_id
+    ? `跳到目标范围 ${range}`
+    : `打开 ${endpoint.path} 关联范围 ${range}`
 }
 async function openRelationTarget(relation: SourceCodeRelation) {
   const current = file.value
-  if (!current || !canOpenRelationTarget(relation) || targetLoading.value) return
+  const endpoint = relationOppositeEndpoint(relation)
+  if (!current || !endpoint || targetLoading.value) return
+  if (endpoint.knowledgeId === current.knowledge_id && endpoint.fileVersionId === current.file_version_id) {
+    selectSymbol(endpoint.range)
+    return
+  }
   const generation = ++requestGeneration
   targetLoading.value = true
   targetFailed.value = false
@@ -63,16 +86,16 @@ async function openRelationTarget(relation: SourceCodeRelation) {
   try {
     // Resolve only by the immutable file/version IDs carried by the relation;
     // the backend remains responsible for enforcing published tenant scope.
-    const response = await getSourceFile(relation.to_file_id, relation.to_version_id)
+    const response = await getSourceFile(endpoint.knowledgeId, endpoint.fileVersionId)
     if (generation !== requestGeneration) return
     const target = response.data
-    if (target.knowledge_id !== relation.to_file_id || target.file_version_id !== relation.to_version_id || target.path !== relation.to_path) {
+    if (target.knowledge_id !== endpoint.knowledgeId || target.file_version_id !== endpoint.fileVersionId || target.path !== endpoint.path || target.snapshot_id !== current.snapshot_id) {
       targetFailed.value = true
       return
     }
     navigationStack.value.push({ file: current, selected: selected.value })
     file.value = target
-    selectSymbol(relation.to_range)
+    selectSymbol(endpoint.range)
   } catch {
     if (generation === requestGeneration) targetFailed.value = true
   } finally {
@@ -184,13 +207,10 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
           <li v-for="relation in file.relations" :key="relation.id">
             <code>{{ relation.kind }}</code> · {{ relationLabel(relation) }} · {{ relation.determinacy }} / {{ relation.quality }}
             <span v-if="relation.resolution_reason"> · {{ relation.resolution_reason }}</span>
-            <button v-if="relation.to_file_id === file.knowledge_id && relation.to_version_id === file.file_version_id && hasNavigableRange(relation.to_range)" type="button" @click="selectSymbol(relation.to_range)">
-              跳到目标范围 L{{ relation.to_range.start_line }}–{{ relation.to_range.end_line }}
+            <button v-if="relationOppositeEndpoint(relation)" type="button" :disabled="targetLoading" @click="openRelationTarget(relation)">
+              {{ targetLoading ? '正在读取关联文件…' : relationNavigationLabel(relation) }}
             </button>
-            <button v-else-if="canOpenRelationTarget(relation)" type="button" :disabled="targetLoading" @click="openRelationTarget(relation)">
-              {{ targetLoading ? '正在读取目标文件…' : `打开 ${relation.to_path} 目标范围 L${relation.to_range.start_line}–${relation.to_range.end_line}` }}
-            </button>
-            <span v-else-if="relation.to_file_id"> · {{ relation.to_path }}（目标范围暂不可直接读取）</span>
+            <span v-else-if="relation.from_file_id || relation.to_file_id"> · 关系端点不确定或范围不可直接读取</span>
           </li>
         </ul>
         <button v-if="file.relations_truncated" type="button" :disabled="relationsLoading" @click="loadMoreRelations">

@@ -59,19 +59,22 @@ func readSourceAnalysis(ctx context.Context, knowledge interfaces.KnowledgeServi
 				item[key] = truncateAgentRunes(value, maxAgentSummaryRunes)
 			}
 		}
-		if relation.Determinacy == "certain" && relation.ToFileID != "" && relation.ToVersionID != "" {
-			key := sourceVersionKey{relation.ToFileID, relation.ToVersionID}
+		endpoint, endpointOK := oppositeSourceRelationEndpoint(relation, file.KnowledgeID, file.FileVersionID)
+		if relation.Determinacy == "certain" && endpointOK {
+			key := sourceVersionKey{endpoint.knowledgeID, endpoint.versionID}
 			target, ok := targetFiles[key]
 			if !ok {
 				targetCtx := source.WithoutRelationCursor(ctx)
-				target, err = knowledge.GetSourceFile(targetCtx, relation.ToFileID, relation.ToVersionID)
+				target, err = knowledge.GetSourceFile(targetCtx, endpoint.knowledgeID, endpoint.versionID)
 				if err != nil {
 					return nil, err
 				}
-				targetFiles[key] = target
+				if target.KnowledgeID == endpoint.knowledgeID && target.FileVersionID == endpoint.versionID && target.SnapshotID == file.SnapshotID && target.Path == endpoint.path {
+					targetFiles[key] = target
+				}
 			}
-			if target.KnowledgeID == relation.ToFileID && target.FileVersionID == relation.ToVersionID && target.SnapshotID == file.SnapshotID {
-				if location, snippet, snippetTruncated, ok := sourceRangeSnippet(target.RawContent, relation.ToRange); ok {
+			if target.KnowledgeID == endpoint.knowledgeID && target.FileVersionID == endpoint.versionID && target.SnapshotID == file.SnapshotID && target.Path == endpoint.path {
+				if location, snippet, snippetTruncated, ok := sourceRangeSnippet(target.RawContent, endpoint.rangeValue); ok {
 					item["target_evidence"] = map[string]interface{}{
 						"knowledge_id": target.KnowledgeID, "snapshot_id": target.SnapshotID,
 						"file_version_id": target.FileVersionID, "sha256": target.SHA256,
@@ -96,6 +99,28 @@ func readSourceAnalysis(ctx context.Context, knowledge interfaces.KnowledgeServi
 }
 
 type sourceVersionKey struct{ knowledgeID, versionID string }
+
+type sourceRelationEndpoint struct {
+	knowledgeID string
+	versionID   string
+	path        string
+	rangeValue  types.JSON
+}
+
+func oppositeSourceRelationEndpoint(relation types.SourceCodeRelation, knowledgeID, versionID string) (sourceRelationEndpoint, bool) {
+	atFrom := relation.FromFileID == knowledgeID && relation.FromVersionID == versionID
+	atTo := relation.ToFileID == knowledgeID && relation.ToVersionID == versionID
+	var endpoint sourceRelationEndpoint
+	switch {
+	case atFrom:
+		endpoint = sourceRelationEndpoint{relation.ToFileID, relation.ToVersionID, relation.ToPath, relation.ToRange}
+	case atTo:
+		endpoint = sourceRelationEndpoint{relation.FromFileID, relation.FromVersionID, relation.FromPath, relation.FromRange}
+	default:
+		return sourceRelationEndpoint{}, false
+	}
+	return endpoint, endpoint.knowledgeID != "" && endpoint.versionID != "" && endpoint.path != ""
+}
 
 func sourceRangeValue(raw types.JSON) interface{} {
 	if len(raw) == 0 || string(raw) == "null" {

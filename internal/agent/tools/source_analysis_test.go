@@ -106,3 +106,90 @@ func TestSourceAnalysisContinuationReadsCrossFileTargetWithoutReusingCursor(t *t
 	require.Equal(t, "target", target["snippet"])
 	require.Equal(t, "cursor-main-next", analysis["relations_next_cursor"])
 }
+
+type reverseSourceAnalysisKnowledge struct {
+	interfaces.KnowledgeService
+	test        *testing.T
+	determinacy string
+	reads       [][2]string
+}
+
+func (k *reverseSourceAnalysisKnowledge) GetSourceFile(ctx context.Context, id string, versionIDs ...string) (*types.SourceFileView, error) {
+	require.True(k.test, source.HasReadScope(ctx), "opposite endpoint reads retain the caller's authorized source scope")
+	require.Empty(k.test, source.RelationCursorFromContext(ctx), "the source file's relation cursor is not reused for endpoint evidence")
+	versionID := ""
+	if len(versionIDs) > 0 {
+		versionID = versionIDs[0]
+	}
+	k.reads = append(k.reads, [2]string{id, versionID})
+	switch id {
+	case "xml-file":
+		require.Equal(k.test, "xml-version", versionID)
+		determinacy := k.determinacy
+		if determinacy == "" {
+			determinacy = "certain"
+		}
+		return &types.SourceFileView{
+			KnowledgeID: id, SnapshotID: "snapshot-one", FileVersionID: versionID,
+			SHA256: "xml-sha", Path: "src/mapper/PushScheduleMapper.xml",
+			RawContent: []byte("<mapper>\n  <select id=\"getPushSchedule\">SELECT 1</select>\n</mapper>"),
+			Relations: []types.SourceCodeRelation{{
+				ID: "mapper-edge", Kind: "mapper_statement",
+				FromFileID: "java-file", FromVersionID: "java-version", FromPath: "src/PushScheduleMapper.java",
+				FromRange: types.JSON(`{"start_byte":61,"end_byte":85,"start_line":2,"end_line":2}`),
+				ToFileID:  id, ToVersionID: versionID, ToPath: "src/mapper/PushScheduleMapper.xml",
+				ToRange:     types.JSON(`{"start_byte":10,"end_byte":20,"start_line":2,"end_line":2}`),
+				Determinacy: determinacy, Quality: "structural",
+			}},
+		}, nil
+	case "java-file":
+		require.Equal(k.test, "java-version", versionID)
+		content := []byte("package demo;\npublic interface PushScheduleMapper { Schedule getPushSchedule(Long id); }\n")
+		return &types.SourceFileView{
+			KnowledgeID: id, SnapshotID: "snapshot-one", FileVersionID: versionID,
+			SHA256: "java-sha", Path: "src/PushScheduleMapper.java", RawContent: content,
+		}, nil
+	default:
+		k.test.Fatalf("unexpected source read %q", id)
+		return nil, context.Canceled
+	}
+}
+
+func TestSourceAnalysisFromReverseEndpointReturnsOppositeJavaEvidence(t *testing.T) {
+	knowledge := &reverseSourceAnalysisKnowledge{test: t}
+	ctx, release := source.WithReadScope(context.Background(), types.SourceReadLease{
+		ID: "00000000-0000-4000-8000-000000000001", HasSources: true,
+	}, nil, func() {})
+	defer release()
+
+	analysis, err := readSourceAnalysis(ctx, knowledge, "xml-file", &types.SourceEvidence{
+		SnapshotID: "snapshot-one", FileVersionID: "xml-version",
+	}, "")
+	require.NoError(t, err)
+	relations := analysis["relations"].([]map[string]interface{})
+	require.Len(t, relations, 1)
+	evidence, ok := relations[0]["target_evidence"].(map[string]interface{})
+	require.True(t, ok, "an XML-side relation exposes its Java counterpart as target evidence")
+	require.Equal(t, "java-file", evidence["knowledge_id"])
+	require.Equal(t, "java-version", evidence["file_version_id"])
+	require.Equal(t, "src/PushScheduleMapper.java", evidence["path"])
+	require.Equal(t, "getPushSchedule(Long id)", evidence["snippet"])
+	require.Equal(t, [][2]string{{"xml-file", "xml-version"}, {"java-file", "java-version"}}, knowledge.reads)
+}
+
+func TestSourceAnalysisDoesNotPromoteUncertainReverseEndpoint(t *testing.T) {
+	knowledge := &reverseSourceAnalysisKnowledge{test: t, determinacy: "uncertain"}
+	ctx, release := source.WithReadScope(context.Background(), types.SourceReadLease{
+		ID: "00000000-0000-4000-8000-000000000001", HasSources: true,
+	}, nil, func() {})
+	defer release()
+
+	analysis, err := readSourceAnalysis(ctx, knowledge, "xml-file", &types.SourceEvidence{
+		SnapshotID: "snapshot-one", FileVersionID: "xml-version",
+	}, "")
+	require.NoError(t, err)
+	relations := analysis["relations"].([]map[string]interface{})
+	require.Len(t, relations, 1)
+	require.NotContains(t, relations[0], "target_evidence")
+	require.Equal(t, [][2]string{{"xml-file", "xml-version"}}, knowledge.reads, "uncertain edges never trigger an opposite-endpoint read")
+}

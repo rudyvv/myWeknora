@@ -122,6 +122,8 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.Equal(t, snapshot.ID, mapperRelation.SnapshotID)
 	var xmlVersion types.SourceFileVersion
 	require.NoError(t, f.db.Where("source_file_id=? AND snapshot_id=?", xmlFile.ID, snapshot.ID).Take(&xmlVersion).Error)
+	var javaVersion types.SourceFileVersion
+	require.NoError(t, f.db.Where("source_file_id=? AND snapshot_id=?", javaFile.ID, snapshot.ID).Take(&javaVersion).Error)
 	mapperTarget, err := f.knowledge.GetSourceFile(f.ctx, mapperRelation.ToFileID, mapperRelation.ToVersionID)
 	require.NoError(t, err, "a certain cross-file edge must resolve through the restricted fixed-version source read")
 	require.Equal(t, snapshot.ID, mapperTarget.SnapshotID)
@@ -188,6 +190,16 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(files["src/PushScheduleMapper.java"]), javaView.Content)
 	require.Empty(t, javaView.Relations, "single-file public scope must not expose the linked XML endpoint")
+	xmlOnly, releaseXMLOnly, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{xmlFile.ID}},
+	})
+	require.NoError(t, err)
+	xmlOnlyView, err := f.knowledge.GetSourceFile(xmlOnly, xmlFile.ID, xmlVersion.ID)
+	require.NoError(t, err)
+	require.NotContains(t, xmlOnlyView.Relations, mapperRelation, "the XML endpoint must not disclose a relation to an unauthorized Java file")
+	_, err = f.knowledge.GetSourceFile(xmlOnly, mapperRelation.FromFileID, mapperRelation.FromVersionID)
+	require.Error(t, err, "a reverse endpoint read must not expand the caller's XML-only scope")
+	releaseXMLOnly()
 
 	pinned, release, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, types.SearchTargets{
 		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
@@ -222,6 +234,37 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.Equal(t, xmlFile.Path, targetEvidence["path"])
 	require.Contains(t, targetEvidence["snippet"], "getPushSchedule")
 	require.Contains(t, toolResult.Output, "<source_analysis>")
+	xmlPublishedView, err := f.knowledge.GetSourceFile(pinned, xmlFile.ID, xmlVersion.ID)
+	require.NoError(t, err)
+	require.Contains(t, xmlPublishedView.Relations, mapperRelation, "the same snapshot edge must be returned when the XML endpoint is read")
+	reverseView, err := f.knowledge.GetSourceFile(pinned, mapperRelation.FromFileID, mapperRelation.FromVersionID)
+	require.NoError(t, err, "the opposite endpoint must be re-read through the same authorized published scope")
+	require.Equal(t, snapshot.ID, reverseView.SnapshotID)
+	require.Equal(t, javaVersion.ID, reverseView.FileVersionID)
+	var javaMethodRange types.SourceRange
+	require.NoError(t, json.Unmarshal(mapperRelation.FromRange, &javaMethodRange))
+	require.LessOrEqual(t, javaMethodRange.EndByte, len(reverseView.Content))
+	require.Contains(t, reverseView.Content[javaMethodRange.StartByte:javaMethodRange.EndByte], "getPushSchedule")
+	xmlToolArgs, err := json.Marshal(map[string]any{"knowledge_id": xmlFile.ID, "limit": 1})
+	require.NoError(t, err)
+	xmlToolResult, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, xmlToolArgs)
+	require.NoError(t, err)
+	require.True(t, xmlToolResult.Success, xmlToolResult.Error)
+	xmlAnalysis := xmlToolResult.Data["source_analysis"].(map[string]interface{})
+	var reverseTargetEvidence map[string]interface{}
+	for _, raw := range xmlAnalysis["relations"].([]map[string]interface{}) {
+		if raw["kind"] == "mapper_statement" {
+			reverseTargetEvidence, _ = raw["target_evidence"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, reverseTargetEvidence, "Agent analysis on the XML endpoint must surface its Java method counterpart")
+	require.Equal(t, javaFile.ID, reverseTargetEvidence["knowledge_id"])
+	require.Equal(t, javaVersion.ID, reverseTargetEvidence["file_version_id"])
+	require.Equal(t, javaVersion.SHA256, reverseTargetEvidence["sha256"])
+	require.Equal(t, javaFile.Path, reverseTargetEvidence["path"])
+	require.Contains(t, reverseTargetEvidence["snippet"], "getPushSchedule")
 
 	probeRelations := make([]types.SourceCodeRelation, 110)
 	probeIDs := make(map[string]bool, len(probeRelations))
@@ -347,6 +390,14 @@ func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, snapshot.ID, oldPinned.SnapshotID)
 	require.Contains(t, oldPinned.Relations, mapperRelation)
+	oldXMLPinned, err := f.knowledge.GetSourceFile(pinned, mapperRelation.ToFileID, mapperRelation.ToVersionID)
+	require.NoError(t, err, "a retained read lease keeps the relation's opposite endpoint on its original published snapshot")
+	require.Equal(t, snapshot.ID, oldXMLPinned.SnapshotID)
+	require.Equal(t, xmlVersion.ID, oldXMLPinned.FileVersionID)
+	oldJavaPinned, err := f.knowledge.GetSourceFile(pinned, mapperRelation.FromFileID, mapperRelation.FromVersionID)
+	require.NoError(t, err)
+	require.Equal(t, snapshot.ID, oldJavaPinned.SnapshotID)
+	require.Equal(t, javaVersion.ID, oldJavaPinned.FileVersionID)
 	_, err = f.knowledge.GetSourceFile(f.ctx, javaFile.ID)
 	require.Error(t, err, "the empty current publication must not expose a removed source file")
 	_, err = f.knowledge.GetSourceFile(f.ctx, mapperRelation.ToFileID, mapperRelation.ToVersionID)
