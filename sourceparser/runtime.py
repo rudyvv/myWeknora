@@ -372,8 +372,9 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             body_chunks = block_chunks
         else:
             if external_script:
-                block_quality = 'degraded'
+                block_quality = 'unknown_preprocess' if unsupported_preprocess else 'degraded'
                 degraded = True
+                unknown_preprocess = unknown_preprocess or unsupported_preprocess
             elif unsupported_preprocess:
                 block_quality = 'unknown_preprocess'
                 degraded = True

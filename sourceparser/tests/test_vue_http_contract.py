@@ -536,6 +536,36 @@ class VueHTTPContract(unittest.TestCase):
                     self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
                 self.assertTrue(all('resolved_path' not in chunk['region'] for chunk in wrapper_chunks))
 
+    def test_external_script_with_unsupported_language_keeps_unknown_preprocess_quality(self):
+        cases = (
+            '<script lang="coffee" src="./x.js">raw 😀\r\n</script>\r\n'.encode(),
+            b'<script lang="coffee" src="./x.js"></script>\r\n',
+            b'<script lang="coffee" src="./x.js"/>\r\n',
+        )
+        for raw in cases:
+            with self.subTest(source=raw):
+                status, parsed = self.parse(raw)
+                self.assertEqual(status, 200, parsed)
+                self.assertEqual(parsed['quality'], 'unknown_preprocess')
+                self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
+                marker = next(symbol for symbol in parsed['symbols']
+                              if symbol['kind'] == 'sfc_region' and symbol['region']['kind'] == 'script')
+                self.assertEqual(marker['region']['language'], 'coffee')
+                self.assertEqual(marker['region']['quality'], 'unknown_preprocess')
+                self.assertEqual(marker['region']['external_source'], './x.js')
+                self.assertEqual(marker['region']['external_status'], 'unchecked')
+                self.assertNotIn('resolved_path', marker['region'])
+
+                script_chunks = [chunk for chunk in parsed['chunks']
+                                 if (chunk.get('region') or {}).get('kind') == 'script']
+                self.assertTrue(script_chunks)
+                for chunk in script_chunks:
+                    self.assertEqual(chunk['quality'], 'unknown_preprocess')
+                    self.assertEqual(chunk['region']['quality'], 'unknown_preprocess')
+                    self.assertEqual(chunk['region']['external_source'], './x.js')
+                    area = chunk['range']
+                    self.assertEqual(raw[area['start_byte']:area['end_byte']].decode(), chunk['content'])
+
     def test_empty_unknown_preprocessor_wrapper_has_positive_region_evidence(self):
         cases = (
             (b'<template lang="pug"></template>\r\n', 'template', '<template lang="pug">', '</template>'),
