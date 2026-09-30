@@ -225,7 +225,8 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
 			eventID := uuid.NewString()
 			payload, err := json.Marshal(types.SourceWikiUpdatePayload{
-				SchemaVersion: 1, EventID: eventID, TenantID: kb.TenantID,
+				SchemaVersion: 1, EventID: eventID,
+				DeliveryID: types.SourceWikiDeliveryID(eventID, lease.ConfigGeneration), TenantID: kb.TenantID,
 				KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, SnapshotID: snapshot.ID,
 				CommitSHA: snapshot.CommitSHA, ConfigGeneration: lease.ConfigGeneration,
 			})
@@ -322,11 +323,13 @@ func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.C
 			event.TenantID, event.KnowledgeBaseID, event.DataSourceID = current.TenantID, current.KnowledgeBaseID, current.ID
 			event.SnapshotID, event.EventType = published.ID, "source.wiki.update"
 		}
-		payload, err := json.Marshal(types.SourceWikiUpdatePayload{
-			SchemaVersion: 1, EventID: event.ID, TenantID: current.TenantID,
+		wikiPayload := types.SourceWikiUpdatePayload{
+			SchemaVersion: 1, EventID: event.ID,
+			DeliveryID: types.SourceWikiDeliveryID(event.ID, state.ConfigGeneration), TenantID: current.TenantID,
 			KnowledgeBaseID: current.KnowledgeBaseID, DataSourceID: current.ID,
 			SnapshotID: published.ID, CommitSHA: published.CommitSHA, ConfigGeneration: state.ConfigGeneration,
-		})
+		}
+		payload, err := json.Marshal(wikiPayload)
 		if err != nil {
 			return err
 		}
@@ -348,29 +351,11 @@ func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.C
 			}
 		}
 		if event.Status == "delivered" {
-			var pendingOp types.TaskPendingOp
-			opErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where(`tenant_id=? AND task_type=? AND scope=? AND scope_id=? AND op=? AND dedup_key=?`,
-					current.TenantID, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase,
-					current.KnowledgeBaseID, "published_snapshot", event.ID).
-				Take(&pendingOp).Error
-			if opErr != nil && !errors.Is(opErr, gorm.ErrRecordNotFound) {
-				return opErr
-			}
-			if opErr == nil {
-				var previousPayload types.SourceWikiUpdatePayload
-				if err := json.Unmarshal(pendingOp.Payload, &previousPayload); err != nil {
-					previousPayload.ConfigGeneration = 0
-				}
-				if previousPayload.ConfigGeneration != state.ConfigGeneration {
-					updated := tx.Exec(`UPDATE task_pending_ops SET payload=?::jsonb, fail_count=0, claimed_at=NULL WHERE id=?`, string(payload), pendingOp.ID)
-					if updated.Error != nil {
-						return updated.Error
-					}
-					if updated.RowsAffected != 1 {
-						return fmt.Errorf("delivered source Wiki operation changed while refreshing its generation")
-					}
-				}
+			// A claimed operation belongs to the consumer holding its row ID:
+			// never refresh or unclaim that row. A new generation gets a distinct
+			// deterministic delivery key and therefore a separate durable row.
+			if err := insertSourceWikiPendingOp(tx, current.TenantID, current.KnowledgeBaseID, wikiPayload, now); err != nil {
+				return err
 			}
 			updated := tx.Exec(`UPDATE source_publication_outbox SET payload=?::jsonb, config_generation=?
 				WHERE id=? AND status='delivered'`, string(payload), state.ConfigGeneration, event.ID)
@@ -398,6 +383,21 @@ func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.C
 		}
 		return nil
 	})
+}
+
+func insertSourceWikiPendingOp(tx *gorm.DB, tenantID uint64, knowledgeBaseID string, payload types.SourceWikiUpdatePayload, now time.Time) error {
+	if payload.DeliveryID == "" || payload.EventID == "" || payload.ConfigGeneration <= 0 {
+		return fmt.Errorf("source Wiki pending operation is missing its delivery identity")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return tx.Exec(`INSERT INTO task_pending_ops
+		(tenant_id,task_type,scope,scope_id,op,dedup_key,payload,enqueued_at)
+		VALUES(?,?,?,?,?,?,?::jsonb,?) ON CONFLICT DO NOTHING`,
+		tenantID, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase,
+		knowledgeBaseID, "published_snapshot", payload.DeliveryID, string(encoded), now).Error
 }
 
 // RelaySourcePublicationOutbox accepts published snapshots into the durable,
@@ -479,19 +479,12 @@ func (r *sourceSnapshotRepository) RelaySourcePublicationOutbox(ctx context.Cont
 				return err
 			}
 			payload := types.SourceWikiUpdatePayload{
-				SchemaVersion: 1, EventID: event.ID, TenantID: event.TenantID,
+				SchemaVersion: 1, EventID: event.ID,
+				DeliveryID: types.SourceWikiDeliveryID(event.ID, event.ConfigGeneration), TenantID: event.TenantID,
 				KnowledgeBaseID: event.KnowledgeBaseID, DataSourceID: event.DataSourceID,
 				SnapshotID: snapshot.ID, CommitSHA: snapshot.CommitSHA, ConfigGeneration: event.ConfigGeneration,
 			}
-			encoded, err := json.Marshal(payload)
-			if err != nil {
-				return err
-			}
-			if err := tx.Exec(`INSERT INTO task_pending_ops
-				(tenant_id,task_type,scope,scope_id,op,dedup_key,payload,enqueued_at)
-				VALUES(?,?,?,?,?,?,?::jsonb,?) ON CONFLICT DO NOTHING`,
-				event.TenantID, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase,
-				event.KnowledgeBaseID, "published_snapshot", event.ID, string(encoded), now).Error; err != nil {
+			if err := insertSourceWikiPendingOp(tx, event.TenantID, event.KnowledgeBaseID, payload, now); err != nil {
 				return err
 			}
 			result := tx.Table("source_publication_outbox").Where("id=? AND status='pending'", event.ID).

@@ -786,10 +786,13 @@ func TestSourceWikiNotificationSurvivesCredentialRotationAndSameTargetSync(t *te
 	require.Equal(t, 1, accepted)
 	var payload types.SourceWikiUpdatePayload
 	var op types.TaskPendingOp
-	require.NoError(t, f.db.Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, original.ID).Take(&op).Error)
+	currentDeliveryID := types.SourceWikiDeliveryID(original.ID, current.ConfigGeneration)
+	require.NoError(t, f.db.Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, currentDeliveryID).Take(&op).Error)
 	require.NoError(t, json.Unmarshal(op.Payload, &payload))
 	require.Equal(t, original.SnapshotID, payload.SnapshotID)
 	require.Equal(t, current.ConfigGeneration, payload.ConfigGeneration)
+	require.Equal(t, original.ID, payload.EventID)
+	require.Equal(t, currentDeliveryID, payload.DeliveryID)
 }
 
 func TestSourceWikiNotificationRefreshesDeliveredEventAfterCredentialRotation(t *testing.T) {
@@ -802,16 +805,20 @@ func TestSourceWikiNotificationRefreshesDeliveredEventAfterCredentialRotation(t 
 	require.NoError(t, err)
 	require.Equal(t, 1, accepted)
 	pendingOps := repository.NewTaskPendingOpsRepository(f.db)
-	readOps := func() []*types.TaskPendingOp {
+	peekOps := func() []*types.TaskPendingOp {
 		ops, readErr := pendingOps.PeekBatch(f.ctx, types.TypeSourceWikiUpdate,
 			types.TaskScopeKnowledgeBase, f.kb.ID, 10)
 		require.NoError(t, readErr)
 		return ops
 	}
-	originalOps := readOps()
+	staleBefore := time.Now().Add(-time.Minute)
+	originalOps, err := pendingOps.ClaimBatch(f.ctx, types.TypeSourceWikiUpdate,
+		types.TaskScopeKnowledgeBase, f.kb.ID, 10, staleBefore)
+	require.NoError(t, err)
 	require.Len(t, originalOps, 1)
 	var originalPayload types.SourceWikiUpdatePayload
 	require.NoError(t, json.Unmarshal(originalOps[0].Payload, &originalPayload))
+	require.NotNil(t, originalOps[0].ClaimedAt, "the original notification is owned by the old consumer")
 
 	config, err := f.ds.ParseConfig()
 	require.NoError(t, err)
@@ -829,24 +836,70 @@ func TestSourceWikiNotificationRefreshesDeliveredEventAfterCredentialRotation(t 
 	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).
 		Select("config_generation").Take(&currentGeneration).Error)
 
-	updatedOps := readOps()
-	require.Len(t, updatedOps, 1, "refreshing a delivered notification must preserve one durable op")
-	require.Equal(t, originalOps[0].ID, updatedOps[0].ID, "refreshing the payload must preserve the pending op identity")
-	require.Equal(t, originalOps[0].DedupKey, updatedOps[0].DedupKey, "refreshing the payload must preserve event idempotency")
+	updatedOps := peekOps()
+	require.Len(t, updatedOps, 2,
+		"a generation refresh must create a separately identifiable op while the old claim is in flight")
+	var currentQueuedOp *types.TaskPendingOp
+	var staleQueuedOp *types.TaskPendingOp
+	for _, op := range updatedOps {
+		var payload types.SourceWikiUpdatePayload
+		require.NoError(t, json.Unmarshal(op.Payload, &payload))
+		if payload.ConfigGeneration == currentGeneration {
+			currentQueuedOp = op
+		} else if payload.ConfigGeneration == originalPayload.ConfigGeneration {
+			staleQueuedOp = op
+		}
+	}
+	require.NotNil(t, staleQueuedOp, "refreshing a notification must leave the old claimed row untouched")
+	require.Equal(t, originalOps[0].ID, staleQueuedOp.ID)
+	require.Equal(t, originalOps[0].ClaimedAt, staleQueuedOp.ClaimedAt,
+		"refreshing a newer generation must not release the old consumer's claim")
+	require.NotNil(t, currentQueuedOp, "the current generation must have a durable pending op")
+	require.NotEqual(t, originalOps[0].ID, currentQueuedOp.ID,
+		"the old consumer's ID-based acknowledgement must not target the refreshed op")
+	currentClaim, err := pendingOps.ClaimBatch(f.ctx, types.TypeSourceWikiUpdate,
+		types.TaskScopeKnowledgeBase, f.kb.ID, 10, staleBefore)
+	require.NoError(t, err)
+	require.Len(t, currentClaim, 1, "a second consumer must be able to claim the current generation while the old claim remains held")
+	require.Equal(t, currentQueuedOp.ID, currentClaim[0].ID)
+	currentQueuedOp = currentClaim[0]
+
 	var updatedPayload types.SourceWikiUpdatePayload
-	require.NoError(t, json.Unmarshal(updatedOps[0].Payload, &updatedPayload))
+	require.NoError(t, json.Unmarshal(currentQueuedOp.Payload, &updatedPayload))
 	require.Equal(t, originalPayload.EventID, updatedPayload.EventID)
 	require.Equal(t, originalPayload.SnapshotID, updatedPayload.SnapshotID,
 		"refreshing a delivered event must continue to reference the same published snapshot")
 	require.Greater(t, updatedPayload.ConfigGeneration, originalPayload.ConfigGeneration)
 	require.Equal(t, currentGeneration, updatedPayload.ConfigGeneration,
 		"the durable Wiki notification must carry the current source generation")
+	require.NotEqual(t, originalOps[0].DedupKey, currentQueuedOp.DedupKey,
+		"different source generations must have independent queue deduplication identities")
+	require.Equal(t, originalPayload.EventID, updatedPayload.EventID,
+		"a generation refresh retains the stable publication event identity")
+	require.Equal(t, types.SourceWikiDeliveryID(updatedPayload.EventID, currentGeneration), updatedPayload.DeliveryID)
+	require.Equal(t, updatedPayload.DeliveryID, currentQueuedOp.DedupKey)
+	require.NotEqual(t, originalPayload.DeliveryID, updatedPayload.DeliveryID)
+
+	require.NoError(t, pendingOps.DeleteByIDs(f.ctx, []int64{originalOps[0].ID}),
+		"the original consumer must be able to acknowledge its old claimed row")
+	remainingOps := peekOps()
+	require.Len(t, remainingOps, 1, "acknowledging the old generation must leave the current-generation notification durable")
+	require.Equal(t, currentQueuedOp.ID, remainingOps[0].ID)
+
+	thirdLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, thirdLog)))
+	sameGenerationOps := peekOps()
+	require.Len(t, sameGenerationOps, 1, "same-generation no-op must not duplicate the durable notification")
+	require.Equal(t, currentQueuedOp.ID, sameGenerationOps[0].ID)
+	require.Equal(t, currentQueuedOp.ClaimedAt, sameGenerationOps[0].ClaimedAt,
+		"same-generation no-op must preserve the active consumer claim")
 
 	for i := 0; i < 2; i++ {
 		accepted, err = f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
 		require.NoError(t, err)
 		require.Zero(t, accepted, "relaying an already delivered event must be idempotent")
-		require.Len(t, readOps(), 1, "duplicate relay must not duplicate the durable Wiki op")
+		require.Len(t, peekOps(), 1, "duplicate relay must not duplicate the durable Wiki op")
 	}
 }
 
@@ -878,7 +931,8 @@ func TestSourcePublicationOutboxAcceptsTypedPendingUpdateAtomically(t *testing.T
 	_, err = f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
 	require.ErrorContains(t, err, "injected source outbox ack failure")
 	var pendingCount int64
-	require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, event.ID).Count(&pendingCount).Error)
+	initialDeliveryID := types.SourceWikiDeliveryID(event.ID, event.ConfigGeneration)
+	require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, initialDeliveryID).Count(&pendingCount).Error)
 	require.Zero(t, pendingCount, "receiver acceptance must roll back with the failed acknowledgement")
 	var retryWindow struct {
 		NextAttemptAt time.Time `gorm:"column:next_attempt_at"`
@@ -900,11 +954,12 @@ func TestSourcePublicationOutboxAcceptsTypedPendingUpdateAtomically(t *testing.T
 
 	var accepted types.TaskPendingOp
 	require.NoError(t, f.db.Where("task_type=? AND scope=? AND scope_id=? AND op=? AND dedup_key=?",
-		types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, f.kb.ID, "published_snapshot", event.ID).Take(&accepted).Error)
+		types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, f.kb.ID, "published_snapshot", initialDeliveryID).Take(&accepted).Error)
 	var payload types.SourceWikiUpdatePayload
 	require.NoError(t, json.Unmarshal(accepted.Payload, &payload))
 	require.Equal(t, 1, payload.SchemaVersion)
 	require.Equal(t, event.ID, payload.EventID)
+	require.Equal(t, initialDeliveryID, payload.DeliveryID)
 	require.Equal(t, f.ds.TenantID, payload.TenantID)
 	require.Equal(t, f.kb.ID, payload.KnowledgeBaseID)
 	require.Equal(t, f.ds.ID, payload.DataSourceID)
@@ -915,7 +970,7 @@ func TestSourcePublicationOutboxAcceptsTypedPendingUpdateAtomically(t *testing.T
 	acceptedCount, err := f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
 	require.NoError(t, err)
 	require.Zero(t, acceptedCount)
-	require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, event.ID).Count(&pendingCount).Error)
+	require.NoError(t, f.db.Table("task_pending_ops").Where("task_type=? AND dedup_key=?", types.TypeSourceWikiUpdate, payload.DeliveryID).Count(&pendingCount).Error)
 	require.EqualValues(t, 1, pendingCount, "replaying an acknowledged event cannot create duplicate pending Wiki work")
 	require.NoError(t, f.db.Table("source_publication_outbox").Where("id=? AND status='delivered' AND attempt_count=2", event.ID).Count(&pendingCount).Error)
 	require.EqualValues(t, 1, pendingCount)

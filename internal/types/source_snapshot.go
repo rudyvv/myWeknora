@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // SourceRange refers to original UTF-8 bytes [start,end), with one-based lines.
 type SourceRange struct {
@@ -148,17 +151,29 @@ type SourceRunResult struct {
 }
 
 // SourceWikiUpdatePayload is the stable, DB-derived acceptance record for a
-// published source snapshot. It identifies the update target but does not
-// request or contain generated Wiki content.
+// published source snapshot. EventID identifies the publication; DeliveryID
+// identifies its delivery for one source configuration generation. Neither
+// field requests or contains generated Wiki content.
 type SourceWikiUpdatePayload struct {
 	SchemaVersion    int    `json:"schema_version"`
 	EventID          string `json:"event_id"`
+	DeliveryID       string `json:"delivery_id"`
 	TenantID         uint64 `json:"tenant_id"`
 	KnowledgeBaseID  string `json:"knowledge_base_id"`
 	DataSourceID     string `json:"data_source_id"`
 	SnapshotID       string `json:"snapshot_id"`
 	CommitSHA        string `json:"commit_sha"`
 	ConfigGeneration int64  `json:"config_generation"`
+}
+
+// SourceWikiDeliveryID gives each configuration-generation delivery of a
+// published snapshot a stable identity while keeping its publication EventID
+// unchanged. The task queue uses this as its deduplication/ack identity.
+func SourceWikiDeliveryID(eventID string, configGeneration int64) string {
+	if eventID == "" || configGeneration <= 0 {
+		return ""
+	}
+	return eventID + ":g" + strconv.FormatInt(configGeneration, 10)
 }
 
 type SourceEvidence struct {
