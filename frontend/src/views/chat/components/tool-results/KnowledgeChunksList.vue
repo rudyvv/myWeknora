@@ -6,7 +6,7 @@
     <section v-if="analysis" class="source-analysis" aria-label="源码结构分析">
       <header>
         <strong>{{ analysis.path }}</strong>
-        <span>{{ qualityLabel(analysis.quality) }} · {{ analysis.parser_version }}</span>
+        <span>{{ sourceQualityLabel(analysis.quality) }} · {{ analysis.parser_version }}</span>
         <code>SHA {{ analysis.sha256 }}</code>
       </header>
       <div v-if="analysis.diagnostics.length">
@@ -19,7 +19,7 @@
       <div v-if="analysis.facts.length">
         <h4>结构事实（{{ analysis.facts.length }}{{ analysis.facts_truncated ? '+' : '' }}）</h4>
         <ul><li v-for="(fact, index) in analysis.facts" :key="`${fact.kind}:${fact.range?.start_byte ?? index}`">
-          <code>{{ fact.kind }}</code> · {{ factLabel(fact) }}
+          <code>{{ fact.kind }}</code> · {{ sourceFactLabel(fact) }}
           <span v-if="fact.range"> · L{{ fact.range.start_line }}–{{ fact.range.end_line }}</span>
           <span v-if="fact.dynamic"> · 动态 SQL</span>
           <span v-if="fact.certainty"> · {{ fact.certainty }}</span>
@@ -48,6 +48,7 @@
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getKnowledgeChunksSummaryHtml } from '@/utils/knowledgeChunksDisplay';
+import { sourceFactLabel, sourceQualityLabel } from '@/utils/sourceQuality';
 import type { KnowledgeChunksListData } from '@/types/tool-results';
 
 const props = defineProps<{
@@ -58,13 +59,6 @@ const { t } = useI18n();
 
 const summaryHtml = computed(() => getKnowledgeChunksSummaryHtml(t, props.data));
 const analysis = computed(() => props.data.source_analysis);
-function qualityLabel(quality: string) {
-  return ({ structural: '结构解析', text_fallback: '文本回退', partial: '部分解析', syntax_error: '语法错误（保留原文）' } as Record<string, string>)[quality]
-    || `未知解析质量（${quality || '未提供'}）`;
-}
-function factLabel(fact: Record<string, any>) {
-  return fact.qualified_name || fact.method_name || fact.name || fact.statement_id || fact.target_name || fact.kind;
-}
 </script>
 
 <style lang="less" scoped>

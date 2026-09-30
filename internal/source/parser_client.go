@@ -34,6 +34,8 @@ func LanguageForPath(logicalPath string) string {
 		return "python"
 	case ".xml":
 		return "mybatis-xml"
+	case ".vue":
+		return "vue"
 	default:
 		return ""
 	}
@@ -117,6 +119,9 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 			if !validSourceRange(raw, symbol.Range) || !validSourceRange(raw, symbol.SignatureRange) || symbol.SignatureRange.StartByte < symbol.Range.StartByte || symbol.SignatureRange.EndByte > symbol.Range.EndByte || string(raw[symbol.SignatureRange.StartByte:symbol.SignatureRange.EndByte]) != symbol.Signature {
 				return nil, fmt.Errorf("source parser returned invalid symbol coordinates")
 			}
+			if !validSourceRegion(symbol.Region) {
+				return nil, fmt.Errorf("source parser returned invalid symbol region")
+			}
 			for _, annotation := range symbol.Annotations {
 				if !validSourceRange(raw, annotation.Range) || annotation.Range.StartByte < symbol.Range.StartByte || annotation.Range.EndByte > symbol.Range.EndByte || string(raw[annotation.Range.StartByte:annotation.Range.EndByte]) != annotation.Text {
 					return nil, fmt.Errorf("source parser returned invalid annotation coordinates")
@@ -131,6 +136,14 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 			}
 			if !validSourceLines(raw, span) {
 				return nil, fmt.Errorf("source parser returned invalid original line numbers")
+			}
+			if !validSourceRegion(chunk.Region) {
+				return nil, fmt.Errorf("source parser returned invalid chunk region")
+			}
+			for _, diagnostic := range chunk.Diagnostics {
+				if !validSourceDiagnostic(language, raw, diagnostic) {
+					return nil, fmt.Errorf("source parser returned invalid diagnostic coordinates")
+				}
 			}
 			for _, context := range chunk.Context {
 				p := context.Range
@@ -155,6 +168,29 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 	return nil, fmt.Errorf("source context exceeds the index token budget")
 }
 
+func validSourceRegion(region *types.SourceRegion) bool {
+	if region == nil {
+		return true
+	}
+	if region.Kind != "template" && region.Kind != "script" && region.Kind != "style" && region.Kind != "custom" {
+		return false
+	}
+	if region.Quality != "structural" && region.Quality != "syntax_error" && region.Quality != "degraded" &&
+		region.Quality != "unknown_preprocess" && region.Quality != "text_fallback" {
+		return false
+	}
+	if len(region.Language) > 64 || len(region.ExternalSource) > 4096 || len(region.ResolvedPath) > 4096 {
+		return false
+	}
+	if region.ExternalSource == "" {
+		return region.ExternalStatus == "" && region.ResolvedPath == ""
+	}
+	if region.Kind != "script" || (region.ExternalStatus != "unchecked" && region.ExternalStatus != "rejected") {
+		return false
+	}
+	return region.ResolvedPath == ""
+}
+
 func validSourceLines(raw []byte, span types.SourceRange) bool {
 	last := span.EndByte - 1
 	if last < span.StartByte {
@@ -167,10 +203,33 @@ func validSourceRange(raw []byte, span types.SourceRange) bool {
 	return span.StartByte >= 0 && span.EndByte >= span.StartByte && span.EndByte <= len(raw) && utf8.Valid(raw[span.StartByte:span.EndByte]) && validSourceLines(raw, span)
 }
 
+// A warning may be attributed to a body chunk even when its original location
+// is in a block wrapper or at EOF; validate only the trusted source range.
+func validSourceDiagnostic(language string, raw []byte, diagnostic types.SourceDiagnostic) bool {
+	if language != "vue" || (diagnostic.Code != "vue_sfc_parse_warning" && diagnostic.Code != "vue_sfc_duplicate_block") {
+		return false
+	}
+	return validSourceRange(raw, diagnostic.Range)
+}
+
 // SourceIndexText is derived index text, not a contiguous original fragment.
 // Only Chunk.Content and separately ranged context may be shown as code evidence.
 func SourceIndexText(path string, chunk types.ParsedSourceChunk) string {
 	parts := []string{path, strings.Join(chunk.Symbols, " ")}
+	if chunk.Region != nil {
+		parts = append(parts, "Vue "+chunk.Region.Kind+" region "+chunk.Region.Language+" "+chunk.Region.Quality)
+	}
+	for index, diagnostic := range chunk.Diagnostics {
+		if index == 4 {
+			break
+		}
+		switch diagnostic.Code {
+		case "vue_sfc_parse_warning":
+			parts = append(parts, "Vue SFC block descriptor warning; original source retained")
+		case "vue_sfc_duplicate_block":
+			parts = append(parts, "Vue SFC duplicate top-level block warning; original source retained")
+		}
+	}
 	for _, c := range chunk.Context {
 		parts = append(parts, c.Text)
 	}

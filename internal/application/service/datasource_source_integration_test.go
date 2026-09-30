@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 	pgdriver "gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func TestSourceFirstJavaSnapshotIsPublishedAndSearchable(t *testing.T) {
@@ -1005,15 +1006,17 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	dsn := os.Getenv("SOURCE_TEST_POSTGRES_DSN")
 	python := os.Getenv("SOURCE_TEST_PYTHON")
 	cache := os.Getenv("SOURCE_PARSER_CACHE")
-	if dsn == "" || python == "" || cache == "" {
-		t.Fatal("integration requires SOURCE_TEST_POSTGRES_DSN, SOURCE_TEST_PYTHON and prefetched SOURCE_PARSER_CACHE")
+	externalParserURL := strings.TrimSpace(os.Getenv("SOURCE_TEST_PARSER_URL"))
+	if dsn == "" || cache == "" || (python == "" && externalParserURL == "") {
+		t.Fatal("integration requires SOURCE_TEST_POSTGRES_DSN, a parser runtime and prefetched SOURCE_PARSER_CACHE")
 	}
 	address, err := url.Parse(dsn)
 	require.NoError(t, err)
 	// These fixtures can create/drop schemas only in the dedicated test database.
 	require.Equal(t, "/source_test", address.Path)
 	require.Equal(t, "127.0.0.1", address.Hostname())
-	admin, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{})
+	silentLogger := quietSourceIntegrationLogger{}
+	admin, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{Logger: silentLogger})
 	require.NoError(t, err)
 	schema := "source_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	require.NoError(t, admin.Exec("CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search").Error)
@@ -1026,7 +1029,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	query := address.Query()
 	query.Set("search_path", schema+",public")
 	address.RawQuery = query.Encode()
-	db, err := gorm.Open(pgdriver.Open(address.String()), &gorm.Config{})
+	db, err := gorm.Open(pgdriver.Open(address.String()), &gorm.Config{Logger: silentLogger})
 	require.NoError(t, err)
 	t.Cleanup(func() { sqlDB, _ := db.DB(); _ = sqlDB.Close() })
 	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Model{}, &types.DataSource{}, &types.SyncLog{}, &types.KnowledgeTag{}, &types.KnowledgeTagRelation{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}))
@@ -1052,33 +1055,53 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	relationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000107_source_code_relations.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(relationMigration)).Error)
-	parser := exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
-	parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
-	stdout, err := parser.StdoutPipe()
-	require.NoError(t, err)
-	parser.Stderr = os.Stderr
-	require.NoError(t, parser.Start())
-	t.Cleanup(func() { _ = parser.Process.Kill(); _ = parser.Wait() })
-	startup := make(chan string, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		if scanner.Scan() {
-			startup <- scanner.Text()
-		} else {
-			startup <- ""
+	var parserAddress *url.URL
+	var parser *exec.Cmd
+	if externalParserURL != "" {
+		parserAddress, err = url.Parse(externalParserURL)
+		require.NoError(t, err)
+		require.Equal(t, "http", parserAddress.Scheme)
+		require.Contains(t, []string{"127.0.0.1", "::1", "localhost"}, parserAddress.Hostname())
+		healthClient := &http.Client{Timeout: 5 * time.Second}
+		response, healthErr := healthClient.Get(strings.TrimRight(externalParserURL, "/") + "/health")
+		require.NoError(t, healthErr)
+		var health struct {
+			Ready     bool     `json:"ready"`
+			Languages []string `json:"languages"`
 		}
-	}()
-	var ready struct {
-		Port int `json:"port"`
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&health))
+		require.NoError(t, response.Body.Close())
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.True(t, health.Ready)
+	} else {
+		parser = exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
+		parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
+		stdout, pipeErr := parser.StdoutPipe()
+		require.NoError(t, pipeErr)
+		parser.Stderr = os.Stderr
+		require.NoError(t, parser.Start())
+		t.Cleanup(func() { _ = parser.Process.Kill(); _ = parser.Wait() })
+		startup := make(chan string, 1)
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			if scanner.Scan() {
+				startup <- scanner.Text()
+			} else {
+				startup <- ""
+			}
+		}()
+		var ready struct {
+			Port int `json:"port"`
+		}
+		select {
+		case line := <-startup:
+			require.NoError(t, json.Unmarshal([]byte(line), &ready))
+		case <-time.After(10 * time.Second):
+			t.Fatal("real source parser did not start")
+		}
+		parserAddress, err = url.Parse(fmt.Sprintf("http://127.0.0.1:%d", ready.Port))
+		require.NoError(t, err)
 	}
-	select {
-	case line := <-startup:
-		require.NoError(t, json.Unmarshal([]byte(line), &ready))
-	case <-time.After(10 * time.Second):
-		t.Fatal("real Java parser did not start")
-	}
-	parserAddress, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", ready.Port))
-	require.NoError(t, err)
 	forward := httputil.NewSingleHostReverseProxy(parserAddress)
 	parserProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/parse" {
@@ -1267,4 +1290,19 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	f.chunks = NewChunkService(repository.NewSourceAwareChunkRepository(db), repository.NewSourceAwareKnowledgeRepository(db), kbRepo, modelService, engines, nil, nil, nil, kbs)
 	f.knowledge = &knowledgeService{repo: repository.NewSourceAwareKnowledgeRepository(db), kbService: kbs, kbShareService: f.shares, chunkRepo: repository.NewSourceAwareChunkRepository(db), chunkService: f.chunks, modelService: modelService, retrieveEngine: engines, task: kbDeleteTaskEnqueuer{}, fileSvc: sourceNoObjectStorage{}, tagRepo: repository.NewKnowledgeTagRepository(db)}
 	return f
+}
+
+// Debug() is used by several production repository queries. This test logger
+// remains silent even when GORM asks it to switch to Info mode, keeping source
+// integration SQL and bound values out of test output.
+type quietSourceIntegrationLogger struct{}
+
+func (quietSourceIntegrationLogger) LogMode(gormlogger.LogLevel) gormlogger.Interface {
+	return quietSourceIntegrationLogger{}
+}
+
+func (quietSourceIntegrationLogger) Info(context.Context, string, ...interface{})  {}
+func (quietSourceIntegrationLogger) Warn(context.Context, string, ...interface{})  {}
+func (quietSourceIntegrationLogger) Error(context.Context, string, ...interface{}) {}
+func (quietSourceIntegrationLogger) Trace(context.Context, time.Time, func() (string, int64), error) {
 }

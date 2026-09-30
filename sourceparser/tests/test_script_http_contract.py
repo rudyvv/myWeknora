@@ -8,9 +8,12 @@ import tempfile
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import unittest
 import urllib.error
 import urllib.request
+from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
 
 class ScriptHTTPContract(unittest.TestCase):
@@ -177,7 +180,12 @@ class ScriptHTTPContract(unittest.TestCase):
         status, health = self.request('/health')
         self.assertEqual(status, 200, health)
         lock = json.loads((Path(os.environ['SOURCE_PARSER_CACHE']) / 'grammar.lock.json').read_text(encoding='utf-8'))
-        expected = sorted(set(lock.get('grammars', {'java': lock})) | ({'mybatis-xml'} if 'java' in lock.get('grammars', {'java': lock}) else set()))
+        expected = set(lock.get('grammars', {'java': lock}))
+        if 'java' in expected:
+            expected.add('mybatis-xml')
+        if 'vue' in health['languages']:
+            expected.add('vue')
+        expected = sorted(expected)
         self.assertEqual(health['languages'], expected)
         expected_rules = 'rules-10' if 'java' in expected else ('rules-4' if 'python' in expected else 'rules-3')
         self.assertIn(expected_rules, health['parser_version'])
@@ -217,7 +225,11 @@ class ScriptHTTPContract(unittest.TestCase):
             (four_language / 'grammar.lock.json').write_text(json.dumps(four_language_lock), encoding='utf-8')
             status, health = health_for(four_language)
             self.assertEqual(status, 200, health)
-            self.assertEqual(health['languages'], ['java', 'javascript', 'mybatis-xml', 'tsx', 'typescript'])
+            expected_languages = ['java', 'javascript', 'mybatis-xml', 'tsx', 'typescript']
+            if 'vue' in health['languages']:
+                expected_languages.append('vue')
+                expected_languages.sort()
+            self.assertEqual(health['languages'], expected_languages)
             self.assertIn('rules-10', health['parser_version'])
             legacy = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             legacy.update(lock['grammars']['java'])
@@ -265,6 +277,109 @@ class ScriptHTTPContract(unittest.TestCase):
                 status, result = self.parse(path, language, raw)
                 self.assertEqual(status, 200, result)
                 self.assertEqual(result['parser_version'], health['parser_version'])
+
+    def test_response_waits_for_cleanup_and_next_sequential_parse_keeps_capacity(self):
+        parser_root = Path(__file__).parents[1]
+        sys.path.insert(0, str(parser_root))
+        try:
+            import server as parser_server
+        finally:
+            sys.path.remove(str(parser_root))
+
+        cache = os.environ['SOURCE_PARSER_CACHE']
+        local_server = ThreadingHTTPServer(('127.0.0.1', 0), parser_server.Handler)
+        local_server.cache = cache
+        local_server.parser_version = 'test-parser'
+        local_server.versions = {'typescript': 'test-typescript-runtime'}
+        local_server.languages = ['typescript']
+        local_server.sfc = None
+        server_thread = threading.Thread(target=local_server.serve_forever, daemon=True)
+        cleanup_started = threading.Event()
+        cleanup_finished = threading.Event()
+        allow_cleanup = threading.Event()
+        success_responded = threading.Event()
+        first_response = []
+        request_thread = None
+        reserved_slot = parser_server.SLOTS.acquire(timeout=1)
+        self.assertTrue(reserved_slot, 'one parser slot should be available for the test reservation')
+        raw = b'export type Version = string;'
+        body = {
+            'path': 'version.ts', 'language': 'typescript',
+            'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': 128}
+
+        def post():
+            request = urllib.request.Request(
+                'http://127.0.0.1:' + str(local_server.server_port) + '/v1/parse',
+                data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'})
+            try:
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as response:
+                return response.code, json.load(response)
+
+        original_cleanup = parser_server.terminate_parser_process_tree
+        original_respond = parser_server.Handler.respond
+
+        def blocked_cleanup(process):
+            cleanup_started.set()
+            if not allow_cleanup.wait(timeout=12):
+                raise TimeoutError('test did not release the parser cleanup barrier')
+            try:
+                original_cleanup(process)
+            finally:
+                cleanup_finished.set()
+
+        def observed_respond(handler, status, result):
+            original_respond(handler, status, result)
+            if status == 200:
+                success_responded.set()
+
+        def first_request():
+            first_response.append(post())
+
+        server_thread.start()
+        try:
+            with patch.object(parser_server, 'terminate_parser_process_tree', blocked_cleanup), \
+                    patch.object(parser_server.Handler, 'respond', observed_respond):
+                request_thread = threading.Thread(target=first_request, daemon=True)
+                request_thread.start()
+                self.assertTrue(cleanup_started.wait(timeout=10), 'successful parsing should enter cleanup')
+
+                early_response = success_responded.wait(timeout=0.2)
+                overload_status, overload_result = post()
+                self.assertEqual((overload_status, overload_result),
+                                 (429, {'error': 'parser capacity reached'}),
+                                 'a request during genuine parser saturation should retain direct 429 behavior')
+                if early_response:
+                    # With the old ordering the first response is visible while its
+                    # only parser slot is still held, so the next request is rejected.
+                    second_status, second_result = post()
+                else:
+                    # Release the deterministic barrier, then issue the next request
+                    # immediately after the first HTTP response.
+                    allow_cleanup.set()
+                    request_thread.join(timeout=15)
+                    self.assertFalse(request_thread.is_alive(), 'first HTTP request should finish')
+                    self.assertEqual(first_response[0][0], 200, first_response[0])
+                    second_status, second_result = post()
+
+                allow_cleanup.set()
+                request_thread.join(timeout=15)
+                self.assertFalse(request_thread.is_alive(), 'first parser cleanup should finish')
+                self.assertTrue(cleanup_finished.wait(timeout=10), 'process-tree cleanup should complete')
+
+            self.assertEqual(second_status, 200, second_result)
+            self.assertFalse(early_response, 'HTTP success must wait for process cleanup and slot release')
+        finally:
+            allow_cleanup.set()
+            if request_thread is not None:
+                request_thread.join(timeout=15)
+            if reserved_slot:
+                parser_server.SLOTS.release()
+            local_server.shutdown()
+            local_server.server_close()
+            server_thread.join(timeout=3)
 
     def test_javascript_typescript_named_object_variables_keep_distinct_parent_structure(self):
         raw = ('export const api = {\r\n'

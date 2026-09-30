@@ -6,6 +6,7 @@ import test from 'node:test'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { JSDOM } from 'jsdom'
 import ts from 'typescript'
+import { sourceFactLabel, sourceQualityLabel } from '../../../../utils/sourceQuality'
 
 const dom = new JSDOM('<html><body></body></html>', { url: 'http://localhost/' })
 for (const key of ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'SVGElement', 'Node']) {
@@ -23,6 +24,7 @@ test('Agent knowledge tool UI displays bounded source facts, diagnostics and pin
   new Function('require', 'module', 'exports', compiled)((name: string) => {
     if (name === 'vue-i18n') return { useI18n: () => ({ t: () => 'chunks' }) }
     if (name === '@/utils/knowledgeChunksDisplay') return { getKnowledgeChunksSummaryHtml: () => '' }
+    if (name === '@/utils/sourceQuality') return { sourceFactLabel, sourceQualityLabel }
     return require(name)
   }, module, module.exports)
 

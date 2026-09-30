@@ -15,6 +15,17 @@ type SourceContext struct {
 	Range SourceRange `json:"range"`
 }
 
+// SourceRegion identifies a Vue single-file component block without claiming
+// that templates, styles, or custom blocks were compiled or executed.
+type SourceRegion struct {
+	Kind           string `json:"kind"`
+	Language       string `json:"language,omitempty"`
+	Quality        string `json:"quality"`
+	ExternalSource string `json:"external_source,omitempty"`
+	ExternalStatus string `json:"external_status,omitempty"`
+	ResolvedPath   string `json:"resolved_path,omitempty"`
+}
+
 type SourceSymbol struct {
 	Kind           string          `json:"kind"`
 	Name           string          `json:"name"`
@@ -23,14 +34,25 @@ type SourceSymbol struct {
 	SignatureRange SourceRange     `json:"signature_range"`
 	Range          SourceRange     `json:"range"`
 	Annotations    []SourceContext `json:"annotations"`
+	Region         *SourceRegion   `json:"region,omitempty"`
+}
+
+// SourceDiagnostic is a bounded parser code anchored to an original source
+// range. Its human-facing explanation is generated from the code, not parser
+// error text.
+type SourceDiagnostic struct {
+	Code  string      `json:"code"`
+	Range SourceRange `json:"range"`
 }
 
 type ParsedSourceChunk struct {
-	Content string          `json:"content"`
-	Range   SourceRange     `json:"range"`
-	Quality string          `json:"quality"`
-	Symbols []string        `json:"symbols"`
-	Context []SourceContext `json:"context"`
+	Content     string             `json:"content"`
+	Range       SourceRange        `json:"range"`
+	Quality     string             `json:"quality"`
+	Symbols     []string           `json:"symbols"`
+	Context     []SourceContext    `json:"context"`
+	Region      *SourceRegion      `json:"region,omitempty"`
+	Diagnostics []SourceDiagnostic `json:"diagnostics,omitempty"`
 }
 
 // ParsedSourceFact is parser-authored syntax evidence. Its range always points
@@ -186,17 +208,19 @@ type SourceRunResult struct {
 }
 
 type SourceEvidence struct {
-	DataSourceID  string          `json:"data_source_id"`
-	SnapshotID    string          `json:"snapshot_id"`
-	FileVersionID string          `json:"file_version_id"`
-	ProjectID     string          `json:"project_id"`
-	CommitSHA     string          `json:"commit_sha"`
-	Path          string          `json:"path"`
-	Range         SourceRange     `json:"range"`
-	Symbols       []string        `json:"symbols"`
-	Quality       string          `json:"quality"`
-	GitLabURL     string          `json:"gitlab_url"`
-	Context       []SourceContext `json:"context"`
+	DataSourceID  string             `json:"data_source_id"`
+	SnapshotID    string             `json:"snapshot_id"`
+	FileVersionID string             `json:"file_version_id"`
+	ProjectID     string             `json:"project_id"`
+	CommitSHA     string             `json:"commit_sha"`
+	Path          string             `json:"path"`
+	Range         SourceRange        `json:"range"`
+	Symbols       []string           `json:"symbols"`
+	Quality       string             `json:"quality"`
+	GitLabURL     string             `json:"gitlab_url"`
+	Context       []SourceContext    `json:"context"`
+	Region        *SourceRegion      `json:"region,omitempty"`
+	Diagnostics   []SourceDiagnostic `json:"diagnostics,omitempty"`
 }
 
 type SourceReadLease struct {

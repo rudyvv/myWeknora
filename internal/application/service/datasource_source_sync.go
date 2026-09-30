@@ -130,7 +130,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	manifest, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, raw []byte) error {
 		language := source.LanguageForPath(file.Path)
 		if language == "" {
-			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript/Python/MyBatis XML files only; narrow the included paths")
+			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript/Python/Vue/MyBatis XML files only; narrow the included paths")
 		}
 		if !checkedLanguages[language] {
 			if !sourceParserReady(ctx, language) {
@@ -213,7 +213,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		fileVersion := &types.SourceFileVersion{ID: uuid.NewString(), SourceFileID: fileID, SnapshotID: snapshot.ID, BlobSHA: member.BlobSHA, SHA256: parsed.SHA256, Content: raw, Encoding: parsed.Encoding, ParserVersion: parsed.ParserVersion, Quality: parsed.Quality, Symbols: types.JSON(symbols), Facts: types.JSON(facts), Diagnostics: types.JSON(diagnostics)}
 		chunks := make([]*types.Chunk, len(parsed.Chunks))
 		for index, part := range parsed.Chunks {
-			evidence := types.SourceEvidence{DataSourceID: ds.ID, SnapshotID: snapshot.ID, FileVersionID: fileVersion.ID, ProjectID: snapshot.ProjectID, CommitSHA: snapshot.CommitSHA, Path: member.Path, Range: part.Range, Symbols: part.Symbols, Quality: part.Quality, Context: part.Context, GitLabURL: source.GitLabBlobURL(snapshot.RepositoryURL, snapshot.CommitSHA, member.Path, part.Range)}
+			evidence := types.SourceEvidence{DataSourceID: ds.ID, SnapshotID: snapshot.ID, FileVersionID: fileVersion.ID, ProjectID: snapshot.ProjectID, CommitSHA: snapshot.CommitSHA, Path: member.Path, Range: part.Range, Symbols: part.Symbols, Quality: part.Quality, Context: part.Context, Region: part.Region, Diagnostics: part.Diagnostics, GitLabURL: source.GitLabBlobURL(snapshot.RepositoryURL, snapshot.CommitSHA, member.Path, part.Range)}
 			metadata, _ := json.Marshal(map[string]any{"source": evidence})
 			chunk := &types.Chunk{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, KnowledgeID: fileID, Content: part.Content, SourceContent: part.Content, ChunkIndex: index, ChunkType: types.ChunkTypeText, IsEnabled: false, IndexStatus: "pending", StartAt: utf8.RuneCount(raw[:part.Range.StartByte]), EndAt: utf8.RuneCount(raw[:part.Range.EndByte]), Metadata: types.JSON(metadata)}
 			chunks[index] = chunk

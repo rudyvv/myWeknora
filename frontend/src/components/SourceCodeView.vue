@@ -2,6 +2,8 @@
 import { computed, ref, watch } from 'vue'
 import { readSourceWikiEvidence } from '@/api/wiki'
 import { getSourceFile, type SourceCodeRelation, type SourceFact, type SourceFileView, type SourceRange } from '@/api/knowledge-base'
+import SourceRegionBadge from '@/components/SourceRegionBadge.vue'
+import { sourceFactLabel, sourceQualityLabel } from '@/utils/sourceQuality'
 
 const props = defineProps<{ knowledgeId: string; fileVersionId?: string; wikiEvidence?: { kbId: string; slug: string; id: string; version: number; commitSHA: string }; evidenceRange?: SourceRange }>()
 const file = ref<SourceFileView | null>(null)
@@ -18,13 +20,7 @@ const navigationStack = ref<Array<{ file: SourceFileView; selected: SourceRange 
 let requestGeneration = 0
 const pageSize = 200
 const lines = computed(() => file.value?.content.split('\n') || [])
-const sourceQualityLabels: Record<string, string> = {
-  structural: '结构解析',
-  text_fallback: '文本回退（未识别为结构化源码）',
-  partial: '部分解析（部分结构不可用）',
-  syntax_error: '语法错误（保留原文与可用证据）',
-}
-const qualityLabel = computed(() => sourceQualityLabels[file.value?.quality || ''] || `未知解析质量（${file.value?.quality || '未提供'}）`)
+const qualityLabel = computed(() => sourceQualityLabel(file.value?.quality))
 const visibleLines = computed(() => lines.value.slice(page.value * pageSize, (page.value + 1) * pageSize))
 const symbols = computed(() => (file.value?.symbols || []).filter(s => s.qualified_name.toLowerCase().includes(symbolQuery.value.toLowerCase())).slice(0, 50))
 const gitlabURL = computed(() => {
@@ -41,7 +37,7 @@ function selectSymbol(range: SourceRange) {
   page.value = Math.floor((range.start_line - 1) / pageSize)
 }
 function factLabel(fact: SourceFact) {
-  return fact.qualified_name || fact.method_name || fact.name || fact.statement_id || fact.target_name || fact.kind
+  return sourceFactLabel(fact)
 }
 function relationLabel(relation: SourceCodeRelation) {
   return relation.to_key ? `${relation.from_key} → ${relation.to_key}` : relation.from_key
@@ -180,6 +176,7 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
         <input v-model="symbolQuery" aria-label="搜索源码符号" placeholder="搜索类或方法" />
         <button v-for="symbol in symbols" :key="`${symbol.qualified_name}:${symbol.range.start_byte}`" type="button" @click="selectSymbol(symbol.range)">
           {{ symbol.qualified_name }} · L{{ symbol.range.start_line }}–{{ symbol.range.end_line }}
+          <SourceRegionBadge v-if="symbol.region" :region="symbol.region" />
         </button>
       </div>
       <section v-if="file.facts?.length || file.diagnostics?.length || file.relations?.length || file.relations_truncated" class="source-analysis" aria-label="源码结构分析">

@@ -11,7 +11,10 @@ import unittest
 import urllib.error
 import urllib.request
 
-from sourceparser.runtime import load_runtime
+try:
+    from sourceparser.runtime import load_runtime
+except ModuleNotFoundError:
+    from runtime import load_runtime
 
 
 class PythonHTTPContract(unittest.TestCase):
