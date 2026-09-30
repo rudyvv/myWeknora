@@ -348,6 +348,38 @@ func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.C
 			}
 		}
 		if event.Status == "delivered" {
+			var pendingOp types.TaskPendingOp
+			opErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where(`tenant_id=? AND task_type=? AND scope=? AND scope_id=? AND op=? AND dedup_key=?`,
+					current.TenantID, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase,
+					current.KnowledgeBaseID, "published_snapshot", event.ID).
+				Take(&pendingOp).Error
+			if opErr != nil && !errors.Is(opErr, gorm.ErrRecordNotFound) {
+				return opErr
+			}
+			if opErr == nil {
+				var previousPayload types.SourceWikiUpdatePayload
+				if err := json.Unmarshal(pendingOp.Payload, &previousPayload); err != nil {
+					previousPayload.ConfigGeneration = 0
+				}
+				if previousPayload.ConfigGeneration != state.ConfigGeneration {
+					updated := tx.Exec(`UPDATE task_pending_ops SET payload=?::jsonb, fail_count=0, claimed_at=NULL WHERE id=?`, string(payload), pendingOp.ID)
+					if updated.Error != nil {
+						return updated.Error
+					}
+					if updated.RowsAffected != 1 {
+						return fmt.Errorf("delivered source Wiki operation changed while refreshing its generation")
+					}
+				}
+			}
+			updated := tx.Exec(`UPDATE source_publication_outbox SET payload=?::jsonb, config_generation=?
+				WHERE id=? AND status='delivered'`, string(payload), state.ConfigGeneration, event.ID)
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return fmt.Errorf("delivered source Wiki notification changed while refreshing its generation")
+			}
 			return nil
 		}
 		if event.Status != "pending" && event.Status != "superseded" {

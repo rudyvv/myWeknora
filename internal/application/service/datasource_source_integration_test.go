@@ -725,6 +725,11 @@ func TestSourceUnchangedTargetDoesNotRepublish(t *testing.T) {
 	require.Equal(t, before.Snapshot.ID, after.Snapshot.ID, "same target and effective processing/indexing identity must retain the existing publication")
 	require.EqualValues(t, 1, publications)
 	require.EqualValues(t, 1, signals)
+	completed, err := f.service.GetSyncLog(f.ctx, secondLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, completed.Status)
+	require.Equal(t, "published", completed.SourceRunPhase,
+		"a successful same-target no-op must not expose a failed source-run phase")
 }
 
 func TestSourceWikiNotificationSurvivesCredentialRotationAndSameTargetSync(t *testing.T) {
@@ -785,6 +790,64 @@ func TestSourceWikiNotificationSurvivesCredentialRotationAndSameTargetSync(t *te
 	require.NoError(t, json.Unmarshal(op.Payload, &payload))
 	require.Equal(t, original.SnapshotID, payload.SnapshotID)
 	require.Equal(t, current.ConfigGeneration, payload.ConfigGeneration)
+}
+
+func TestSourceWikiNotificationRefreshesDeliveredEventAfterCredentialRotation(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	firstLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, firstLog)))
+
+	accepted, err := f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, accepted)
+	pendingOps := repository.NewTaskPendingOpsRepository(f.db)
+	readOps := func() []*types.TaskPendingOp {
+		ops, readErr := pendingOps.PeekBatch(f.ctx, types.TypeSourceWikiUpdate,
+			types.TaskScopeKnowledgeBase, f.kb.ID, 10)
+		require.NoError(t, readErr)
+		return ops
+	}
+	originalOps := readOps()
+	require.Len(t, originalOps, 1)
+	var originalPayload types.SourceWikiUpdatePayload
+	require.NoError(t, json.Unmarshal(originalOps[0].Payload, &originalPayload))
+
+	config, err := f.ds.ParseConfig()
+	require.NoError(t, err)
+	baseURL, ok := config.Credentials["base_url"].(string)
+	require.True(t, ok)
+	_, err = f.service.UpdateDataSourceCredentials(f.ctx, f.ds.ID, map[string]interface{}{
+		"base_url": baseURL, "access_token": "rotated-fixture-token",
+	})
+	require.NoError(t, err)
+
+	secondLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, secondLog)))
+	var currentGeneration int64
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).
+		Select("config_generation").Take(&currentGeneration).Error)
+
+	updatedOps := readOps()
+	require.Len(t, updatedOps, 1, "refreshing a delivered notification must preserve one durable op")
+	require.Equal(t, originalOps[0].ID, updatedOps[0].ID, "refreshing the payload must preserve the pending op identity")
+	require.Equal(t, originalOps[0].DedupKey, updatedOps[0].DedupKey, "refreshing the payload must preserve event idempotency")
+	var updatedPayload types.SourceWikiUpdatePayload
+	require.NoError(t, json.Unmarshal(updatedOps[0].Payload, &updatedPayload))
+	require.Equal(t, originalPayload.EventID, updatedPayload.EventID)
+	require.Equal(t, originalPayload.SnapshotID, updatedPayload.SnapshotID,
+		"refreshing a delivered event must continue to reference the same published snapshot")
+	require.Greater(t, updatedPayload.ConfigGeneration, originalPayload.ConfigGeneration)
+	require.Equal(t, currentGeneration, updatedPayload.ConfigGeneration,
+		"the durable Wiki notification must carry the current source generation")
+
+	for i := 0; i < 2; i++ {
+		accepted, err = f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+		require.NoError(t, err)
+		require.Zero(t, accepted, "relaying an already delivered event must be idempotent")
+		require.Len(t, readOps(), 1, "duplicate relay must not duplicate the durable Wiki op")
+	}
 }
 
 func TestSourcePublicationOutboxAcceptsTypedPendingUpdateAtomically(t *testing.T) {

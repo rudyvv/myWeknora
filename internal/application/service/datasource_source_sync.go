@@ -211,6 +211,13 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			published.RepositoryURL == snapshot.RepositoryURL && published.ManifestDigest == snapshot.ManifestDigest &&
 			published.RulesVersion == snapshot.RulesVersion && published.ProcessingVersion == snapshot.ProcessingVersion &&
 			published.EmbeddingVersion == embeddingVersion {
+			if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
+				if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+					if err := control.RecordSourceRunPhase(ctx, lease, "published", published.CommitSHA); err != nil {
+						return err
+					}
+				}
+			}
 			if err := s.sourceSnapshots.EnsurePublishedSourceWikiUpdate(ctx, ds, published); err != nil {
 				return err
 			}
