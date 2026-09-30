@@ -46,6 +46,8 @@ func enrichSFCReferences(ctx context.Context, db *gorm.DB, file *types.SourceFil
 		query := db.WithContext(ctx).Table("source_snapshot_members sm").
 			Select("sf.id").
 			Joins("JOIN source_files sf ON sf.id=sm.source_file_id AND sf.data_source_id=?", file.DataSourceID).
+			Joins("JOIN knowledges k ON k.id=sf.id AND k.tenant_id=sf.tenant_id AND k.knowledge_base_id=sf.knowledge_base_id AND k.deleted_at IS NULL").
+			Joins("JOIN data_sources ds ON ds.id=sf.data_source_id AND ds.deleted_at IS NULL AND ds.config->'settings'->>'content_mode'='source'").
 			Where("sm.snapshot_id=? AND sm.path=? AND sm.status='parsed'", file.SnapshotID, target).
 			Where(source.SnapshotSQL(ctx, "sm.snapshot_id", "sf.data_source_id", "sf.id"))
 		if err := query.Limit(1).Scan(&targetID).Error; err != nil {

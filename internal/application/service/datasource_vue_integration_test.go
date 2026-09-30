@@ -43,16 +43,18 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 		"<script lang=\"ts\">\r\nexport const scriptDialectMarker = 1;\r\n</script>\r\n")
 	diagnosticVue := []byte("<template><div>first</template>\r\n" +
 		"<style lang=\"scss\">.diagnosticStyleMarker { color: red; }</style>\r\n")
+	eofDiagnosticVue := []byte("<script>const a=1")
 	api := []byte("export function send(name) { return `预约 ${name}`; }\r\n")
 	files := map[string][]byte{
-		"src/components/BookingPanel.vue":    component,
-		"src/components/ExternalPanel.vue":   externalVue,
-		"src/components/RejectedPanel.vue":   rejectedVue,
-		"src/components/MissingPanel.vue":    missingVue,
-		"src/components/UnknownPanel.vue":    unknownVue,
-		"src/components/DialectPanel.vue":    dialectVue,
-		"src/components/DiagnosticPanel.vue": diagnosticVue,
-		"src/components/api.js":              api,
+		"src/components/BookingPanel.vue":       component,
+		"src/components/ExternalPanel.vue":      externalVue,
+		"src/components/RejectedPanel.vue":      rejectedVue,
+		"src/components/MissingPanel.vue":       missingVue,
+		"src/components/UnknownPanel.vue":       unknownVue,
+		"src/components/DialectPanel.vue":       dialectVue,
+		"src/components/DiagnosticPanel.vue":    diagnosticVue,
+		"src/components/EOFDiagnosticPanel.vue": eofDiagnosticVue,
+		"src/components/api.js":                 api,
 	}
 	f := newJavaSourceFixture(t, files)
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
@@ -154,6 +156,21 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	require.Contains(t, modelOutput, "original bytes are retained")
 	require.NotContains(t, modelOutput, `resolved_path=`)
 	require.NotContains(t, modelOutput, `message=`)
+
+	eofHit, eofEvidence := findIndexedEvidence(
+		"descriptor warning", "src/components/EOFDiagnosticPanel.vue", "const a=1")
+	require.NotNil(t, eofHit)
+	require.NotNil(t, eofEvidence)
+	require.NotNil(t, eofEvidence.Region)
+	require.Equal(t, "script", eofEvidence.Region.Kind)
+	require.Equal(t, "degraded", eofEvidence.Quality)
+	require.Equal(t, "degraded", eofEvidence.Region.Quality)
+	eofArea := eofEvidence.Range
+	require.Equal(t, string(eofDiagnosticVue[eofArea.StartByte:eofArea.EndByte]), eofHit.Content)
+	require.Len(t, eofEvidence.Diagnostics, 1)
+	require.Equal(t, types.SourceRange{
+		StartByte: len(eofDiagnosticVue), EndByte: len(eofDiagnosticVue), StartLine: 1, EndLine: 1,
+	}, eofEvidence.Diagnostics[0].Range)
 
 	styleHit, styleEvidence := findIndexedEvidence(
 		"diagnosticStyleMarker", "src/components/DiagnosticPanel.vue", "diagnosticStyleMarker")
@@ -340,6 +357,17 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	unknownView, err := f.knowledge.GetSourceFile(f.ctx, unknownID)
 	require.NoError(t, err)
 	require.Equal(t, "unknown_preprocess", unknownView.Quality)
+
+	var apiID string
+	require.NoError(t, f.db.Raw("SELECT id FROM source_files WHERE path=?", "src/components/api.js").Scan(&apiID).Error)
+	require.NoError(t, f.db.Exec("UPDATE knowledges SET deleted_at=now() WHERE id=?", apiID).Error)
+	deletedTargetView, err := f.knowledge.GetSourceFile(pinned, externalID)
+	require.NoError(t, err)
+	deletedTargetRegion := findScriptRegion(deletedTargetView)
+	require.NotNil(t, deletedTargetRegion)
+	require.Equal(t, "unchecked", deletedTargetRegion.ExternalStatus,
+		"a soft-deleted source target is no longer readable and must not be resolved")
+	require.Empty(t, deletedTargetRegion.ResolvedPath)
 }
 
 func TestSourceVue2RepresentativeAcceptance(t *testing.T) {

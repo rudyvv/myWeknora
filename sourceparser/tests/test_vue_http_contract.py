@@ -160,10 +160,40 @@ class VueHTTPContract(unittest.TestCase):
             self.assertEqual(chunk['quality'], quality)
             self.assertEqual(chunk['region']['kind'], kind)
             self.assertEqual(chunk['region']['quality'], quality)
-        self.assertTrue(any(symbol['name'] == 'supportedScriptMarker' and
-                            symbol['region']['kind'] == 'script' and
-                            symbol['region']['quality'] == 'structural'
-                            for symbol in parsed['symbols']))
+        script_chunk = next(chunk for chunk in parsed['chunks'] if 'supportedScriptMarker' in chunk['content'])
+        script_range = script_chunk['range']
+        self.assertEqual(raw[script_range['start_byte']:script_range['end_byte']].decode(),
+                         script_chunk['content'])
+        self.assertLessEqual(script_range['start_byte'], raw.index(b'supportedScriptMarker'))
+        self.assertGreater(script_range['end_byte'], raw.index(b'supportedScriptMarker'))
+
+    def test_descriptor_warning_on_opening_tag_is_attached_to_template_body(self):
+        raw = b'<template><div>ok</div>'
+        status, parsed = self.parse(raw)
+        self.assertEqual(status, 200, parsed)
+        body_chunks = [chunk for chunk in parsed['chunks']
+                       if (chunk.get('region') or {}).get('kind') == 'template' and '<div>' in chunk['content']]
+        self.assertEqual(len(body_chunks), 1)
+        self.assertEqual(body_chunks[0]['quality'], 'degraded')
+        self.assertEqual(body_chunks[0]['region']['quality'], 'degraded')
+        self.assertEqual(body_chunks[0]['diagnostics'][0]['code'], 'vue_sfc_parse_warning')
+        diagnostic = next(symbol for symbol in parsed['symbols'] if symbol['kind'] == 'sfc_diagnostic')
+        self.assertEqual(diagnostic['range']['start_byte'], 0,
+                         'the original warning location remains on the opening tag')
+
+    def test_descriptor_warning_at_eof_is_attached_to_last_script_body_chunk(self):
+        raw = b'<script>const a=1'
+        status, parsed = self.parse(raw)
+        self.assertEqual(status, 200, parsed)
+        body_chunks = [chunk for chunk in parsed['chunks']
+                       if (chunk.get('region') or {}).get('kind') == 'script' and 'const a=1' in chunk['content']]
+        self.assertEqual(len(body_chunks), 1)
+        self.assertEqual(body_chunks[0]['quality'], 'degraded')
+        self.assertEqual(body_chunks[0]['region']['quality'], 'degraded')
+        self.assertEqual(body_chunks[0]['diagnostics'][0]['code'], 'vue_sfc_parse_warning')
+        diagnostic = body_chunks[0]['diagnostics'][0]['range']
+        self.assertEqual(diagnostic['start_byte'], len(raw))
+        self.assertEqual(diagnostic['end_byte'], len(raw), 'EOF remains a zero-width original parser location')
 
     def test_descriptor_warning_degrades_only_its_region_and_attaches_exact_safe_diagnostic(self):
         template_body = '<div>first ' + ('unrelated ' * 20)

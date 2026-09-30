@@ -110,7 +110,7 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 				return nil, fmt.Errorf("source parser returned invalid chunk region")
 			}
 			for _, diagnostic := range chunk.Diagnostics {
-				if !validSourceDiagnostic(language, raw, span, diagnostic) {
+				if !validSourceDiagnostic(language, raw, diagnostic) {
 					return nil, fmt.Errorf("source parser returned invalid diagnostic coordinates")
 				}
 			}
@@ -172,14 +172,13 @@ func validSourceRange(raw []byte, span types.SourceRange) bool {
 	return span.StartByte >= 0 && span.EndByte >= span.StartByte && span.EndByte <= len(raw) && utf8.Valid(raw[span.StartByte:span.EndByte]) && validSourceLines(raw, span)
 }
 
-// Diagnostics are attributed by start byte; their verified source range may
-// extend beyond the single chunk that owns that position.
-func validSourceDiagnostic(language string, raw []byte, chunk types.SourceRange, diagnostic types.SourceDiagnostic) bool {
+// A warning may be attributed to a body chunk even when its original location
+// is in a block wrapper or at EOF; validate only the trusted source range.
+func validSourceDiagnostic(language string, raw []byte, diagnostic types.SourceDiagnostic) bool {
 	if language != "vue" || (diagnostic.Code != "vue_sfc_parse_warning" && diagnostic.Code != "vue_sfc_duplicate_block") {
 		return false
 	}
-	return chunk.StartByte <= diagnostic.Range.StartByte && diagnostic.Range.StartByte < chunk.EndByte &&
-		validSourceRange(raw, diagnostic.Range)
+	return validSourceRange(raw, diagnostic.Range)
 }
 
 // SourceIndexText is derived index text, not a contiguous original fragment.

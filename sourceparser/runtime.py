@@ -170,7 +170,8 @@ def _split_raw(raw, start, end, maximum, span, quality, region):
         if stop <= cursor:
             raise RuntimeError('SFC block cannot be split at a UTF-8 boundary')
         chunks.append({'content': raw[cursor:stop].decode('utf-8'), 'range': span(cursor, stop),
-                       'quality': quality, 'symbols': [], 'context': [], 'region': region})
+                       'quality': quality, 'symbols': [], 'context': [],
+                       'region': dict(region) if region is not None else None})
         cursor = stop
     return chunks
 
@@ -253,6 +254,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         body = raw[start:end]
         block_quality = 'structural'
         block_symbols = []
+        body_chunks = []
         external_script = kind == 'script' and bool(block.get('src'))
         unsupported_script = kind == 'script' and not external_script and script_language not in script_languages
         unsupported_preprocess = unsupported_script or language not in known_raw_languages[kind]
@@ -281,6 +283,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             for chunk in block_chunks:
                 chunk['region'] = region_for(block, block_quality)
             chunks.extend(block_chunks)
+            body_chunks = block_chunks
         else:
             if external_script:
                 block_quality = 'degraded'
@@ -316,6 +319,9 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             'region': region,
             'start_byte': tag_start if tag_start is not None else start,
             'end_byte': block.get('close_end_byte', end),
+            'body_start_byte': start,
+            'body_end_byte': end,
+            'body_chunks': body_chunks,
         })
     if cursor < len(raw):
         chunks.extend(_split_raw(raw, cursor, len(raw), max_bytes, span, 'structural', None))
@@ -342,9 +348,22 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         diagnostic_evidence = {'code': diagnostic['code'], 'range': diagnostic_range}
         block_info = next((item for item in block_infos
                            if item['start_byte'] <= start_byte < item['end_byte']), None)
-        affected_chunks = [chunk for chunk in chunks
-                           if chunk['range']['start_byte'] <= start_byte < chunk['range']['end_byte']]
-        if not affected_chunks:
+        if block_info is None:
+            block_info = next((item for item in reversed(block_infos)
+                               if item['end_byte'] == start_byte), None)
+        affected_chunk = None
+        if block_info and block_info['body_chunks']:
+            if start_byte < block_info['body_start_byte']:
+                affected_chunk = block_info['body_chunks'][0]
+            elif start_byte >= block_info['body_end_byte']:
+                affected_chunk = block_info['body_chunks'][-1]
+            else:
+                affected_chunk = next((chunk for chunk in block_info['body_chunks']
+                                       if chunk['range']['start_byte'] <= start_byte < chunk['range']['end_byte']), None)
+        if affected_chunk is None:
+            affected_chunk = next((chunk for chunk in chunks
+                                   if chunk['range']['start_byte'] <= start_byte < chunk['range']['end_byte']), None)
+        if affected_chunk is None:
             degraded = True
             continue
         if block_info is not None:
@@ -353,14 +372,12 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
                 region['quality'] = 'degraded'
             diagnostic_region = region
         else:
-            diagnostic_region = (affected_chunks[0].get('region') if affected_chunks else
-                                 {'kind': 'custom', 'quality': 'degraded'})
-        for chunk in affected_chunks:
-            if chunk['quality'] == 'structural':
-                chunk['quality'] = 'degraded'
-            if chunk.get('region') and chunk['region']['quality'] == 'structural':
-                chunk['region']['quality'] = 'degraded'
-            chunk.setdefault('diagnostics', []).append(diagnostic_evidence)
+            diagnostic_region = affected_chunk.get('region') or {'kind': 'custom', 'quality': 'degraded'}
+        if affected_chunk['quality'] == 'structural':
+            affected_chunk['quality'] = 'degraded'
+        if affected_chunk.get('region') and affected_chunk['region']['quality'] == 'structural':
+            affected_chunk['region']['quality'] = 'degraded'
+        affected_chunk.setdefault('diagnostics', []).append(diagnostic_evidence)
         point = span(start_byte, start_byte)
         symbols.append({'kind': 'sfc_diagnostic', 'name': 'SFC descriptor warning',
                         'qualified_name': path + '#diagnostic[' + str(len(symbols)) + ']',
