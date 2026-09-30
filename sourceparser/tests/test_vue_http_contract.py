@@ -14,6 +14,7 @@ import unittest
 from http.server import ThreadingHTTPServer
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 try:
     from sourceparser import runtime
@@ -116,6 +117,29 @@ class VueHTTPContract(unittest.TestCase):
             'path': 'src/BookingPanel.vue', 'language': 'vue',
             'sha256': hashlib.sha256(raw).hexdigest(),
             'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': maximum})
+
+    def parse_after_transient_capacity(self, raw, maximum=128):
+        """Retry only the bounded post-response cleanup window, never parser errors."""
+        deadline = time.monotonic() + 4
+        delay = 0.025
+        while True:
+            status, parsed = self.parse(raw, maximum)
+            if (status != 429 or not isinstance(parsed, dict) or
+                    parsed.get('error') != 'parser capacity reached'):
+                return status, parsed
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return status, parsed
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.25)
+
+    def test_capacity_retry_returns_parser_errors_without_retrying(self):
+        parser_error = {'error': 'source parsing failed'}
+        with patch.object(self, 'parse', side_effect=[
+                (429, {'error': 'parser capacity reached'}), (422, parser_error), (200, {})]) as parse:
+            status, result = self.parse_after_transient_capacity(b'<script></script>')
+        self.assertEqual((status, result), (422, parser_error))
+        self.assertEqual(parse.call_count, 2, 'a parser error must not be retried')
 
     def test_vue_health_and_sfc_artifact_share_the_verified_fingerprint(self):
         status, health = self.request('/health')
@@ -544,7 +568,7 @@ class VueHTTPContract(unittest.TestCase):
         )
         for raw in cases:
             with self.subTest(source=raw):
-                status, parsed = self.parse(raw)
+                status, parsed = self.parse_after_transient_capacity(raw)
                 self.assertEqual(status, 200, parsed)
                 self.assertEqual(parsed['quality'], 'unknown_preprocess')
                 self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
