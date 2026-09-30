@@ -73,3 +73,7 @@ T10 15a289e0 root验证完成：source/modelcontext、真实PG14.850s、新引�
 2026-09-30 root 独立 T10 Go source/modelcontext/repository 三包 PASS，具体时长已写 t10-1d8c9978-review.md。三个审查文档及协调记录已推送功能分支 d190d54c，T06/T09/T10 各自新审查摘要已通过登录的 GitHub 浏览器分别评论到 #14/#17/#18，票均保持 open。T06 活跃回报两项新增 PG 回归先红后绿、继续广泛套件；T09/T10 active。继续待各自新完整干净 SHA，不重复审或派票。
 
 2026-09-30 T06 新完整干净冻结704c1ed7（base7f4fd1dc）双轴复审：Standards README Conventional Commits 硬1、判断1P3（最终集成可 squash 合规）；Spec1 P2：delivered pending-op 若已被旧消费者 claim，同代数更替时原地改 payload/清 claimed_at，第二消费者可 claim，同 ID 的旧 DeleteByIDs 可删除新通知。当前消费者属于 T15/T16，但 T06 耐久 handoff 需防此竞态。见 gitlab-code-wiki-rag-t06-704c1ed7-review.md；已交原 T06 Luna/xhigh 做真实 PG claimed-op 夹具和修复，不集成/关票/派新票。root独立 PG 三项仍在运行；worker 31项PG PASS 不替代该并发反例。T09/T10继续active修复，各自待新完整干净 SHA，父8/22。
+
+Root 的 T06 独立 PG 复验因 worker 已开始修改 704c 冻结工作树而不能作为冻结结果：新 claimed-op 红测在 `datasource_source_integration_test.go:836` 按预期失败（只剩1行，预期旧/新代数独立2行），是对 finding 的进一步证据。停止将该 moving-tree 测试计 PASS；待 worker 新 clean SHA 时在稳定导出/冻结树复验。T09 已获本机捆绑 Node24.19.0 只读路径以完成其锁定运行测试，独立58083/parser与用户指定57521数据库不动共享服务。
+
+T06 执行者尝试向 root 跨对话询问代数投递身份时被自动审批拒绝；root 从线程记录主动收取提案并通过既有授权的 root→worker 消息给出合同，不需要用户人工传话。决定：EventID 稳定标识一次源码发布/outbox 事件；DeliveryID 确定性标识 (EventID, ConfigGeneration)，作为 pending-op 的 dedup 与未来 T15/T16 消费幂等键。新代数必须获得独立 row ID，旧 claimed op 原样留下供旧消费者按旧 ID 确认；消费前仍需重验源代数、当前发布快照和权限，旧 DeliveryID 不写 Wiki。此合同限 T06 耐久通知及后续 T15/T16 消费接口，不提前实现卡片生成。worker 已获具体修复方向、继续 active。

@@ -14,4 +14,4 @@
 
 ## 验证边界
 
-Worker 报告 31 个真实 PostgreSQL 集成测试 PASS 228.550s、repository/datasource/service 包 PASS（service 排除四项 Windows 缺 POSIX sh 的无关测试）。Root 以独立 `localhost:57521/source_test` 跑三项关键 PG 回归，结果仍在进行；结束前不记为 PASS。现有集成测试只覆盖未领取 op，缺并发 claim/旧 ack 的反例。
+Worker 报告 31 个真实 PostgreSQL 集成测试 PASS 228.550s、repository/datasource/service 包 PASS（service 排除四项 Windows 缺 POSIX sh 的无关测试）。Root 开始独立三项 PG 复验期间，worker 已接收本轮 finding 并在同一工作树加入新的 claimed-op 红测；因此 Root 两次命令所见不再是冻结 SHA。第二次在 `datasource_source_integration_test.go:836` 得到期望红测：轮换后只剩 1 个 op，而新断言要求旧 claim 与当前代数 op 有独立身份。此结果证实并发反例，**不能**计作 `704c1ed7` 冻结树的独立通过；等下一干净 SHA 再验证。
