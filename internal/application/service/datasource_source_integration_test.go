@@ -165,6 +165,90 @@ func TestSourceSchedulerRecoversLegacyQueuedSourceRunWithoutCoordinatorState(t *
 	require.EqualValues(t, 1, runCount, "recovery must adopt the legacy log into coordinator state")
 }
 
+func TestSourceLegacyRecoverySupersedesOlderQueuedLogs(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	older := &types.SyncLog{
+		DataSourceID: f.ds.ID, TenantID: f.ds.TenantID, Status: types.SyncLogStatusQueued,
+		StartedAt: time.Now().UTC().Add(-2 * time.Minute), CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
+	}
+	newest := &types.SyncLog{
+		DataSourceID: f.ds.ID, TenantID: f.ds.TenantID, Status: types.SyncLogStatusQueued,
+		StartedAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, f.db.Create(older).Error)
+	require.NoError(t, f.db.Create(newest).Error)
+
+	dispatches, err := repository.NewSyncLogRepository(f.db).(interfaces.SourceSyncControlRepository).RecoverSourceTriggers(f.ctx, f.ds)
+	require.NoError(t, err)
+	require.Len(t, dispatches, 1)
+	require.Equal(t, newest.ID, dispatches[0].SyncLog.ID, "legacy recovery should dispatch the newest coalesced trigger")
+
+	storedOlder, err := f.service.GetSyncLog(f.ctx, older.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, storedOlder.Status)
+	requireSourceRunPhase(t, f, older.ID, "superseded")
+	storedNewest, err := f.service.GetSyncLog(f.ctx, newest.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, storedNewest.Status)
+	requireSourceRunPhase(t, f, newest.ID, "queued")
+}
+
+func TestPauseSourceFencesRunningPublicationAndRejectsNewTriggers(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	previous, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+
+	targetSHA := f.advanceJava("package demo; public class Service { int pausedRunMustNotPublish() { return 2; } }\n")
+	f.parseStarted = make(chan struct{}, 1)
+	f.parseRelease = make(chan struct{})
+	deliveries := make(chan *asynq.Task, 2)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: deliveries}
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	var task *asynq.Task
+	select {
+	case task = <-deliveries:
+	case <-time.After(2 * time.Second):
+		t.Fatal("source trigger was not enqueued")
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.service.ProcessSync(f.ctx, task) }()
+	select {
+	case <-f.parseStarted:
+	case <-time.After(20 * time.Second):
+		close(f.parseRelease)
+		t.Fatal("source run did not reach the controlled parse stage")
+	}
+
+	require.NoError(t, f.service.PauseDataSource(f.ctx, f.ds.ID))
+	_, manualErr := f.service.ManualSync(f.ctx, f.ds.ID)
+	close(f.parseRelease)
+	require.NoError(t, <-done, "a fenced worker should exit without publishing its stale result")
+
+	current, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, previous.Snapshot.ID, current.Snapshot.ID, "pause must retain the last complete published snapshot")
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, finished.Status)
+	requireSourceRunPhase(t, f, log.ID, "canceled")
+	var leaked int64
+	require.NoError(t, f.db.Table("source_snapshots").Where("data_source_id=? AND commit_sha=? AND state='published'", f.ds.ID, targetSHA).Count(&leaked).Error)
+	require.Zero(t, leaked, "the paused run's newer commit must not be published")
+	require.ErrorIs(t, manualErr, datasource.ErrDataSourceNotActive, "paused source mode must reject manual triggers")
+	var oldGeneration int64
+	require.NoError(t, f.db.Table("source_sync_runs").Select("config_generation").Where("sync_log_id=?", log.ID).Scan(&oldGeneration).Error)
+	require.NoError(t, f.service.ResumeDataSource(f.ctx, f.ds.ID))
+	resumedLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err, "resuming permits a fresh source trigger")
+	require.Equal(t, types.SyncLogStatusQueued, resumedLog.Status)
+	requireSourceRunPhase(t, f, resumedLog.ID, "queued")
+	var resumedGeneration int64
+	require.NoError(t, f.db.Table("source_sync_runs").Select("config_generation").Where("sync_log_id=?", resumedLog.ID).Scan(&resumedGeneration).Error)
+	require.Greater(t, resumedGeneration, oldGeneration, "resume registers work under the generation created by pause")
+}
+
 func TestSourceSchedulerDoesNotAdoptLegacyQueuedDocumentRun(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	var config map[string]any
@@ -663,7 +747,7 @@ func TestSourceRetryableFailureKeepsDurableRecoveryAndVisibleResult(t *testing.T
 
 	ds, err := f.service.GetDataSource(f.ctx, f.ds.ID)
 	require.NoError(t, err)
-	require.Equal(t, types.DataSourceStatusPaused, ds.Status, "manual sync must not unpause a paused datasource")
+	require.Equal(t, types.DataSourceStatusError, ds.Status, "a failed run should preserve its error state")
 	require.NotEmpty(t, ds.ErrorMessage)
 	require.NotEmpty(t, ds.LastSyncResult)
 
@@ -697,8 +781,8 @@ func requireSourceRunPhase(t *testing.T, f *javaSourceFixture, logID, want strin
 	require.FailNow(t, "sync log missing from public sync history", "log id %s", logID)
 }
 
-func TestSourceRetryRecoveryIncludesErrorAndPausedDataSources(t *testing.T) {
-	for _, initialStatus := range []string{types.DataSourceStatusActive, types.DataSourceStatusPaused} {
+func TestSourceRetryRecoveryIncludesActiveAndErrorDataSources(t *testing.T) {
+	for _, initialStatus := range []string{types.DataSourceStatusActive, types.DataSourceStatusError} {
 		t.Run(initialStatus, func(t *testing.T) {
 			f := newJavaSourceFixture(t)
 			require.NoError(t, f.db.Model(&types.DataSource{}).Where("id=?", f.ds.ID).Update("status", initialStatus).Error)
@@ -722,11 +806,7 @@ func TestSourceRetryRecoveryIncludesErrorAndPausedDataSources(t *testing.T) {
 			require.Equal(t, types.SyncLogStatusSuccess, stored.Status, "the recovered retry must complete")
 			ds, err := f.service.GetDataSource(f.ctx, f.ds.ID)
 			require.NoError(t, err)
-			if initialStatus == types.DataSourceStatusPaused {
-				require.Equal(t, types.DataSourceStatusPaused, ds.Status, "recovering manual work must preserve paused scheduling state")
-			} else {
-				require.Equal(t, types.DataSourceStatusActive, ds.Status)
-			}
+			require.Equal(t, types.DataSourceStatusActive, ds.Status)
 		})
 	}
 }
@@ -1691,7 +1771,7 @@ func TestSourceSearchHonorsFileTenantAndTagScopes(t *testing.T) {
 
 func TestSourceSearchSeparatesSamePathAcrossRepositorySources(t *testing.T) {
 	f := newJavaSourceFixture(t)
-	second := &types.DataSource{ID: uuid.NewString(), TenantID: f.ds.TenantID, KnowledgeBaseID: f.kb.ID, Name: "independent second source", Type: f.ds.Type, Status: types.DataSourceStatusPaused, Config: append(types.JSON{}, f.ds.Config...)}
+	second := &types.DataSource{ID: uuid.NewString(), TenantID: f.ds.TenantID, KnowledgeBaseID: f.kb.ID, Name: "independent second source", Type: f.ds.Type, Status: types.DataSourceStatusActive, Config: append(types.JSON{}, f.ds.Config...)}
 	_, err := f.service.CreateDataSource(f.ctx, second)
 	require.NoError(t, err)
 	for _, ds := range []*types.DataSource{f.ds, second} {
@@ -2157,7 +2237,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	config, err := json.Marshal(map[string]any{"type": "gitlab", "credentials": map[string]any{"base_url": gitlabServer.URL, "access_token": "fixture-token"},
 		"settings": map[string]any{"content_mode": "source", "projects": []any{map[string]any{"project_id": "123", "ref": "main", "paths": []string{"src"}}}}})
 	require.NoError(t, err)
-	ds := &types.DataSource{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: kb.ID, Name: "Java fixture", Type: "gitlab", Status: types.DataSourceStatusPaused, Config: types.JSON(config)}
+	ds := &types.DataSource{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: kb.ID, Name: "Java fixture", Type: "gitlab", Status: types.DataSourceStatusActive, Config: types.JSON(config)}
 	dsRepo := repository.NewDataSourceRepository(db)
 	require.NoError(t, dsRepo.Create(ctx, ds))
 	engines := retriever.NewRetrieveEngineRegistry(nil, nil)

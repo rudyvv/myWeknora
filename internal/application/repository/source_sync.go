@@ -111,13 +111,24 @@ func sourceStateUpdate(tx *gorm.DB, state *sourceSyncStateRow, values map[string
 }
 
 func cancelSourceRunTx(tx *gorm.DB, id, reason string) error {
+	return cancelSourceRunWithPhaseTx(tx, id, reason, "canceled")
+}
+
+func cancelSourceRunWithPhaseTx(tx *gorm.DB, id, reason, phase string) error {
 	if id == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	return tx.Model(&types.SyncLog{}).
+	result := tx.Model(&types.SyncLog{}).
 		Where("id=? AND status IN ?", id, []string{types.SyncLogStatusQueued, types.SyncLogStatusRunning}).
-		Updates(map[string]any{"status": types.SyncLogStatusCanceled, "finished_at": &now, "error_message": reason, "updated_at": now}).Error
+		Updates(map[string]any{"status": types.SyncLogStatusCanceled, "finished_at": &now, "error_message": reason, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	return tx.Table("source_sync_runs").Where("sync_log_id=?", id).Updates(map[string]any{"phase": phase, "updated_at": now}).Error
 }
 
 func cancelUntrackedQueuedSourceRunsTx(tx *gorm.DB, dataSourceID string, tenantID uint64) error {
@@ -133,6 +144,49 @@ func cancelUntrackedQueuedSourceRunsTx(tx *gorm.DB, dataSourceID string, tenantI
 		}
 	}
 	return nil
+}
+
+func cancelQueuedSourceTriggersTx(tx *gorm.DB, dataSourceID string, tenantID uint64, configGeneration int64, reason string) (bool, error) {
+	var logs []types.SyncLog
+	if err := tx.Model(&types.SyncLog{}).Where("data_source_id=? AND tenant_id=? AND status=?", dataSourceID, tenantID, types.SyncLogStatusQueued).
+		Find(&logs).Error; err != nil {
+		return false, err
+	}
+	for i := range logs {
+		if err := cancelSourceRunTx(tx, logs[i].ID, reason); err != nil {
+			return false, err
+		}
+		if err := tx.Exec(`INSERT INTO source_sync_runs(sync_log_id,data_source_id,tenant_id,config_generation,delivery_generation,trigger,phase,updated_at)
+			VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(sync_log_id) DO UPDATE SET phase='canceled',updated_at=EXCLUDED.updated_at`,
+			logs[i].ID, dataSourceID, tenantID, configGeneration, 0, "recovery", "canceled", time.Now().UTC()).Error; err != nil {
+			return false, err
+		}
+	}
+	return len(logs) > 0, nil
+}
+
+func (r *SyncLogRepository) invalidatePausedSourceGeneration(tx *gorm.DB, state *sourceSyncStateRow, ds *types.DataSource) error {
+	activeID := derefSourceID(state.ActiveSyncLogID)
+	if err := cancelSourceRunTx(tx, activeID, "source was paused; this run was fenced off"); err != nil {
+		return err
+	}
+	canceledQueued, err := cancelQueuedSourceTriggersTx(tx, ds.ID, ds.TenantID, state.ConfigGeneration, "source was paused; this trigger was canceled")
+	if err != nil {
+		return err
+	}
+	hadWork := activeID != "" || derefSourceID(state.PendingSyncLogID) != "" || state.LeaseOwner != nil || canceledQueued
+	if !hadWork {
+		return nil
+	}
+	state.ConfigGeneration++
+	state.FencingToken++
+	state.LeaseOwner, state.LeaseExpiresAt = nil, nil
+	state.ActiveSyncLogID, state.PendingSyncLogID, state.PendingTrigger = nil, nil, ""
+	return sourceStateUpdate(tx, state, map[string]any{
+		"config_generation": state.ConfigGeneration, "fencing_token": state.FencingToken,
+		"lease_owner": nil, "lease_expires_at": nil, "active_sync_log_id": nil,
+		"pending_sync_log_id": nil, "pending_trigger": "",
+	})
 }
 
 func (r *SyncLogRepository) invalidateSourceGeneration(tx *gorm.DB, state *sourceSyncStateRow, ds *types.DataSource) error {
@@ -221,6 +275,9 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) || !sourceStateMatchesPersistedDataSource(state, current) {
 			return errSourceConfigurationNotCurrent
 		}
+		if current.Status == types.DataSourceStatusPaused {
+			return datasource.ErrDataSourceNotActive
+		}
 		if err := r.invalidateSourceGeneration(tx, state, current); err != nil {
 			return err
 		}
@@ -229,7 +286,7 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 			return err
 		}
 		if previous := derefSourceID(state.PendingSyncLogID); previous != "" {
-			if err := cancelSourceRunTx(tx, previous, "a newer source trigger is waiting"); err != nil {
+			if err := cancelSourceRunWithPhaseTx(tx, previous, "a newer source trigger is waiting", "superseded"); err != nil {
 				return err
 			}
 		}
@@ -279,7 +336,8 @@ func (r *SyncLogRepository) IsCurrentSourceDelivery(ctx context.Context, ds *typ
 			return err
 		}
 		fingerprint := sourceConfigFingerprint(persisted)
-		if sourceConfigFingerprint(ds) != fingerprint || !sourceModeEnabled(persisted) || state.ConfigFingerprint != fingerprint {
+		if sourceConfigFingerprint(ds) != fingerprint || !sourceModeEnabled(persisted) ||
+			persisted.Status == types.DataSourceStatusPaused || state.ConfigFingerprint != fingerprint {
 			return nil
 		}
 		var run sourceSyncRunRow
@@ -345,6 +403,41 @@ func (r *SyncLogRepository) AdvanceSourceConfig(ctx context.Context, ds *types.D
 	})
 }
 
+// PauseSourceSync fences source workers and queued triggers before persisting
+// the paused status. Both changes commit together, so a concurrent claim either
+// completes before the fence or observes the paused datasource and is rejected.
+func (r *SyncLogRepository) PauseSourceSync(ctx context.Context, ds *types.DataSource) error {
+	if ds == nil || ds.ID == "" {
+		return errors.New("data source is required")
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		state, err := r.ensureSourceSyncState(tx, ds)
+		if err != nil {
+			return err
+		}
+		current, err := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+		if err != nil {
+			return err
+		}
+		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) {
+			return errSourceConfigurationNotCurrent
+		}
+		if !sourceModeEnabled(current) {
+			return errors.New("source mode is not enabled")
+		}
+		if !sourceStateMatchesPersistedDataSource(state, current) {
+			if err := r.invalidateSourceGeneration(tx, state, current); err != nil {
+				return err
+			}
+		}
+		if err := r.invalidatePausedSourceGeneration(tx, state, current); err != nil {
+			return err
+		}
+		return tx.Model(&types.DataSource{}).Where("id=? AND tenant_id=?", ds.ID, ds.TenantID).
+			Update("status", types.DataSourceStatusPaused).Error
+	})
+}
+
 func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSource, logID string, deliveryGeneration int64, owner string, leaseTTL time.Duration) (types.SourceSyncLease, bool, error) {
 	if ds == nil || ds.ID == "" || logID == "" {
 		return types.SourceSyncLease{}, false, errors.New("source run identity is required")
@@ -368,6 +461,9 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 		}
 		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) || !sourceStateMatchesPersistedDataSource(state, current) {
 			return errSourceConfigurationNotCurrent
+		}
+		if current.Status == types.DataSourceStatusPaused {
+			return r.invalidatePausedSourceGeneration(tx, state, current)
 		}
 		if err := r.invalidateSourceGeneration(tx, state, current); err != nil {
 			return err
@@ -424,9 +520,9 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 		if !resumingActive && pendingID != "" && pendingID != logID {
 			var pending types.SyncLog
 			if err := tx.Where("id=?", pendingID).Take(&pending).Error; err == nil && pending.CreatedAt.After(log.CreatedAt) {
-				return cancelSourceRunTx(tx, logID, "a newer source trigger is waiting")
+				return cancelSourceRunWithPhaseTx(tx, logID, "a newer source trigger is waiting", "superseded")
 			}
-			if err := cancelSourceRunTx(tx, pendingID, "a newer source trigger is waiting"); err != nil {
+			if err := cancelSourceRunWithPhaseTx(tx, pendingID, "a newer source trigger is waiting", "superseded"); err != nil {
 				return err
 			}
 			state.PendingSyncLogID = stringPointer(logID)
@@ -488,9 +584,9 @@ func (r *SyncLogRepository) coalesceSourceTriggerTx(tx *gorm.DB, state *sourceSy
 	if pendingID != "" {
 		var pending types.SyncLog
 		if err := tx.Where("id=?", pendingID).Take(&pending).Error; err == nil && !log.CreatedAt.After(pending.CreatedAt) {
-			return cancelSourceRunTx(tx, log.ID, "a newer source trigger is already waiting")
+			return cancelSourceRunWithPhaseTx(tx, log.ID, "a newer source trigger is already waiting", "superseded")
 		}
-		if err := cancelSourceRunTx(tx, pendingID, "a newer source trigger is waiting"); err != nil {
+		if err := cancelSourceRunWithPhaseTx(tx, pendingID, "a newer source trigger is waiting", "superseded"); err != nil {
 			return err
 		}
 	}
@@ -657,8 +753,13 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 			if !sourceModeEnabled(&current) {
 				return nil
 			}
+			if current.Status == types.DataSourceStatusPaused {
+				_, err := cancelQueuedSourceTriggersTx(tx, ds.ID, ds.TenantID, 1, "source is paused; legacy trigger was canceled")
+				return err
+			}
 			var logs []types.SyncLog
-			if err := tx.Where("data_source_id=? AND tenant_id=? AND status=?", ds.ID, ds.TenantID, types.SyncLogStatusQueued).Order("created_at DESC").Limit(1).Find(&logs).Error; err != nil {
+			if err := tx.Where("data_source_id=? AND tenant_id=? AND status=?", ds.ID, ds.TenantID, types.SyncLogStatusQueued).
+				Order("created_at DESC").Order("id DESC").Find(&logs).Error; err != nil {
 				return err
 			}
 			if len(logs) == 0 {
@@ -674,6 +775,11 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 			}
 			if !sourceStateMatchesPersistedDataSource(state, persisted) {
 				return errSourceConfigurationNotCurrent
+			}
+			for i := 1; i < len(logs); i++ {
+				if err := supersedeLegacySourceLogTx(tx, &logs[i], state.ConfigGeneration); err != nil {
+					return err
+				}
 			}
 			state.PendingSyncLogID = stringPointer(logs[0].ID)
 			state.PendingTrigger = "recovery"
@@ -703,6 +809,9 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 		}
 		if !sourceModeEnabled(current) {
 			return r.invalidateDisabledSourceGeneration(tx, &state, current)
+		}
+		if current.Status == types.DataSourceStatusPaused {
+			return r.invalidatePausedSourceGeneration(tx, &state, current)
 		}
 		if !sourceStateMatchesPersistedDataSource(&state, current) {
 			// The datasource row is authoritative after a crash between the
@@ -772,6 +881,28 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 		return nil, nil
 	}
 	return dispatches, err
+}
+
+func supersedeLegacySourceLogTx(tx *gorm.DB, log *types.SyncLog, configGeneration int64) error {
+	if log == nil || log.ID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	result := tx.Model(&types.SyncLog{}).Where("id=? AND status=?", log.ID, types.SyncLogStatusQueued).
+		Updates(map[string]any{"status": types.SyncLogStatusCanceled, "finished_at": now,
+			"error_message": "a newer legacy source trigger was recovered; this trigger was superseded", "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	if err := tx.Exec(`INSERT INTO source_sync_runs(sync_log_id,data_source_id,tenant_id,config_generation,delivery_generation,trigger,phase,updated_at)
+		VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(sync_log_id) DO UPDATE SET phase='superseded',updated_at=EXCLUDED.updated_at`,
+		log.ID, log.DataSourceID, log.TenantID, configGeneration, 0, "recovery", "superseded", now).Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *SyncLogRepository) RecordSourceRunPhase(ctx context.Context, lease types.SourceSyncLease, phase, targetSHA string) error {

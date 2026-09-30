@@ -620,6 +620,9 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		return nil, err
 	}
 	sourceMode := mode == datasource.ContentModeSource
+	if sourceMode && ds.Status == types.DataSourceStatusPaused {
+		return nil, datasource.ErrDataSourceNotActive
+	}
 	if sourceMode {
 		if s.sourceSnapshots == nil || s.sourceModelService == nil {
 			return nil, datasource.ErrSourcePipelineUnavailable
@@ -733,17 +736,36 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 	return syncLog, nil
 }
 
-// PauseDataSource pauses a data source's scheduled syncs
+// PauseDataSource pauses a data source's scheduled syncs. Source mode also
+// fences active and queued source work before the paused status is persisted.
 func (s *DataSourceService) PauseDataSource(ctx context.Context, id string) error {
 	ds, err := s.GetDataSource(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	ds.Status = types.DataSourceStatusPaused
-	if err := s.dsRepo.Update(ctx, ds); err != nil {
-		logger.Errorf(ctx, "failed to pause data source: %v", err)
-		return err
+	sourceMode := false
+	if config, parseErr := ds.ParseConfig(); parseErr == nil {
+		if mode, modeErr := datasource.ContentMode(config); modeErr == nil {
+			sourceMode = mode == datasource.ContentModeSource
+		}
+	}
+	if sourceMode {
+		control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+		if !ok {
+			return datasource.ErrSourcePipelineUnavailable
+		}
+		if err := control.PauseSourceSync(ctx, ds); err != nil {
+			logger.Errorf(ctx, "failed to fence source while pausing data source: %v", err)
+			return err
+		}
+		ds.Status = types.DataSourceStatusPaused
+	} else {
+		ds.Status = types.DataSourceStatusPaused
+		if err := s.dsRepo.Update(ctx, ds); err != nil {
+			logger.Errorf(ctx, "failed to pause data source: %v", err)
+			return err
+		}
 	}
 
 	// Remove cron schedule
