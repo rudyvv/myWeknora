@@ -51,6 +51,7 @@ const (
 	DataSourceStatusDeleted = "deleted"
 
 	// Sync log status
+	SyncLogStatusQueued   = "queued"
 	SyncLogStatusRunning  = "running"
 	SyncLogStatusSuccess  = "success"
 	SyncLogStatusPartial  = "partial"
@@ -153,8 +154,16 @@ type SyncLog struct {
 	// Workspace ID
 	TenantID uint64 `json:"tenant_id" gorm:"index"`
 
+	// Source-only fencing metadata is hidden from the public log API.
+	SourceConfigGeneration int64 `json:"-" gorm:"column:source_config_generation"`
+	SourceFencingToken     int64 `json:"-" gorm:"column:source_fencing_token"`
+
 	// Sync status: running, success, partial, failed, canceled
 	Status string `json:"status" gorm:"type:varchar(32);index"`
+
+	// Durable source-run phase is joined from the source coordinator for API
+	// responses; it is not a column on sync_logs.
+	SourceRunPhase string `json:"source_run_phase,omitempty" gorm:"-"`
 
 	// Sync start time
 	StartedAt time.Time `json:"started_at"`
@@ -520,6 +529,10 @@ type DataSourceSyncPayload struct {
 
 	// Sync log ID (for tracking)
 	SyncLogID string `json:"sync_log_id"`
+
+	// DeliveryGeneration changes when a durable trigger is re-dispatched after
+	// a lost worker/queue signal; stale deliveries are ignored by the DB lease.
+	DeliveryGeneration int64 `json:"delivery_generation,omitempty"`
 
 	// Force full sync even if incremental mode is configured. This remains an
 	// internal task option for existing scheduler/test compatibility; the UI and

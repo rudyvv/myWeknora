@@ -9,6 +9,7 @@ import (
 // transaction on the built-in PostgreSQL index database.
 type SourceSnapshotRepository interface {
 	CheckReady(context.Context) error
+	RelaySourcePublicationOutbox(context.Context, int) (int, error)
 	GetPublished(context.Context, uint64, string) (*types.SourceRunResult, error)
 	GetParsedArtifact(context.Context, uint64, string, string) (*types.ParsedSourceFile, error)
 	SaveParsedArtifact(context.Context, uint64, string, string, *types.ParsedSourceFile) error
@@ -21,6 +22,7 @@ type SourceSnapshotRepository interface {
 	StageRelations(context.Context, uint64, string, string, []types.SourceCodeRelation) error
 	StageIndexes(context.Context, []*types.IndexInfo, map[string][]float32) error
 	Publish(context.Context, *types.SourceSnapshot, *types.DataSource, *types.KnowledgeBase, int) error
+	EnsurePublishedSourceWikiUpdate(context.Context, *types.DataSource, *types.SourceSnapshot) error
 	GetRun(context.Context, uint64, string, string) (*types.SourceRunResult, error)
 }
 

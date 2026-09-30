@@ -132,7 +132,7 @@ func TestDeleteDataSourcesForKnowledgeBase(t *testing.T) {
 	kbRepo := &kbDeleteKBRepo{fakeKBRepo: *newFakeKBRepo()}
 	kbRepo.rows[kbID] = &types.KnowledgeBase{ID: kbID, TenantID: 1, Name: "test"}
 
-	scheduler := datasource.NewScheduler(dsRepo, syncLogRepo, kbDeleteTaskEnqueuer{})
+	scheduler := datasource.NewScheduler(dsRepo, syncLogRepo, kbDeleteTaskEnqueuer{}, nil)
 	require.NoError(t, scheduler.AddOrUpdate(dsRepo.byKB[kbID][0]))
 
 	svc := &knowledgeBaseService{
@@ -157,7 +157,7 @@ func TestDeleteKnowledgeBaseCleansUpDataSources(t *testing.T) {
 	kbRepo := &kbDeleteKBRepo{fakeKBRepo: *newFakeKBRepo()}
 	kbRepo.rows[kbID] = &types.KnowledgeBase{ID: kbID, TenantID: 1, Name: "test"}
 
-	scheduler := datasource.NewScheduler(dsRepo, syncLogRepo, kbDeleteTaskEnqueuer{})
+	scheduler := datasource.NewScheduler(dsRepo, syncLogRepo, kbDeleteTaskEnqueuer{}, nil)
 	require.NoError(t, scheduler.AddOrUpdate(dsRepo.byKB[kbID][0]))
 
 	svc := &knowledgeBaseService{

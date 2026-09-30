@@ -914,6 +914,9 @@ export default {
       failed: '失败'
     },
     logStatus: {
+      queued: '待同步',
+      waiting_for_catch_up: '等待追赶',
+      retry_wait: '等待重试',
       running: '同步中',
       success: '成功',
       partial: '部分成功',

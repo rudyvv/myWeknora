@@ -6425,6 +6425,9 @@ export default {
     refreshLogs: 'ログを更新',
     noLogs: '同期記録はまだありません',
     logStatus: {
+      queued: '同期待ち',
+      waiting_for_catch_up: '追いつき待機中',
+      retry_wait: '再試行待ち',
       running: '同期中',
       success: '成功',
       partial: '一部成功',

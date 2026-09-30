@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/access"
@@ -21,6 +22,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
 
@@ -121,8 +123,9 @@ func (s *DataSourceService) CreateDataSource(ctx context.Context, ds *types.Data
 		return nil, err
 	}
 
-	// Register cron schedule if configured
-	if ds.SyncSchedule != "" && ds.Status == types.DataSourceStatusActive {
+	// Document sources with an empty schedule remain unscheduled; source-mode
+	// sources receive their default hourly schedule in the scheduler.
+	if ds.Status == types.DataSourceStatusActive {
 		if err := s.scheduler.AddOrUpdate(ds); err != nil {
 			logger.Warnf(ctx, "failed to register cron for ds=%s: %v", ds.ID, err)
 		}
@@ -249,8 +252,17 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 		}
 	}
 
+	if err := s.advanceSourceConfigGeneration(ctx, existing, ds); err != nil {
+		return nil, err
+	}
 	if err := s.dsRepo.Update(ctx, ds); err != nil {
 		logger.Errorf(ctx, "failed to update data source: %v", err)
+		s.restoreSourceConfigurationFromStored(ctx, ds.ID)
+		return nil, err
+	}
+	// Reconcile once more after persistence in case a trigger registered
+	// against the old row between the pre-write fence and this update.
+	if err := s.advanceSourceConfigGeneration(ctx, existing, ds); err != nil {
 		return nil, err
 	}
 
@@ -302,7 +314,14 @@ func (s *DataSourceService) UpdateDataSourceCredentials(
 	if err := s.validateDataSourceConfig(ctx, existing); err != nil {
 		return nil, err
 	}
+	if err := s.advanceSourceConfigGeneration(ctx, existing, existing); err != nil {
+		return nil, err
+	}
 	if err := s.dsRepo.Update(ctx, existing); err != nil {
+		s.restoreSourceConfigurationFromStored(ctx, existing.ID)
+		return nil, err
+	}
+	if err := s.advanceSourceConfigGeneration(ctx, existing, existing); err != nil {
 		return nil, err
 	}
 	logger.Infof(ctx, "DataSource credentials updated: id=%s", secutils.SanitizeForLog(id))
@@ -310,6 +329,51 @@ func (s *DataSourceService) UpdateDataSourceCredentials(
 		"data_source", existing.ID, types.AuditOutcomeSuccess,
 		map[string]any{"name": existing.Name, "type": existing.Type, "changed_fields": []string{"credentials"}})
 	return existing, nil
+}
+
+func (s *DataSourceService) advanceSourceConfigGeneration(ctx context.Context, before, after *types.DataSource) error {
+	control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	if !ok || before == nil || after == nil {
+		return nil
+	}
+	modeOf := func(ds *types.DataSource) string {
+		config, err := ds.ParseConfig()
+		if err != nil {
+			return datasource.ContentModeDocument
+		}
+		mode, err := datasource.ContentMode(config)
+		if err != nil {
+			return datasource.ContentModeDocument
+		}
+		return mode
+	}
+	if modeOf(before) != datasource.ContentModeSource && modeOf(after) != datasource.ContentModeSource {
+		return nil
+	}
+	return control.AdvanceSourceConfig(ctx, after, modeOf(after) == datasource.ContentModeSource)
+}
+
+// restoreSourceConfigurationFromStored repairs the brief pre-write fence when
+// persistence fails. The stored datasource is authoritative; never roll the
+// generation back from the rejected request's snapshot.
+func (s *DataSourceService) restoreSourceConfigurationFromStored(ctx context.Context, dataSourceID string) {
+	control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	if !ok {
+		return
+	}
+	current, err := s.dsRepo.FindByID(ctx, dataSourceID)
+	if err != nil {
+		logger.Warnf(ctx, "failed to reload data source after a rejected config write ds=%s: %v", dataSourceID, err)
+		return
+	}
+	enabled := false
+	if config, err := current.ParseConfig(); err == nil {
+		mode, err := datasource.ContentMode(config)
+		enabled = err == nil && mode == datasource.ContentModeSource
+	}
+	if err := control.AdvanceSourceConfig(ctx, current, enabled); err != nil {
+		logger.Warnf(ctx, "failed to restore persisted source config generation ds=%s: %v", dataSourceID, err)
+	}
 }
 
 // ClearDataSourceCredentials wipes the connector credential map without
@@ -336,7 +400,14 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 			return err
 		}
 		existing.Config = blob
-		return s.dsRepo.Update(ctx, existing)
+		if err := s.advanceSourceConfigGeneration(ctx, existing, existing); err != nil {
+			return err
+		}
+		if err := s.dsRepo.Update(ctx, existing); err != nil {
+			s.restoreSourceConfigurationFromStored(ctx, existing.ID)
+			return err
+		}
+		return s.advanceSourceConfigGeneration(ctx, existing, existing)
 	}
 	parsed.Credentials = nil
 	blob, err := parsed.ToJSON()
@@ -344,7 +415,14 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 		return err
 	}
 	existing.Config = blob
+	if err := s.advanceSourceConfigGeneration(ctx, existing, existing); err != nil {
+		return err
+	}
 	if err := s.dsRepo.Update(ctx, existing); err != nil {
+		s.restoreSourceConfigurationFromStored(ctx, existing.ID)
+		return err
+	}
+	if err := s.advanceSourceConfigGeneration(ctx, existing, existing); err != nil {
 		return err
 	}
 	logger.Infof(ctx, "DataSource credentials cleared by user: id=%s", secutils.SanitizeForLog(id))
@@ -361,10 +439,33 @@ func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) err
 	if err != nil {
 		return err
 	}
+	if config, configErr := existing.ParseConfig(); configErr == nil {
+		if mode, modeErr := datasource.ContentMode(config); modeErr == nil && mode == datasource.ContentModeSource {
+			if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+				// Fence active source workers before soft deletion. Otherwise a
+				// worker holding the old lease could publish after deletion.
+				if err := control.AdvanceSourceConfig(ctx, existing, false); err != nil {
+					return err
+				}
+			}
+		}
+	}
 
 	if err := s.dsRepo.Delete(ctx, id); err != nil {
 		logger.Errorf(ctx, "failed to delete data source: %v", err)
+		s.restoreSourceConfigurationFromStored(ctx, id)
 		return err
+	}
+	if config, configErr := existing.ParseConfig(); configErr == nil {
+		if mode, modeErr := datasource.ContentMode(config); modeErr == nil && mode == datasource.ContentModeSource {
+			if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+				// Close the race where another trigger registers between the
+				// initial fence and the soft-delete write.
+				if err := control.AdvanceSourceConfig(ctx, existing, false); err != nil {
+					logger.Errorf(ctx, "failed to re-fence deleted source ds=%s: %v", id, err)
+				}
+			}
+		}
 	}
 
 	// Remove cron schedule
@@ -518,7 +619,11 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 	if err != nil {
 		return nil, err
 	}
-	if mode == datasource.ContentModeSource {
+	sourceMode := mode == datasource.ContentModeSource
+	if sourceMode && ds.Status == types.DataSourceStatusPaused {
+		return nil, datasource.ErrDataSourceNotActive
+	}
+	if sourceMode {
 		if s.sourceSnapshots == nil || s.sourceModelService == nil {
 			return nil, datasource.ErrSourcePipelineUnavailable
 		}
@@ -544,29 +649,62 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		Status:       types.SyncLogStatusRunning,
 		StartedAt:    time.Now().UTC(),
 	}
+	if sourceMode {
+		syncLog.Status = types.SyncLogStatusQueued
+	}
 
-	if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
+	var sourceControl interfaces.SourceSyncControlRepository
+	var sourceDeliveryGeneration int64
+	shouldDispatch := true
+	if sourceMode {
+		sourceControl, _ = s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+	}
+	if sourceMode && sourceControl != nil {
+		var registerErr error
+		shouldDispatch, sourceDeliveryGeneration, registerErr = sourceControl.RegisterSourceTrigger(ctx, ds, syncLog, "manual")
+		if registerErr != nil {
+			logger.Errorf(ctx, "failed to register durable source trigger: %v", registerErr)
+			return nil, registerErr
+		}
+	} else if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
 		logger.Errorf(ctx, "failed to create sync log: %v", err)
 		return nil, err
 	}
+	if sourceMode && sourceControl != nil && !shouldDispatch {
+		recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceSyncStarted,
+			"data_source", ds.ID, types.AuditOutcomeAccepted,
+			map[string]any{"name": ds.Name, "type": ds.Type, "sync_log_id": syncLog.ID, "trigger": "manual", "processing_status": "waiting_for_catch_up"})
+		return syncLog, nil
+	}
 
 	// Enqueue sync task
-	payload := &types.DataSourceSyncPayload{
-		DataSourceID: dsID,
-		TenantID:     ds.TenantID,
-		SyncLogID:    syncLog.ID,
-		Initiator:    types.TaskInitiatorFromContext(ctx),
-		Trigger:      "manual",
+	var info *asynq.TaskInfo
+	if sourceMode && sourceControl != nil {
+		info, err = datasource.EnqueueSourceSync(ctx, s.taskEnqueuer, types.SourceSyncDispatch{
+			SyncLog: syncLog, Trigger: "manual", DeliveryGeneration: sourceDeliveryGeneration,
+		}, ds.TenantID, ds.ID, types.TaskInitiatorFromContext(ctx))
+	} else {
+		payload := &types.DataSourceSyncPayload{
+			DataSourceID: dsID, TenantID: ds.TenantID, SyncLogID: syncLog.ID,
+			Initiator: types.TaskInitiatorFromContext(ctx), Trigger: "manual",
+		}
+		langfuse.InjectTracing(ctx, payload)
+		payloadJSON, _ := json.Marshal(payload)
+		task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON,
+			asynq.Queue(types.QueueSync), asynq.MaxRetry(5), asynq.Timeout(2*time.Hour))
+		info, err = s.taskEnqueuer.Enqueue(task)
 	}
-	langfuse.InjectTracing(ctx, payload)
-
-	payloadJSON, _ := json.Marshal(payload)
-	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON,
-		asynq.Queue(types.QueueSync), asynq.MaxRetry(5), asynq.Timeout(2*time.Hour))
-
-	info, err := s.taskEnqueuer.Enqueue(task)
 	if err != nil {
 		logger.Errorf(ctx, "failed to enqueue sync task: %v", err)
+		if sourceMode {
+			// Source trigger registration is durable before queue delivery. Leave
+			// its queued run visible and recoverable; the source dispatcher retries
+			// delivery independently of this request.
+			recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceSyncStarted,
+				"data_source", ds.ID, types.AuditOutcomeAccepted,
+				map[string]any{"name": ds.Name, "type": ds.Type, "sync_log_id": syncLog.ID, "trigger": "manual", "processing_status": "pending"})
+			return syncLog, nil
+		}
 		syncLog.Status = types.SyncLogStatusFailed
 		syncLog.FinishedAt = timePtr(time.Now().UTC())
 		syncLog.ErrorMessage = err.Error()
@@ -587,22 +725,47 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		"data_source", ds.ID, types.AuditOutcomeAccepted,
 		map[string]any{
 			"name": ds.Name, "type": ds.Type, "sync_log_id": syncLog.ID,
-			"task_id": info.ID, "trigger": "manual", "processing_status": "pending",
+			"task_id": func() string {
+				if info == nil {
+					return ""
+				}
+				return info.ID
+			}(),
+			"trigger": "manual", "processing_status": "pending",
 		})
 	return syncLog, nil
 }
 
-// PauseDataSource pauses a data source's scheduled syncs
+// PauseDataSource pauses a data source's scheduled syncs. Source mode also
+// fences active and queued source work before the paused status is persisted.
 func (s *DataSourceService) PauseDataSource(ctx context.Context, id string) error {
 	ds, err := s.GetDataSource(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	ds.Status = types.DataSourceStatusPaused
-	if err := s.dsRepo.Update(ctx, ds); err != nil {
-		logger.Errorf(ctx, "failed to pause data source: %v", err)
-		return err
+	sourceMode := false
+	if config, parseErr := ds.ParseConfig(); parseErr == nil {
+		if mode, modeErr := datasource.ContentMode(config); modeErr == nil {
+			sourceMode = mode == datasource.ContentModeSource
+		}
+	}
+	if sourceMode {
+		control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+		if !ok {
+			return datasource.ErrSourcePipelineUnavailable
+		}
+		if err := control.PauseSourceSync(ctx, ds); err != nil {
+			logger.Errorf(ctx, "failed to fence source while pausing data source: %v", err)
+			return err
+		}
+		ds.Status = types.DataSourceStatusPaused
+	} else {
+		ds.Status = types.DataSourceStatusPaused
+		if err := s.dsRepo.Update(ctx, ds); err != nil {
+			logger.Errorf(ctx, "failed to pause data source: %v", err)
+			return err
+		}
 	}
 
 	// Remove cron schedule
@@ -738,6 +901,31 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		_ = s.dsRepo.Update(ctx, ds)
 		return err
 	}
+	mode, modeErr := datasource.ContentMode(config)
+	if modeErr != nil {
+		s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
+			types.SyncLogStatusFailed, modeErr.Error(), wasPaused)
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, modeErr)
+	}
+	if payload.DeliveryGeneration > 0 {
+		control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+		if !ok {
+			return fmt.Errorf("%w: source trigger coordination is unavailable", asynq.SkipRetry)
+		}
+		currentDelivery, err := control.IsCurrentSourceDelivery(ctx, ds, syncLog.ID, payload.DeliveryGeneration)
+		if err != nil {
+			return err
+		}
+		if !currentDelivery {
+			return nil
+		}
+	}
+	if mode != datasource.ContentModeSource && syncLog.Status == types.SyncLogStatusCanceled {
+		// Legacy source deliveries have no generation in their queue payload.
+		// A source→document transition fences their durable log before changing
+		// mode; don't let a delayed wake-up reinterpret that canceled log.
+		return nil
+	}
 	if validator, ok := connector.(datasource.DataSourceBindingValidator); ok {
 		if err := validator.ValidateDataSourceBinding(ctx, config, ds); err != nil {
 			s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
@@ -745,15 +933,22 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 			return err
 		}
 	}
-	mode, modeErr := datasource.ContentMode(config)
-	if modeErr != nil {
-		s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
-			types.SyncLogStatusFailed, modeErr.Error(), wasPaused)
-		return fmt.Errorf("%w: %v", asynq.SkipRetry, modeErr)
-	}
 	if mode == datasource.ContentModeSource {
 		if payload.TenantID != ds.TenantID || syncLog.TenantID != ds.TenantID || syncLog.DataSourceID != ds.ID {
 			return fmt.Errorf("%w: source run identity mismatch", asynq.SkipRetry)
+		}
+		if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+			lease, claimed, claimErr := control.ClaimSourceRun(ctx, ds, syncLog.ID, payload.DeliveryGeneration, uuid.NewString(), 2*time.Minute)
+			if claimErr != nil {
+				return claimErr
+			}
+			if !claimed {
+				return nil
+			}
+			syncLog.Status = types.SyncLogStatusRunning
+			syncLog.SourceConfigGeneration = lease.ConfigGeneration
+			syncLog.SourceFencingToken = lease.FencingToken
+			return s.runSourceSyncWithLease(ctx, control, lease, ds, syncLog, kb, connector, config, wasPaused)
 		}
 		return s.processSourceSync(ctx, ds, syncLog, kb, connector, config, wasPaused)
 	}
@@ -903,6 +1098,66 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		payload.DataSourceID, syncLog.ItemsCreated, syncLog.ItemsUpdated, syncLog.ItemsDeleted)
 
 	return nil
+}
+
+func (s *DataSourceService) runSourceSyncWithLease(
+	ctx context.Context,
+	control interfaces.SourceSyncControlRepository,
+	lease types.SourceSyncLease,
+	ds *types.DataSource,
+	syncLog *types.SyncLog,
+	kb *types.KnowledgeBase,
+	connector datasource.Connector,
+	config *types.DataSourceConfig,
+	wasPaused bool,
+) error {
+	leaseCtx, cancel := context.WithCancel(types.WithSourceSyncLease(ctx, lease))
+	defer cancel()
+	const leaseTTL = 2 * time.Minute
+	var leaseLost atomic.Bool
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(leaseTTL / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := control.RenewSourceRun(leaseCtx, lease, leaseTTL); err != nil {
+					leaseLost.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	runErr := s.processSourceSync(leaseCtx, ds, syncLog, kb, connector, config, wasPaused)
+	cancel()
+	<-finished
+	if leaseLost.Load() || errors.Is(runErr, types.ErrSourceSyncLeaseLost) {
+		return nil // A newer fencing token owns status and publication from here.
+	}
+	// Retain retryable failures as durable retry_wait runs so restart
+	// reconciliation can recover them if queue delivery is lost. Permanent
+	// task errors use Asynq's SkipRetry sentinel and must not consume retries.
+	retry := runErr != nil && !errors.Is(runErr, asynq.SkipRetry)
+	dispatch, releaseErr := control.ReleaseSourceRun(context.WithoutCancel(ctx), lease, retry)
+	if errors.Is(releaseErr, types.ErrSourceSyncLeaseLost) {
+		return nil
+	}
+	if releaseErr != nil {
+		return releaseErr
+	}
+	if dispatch != nil {
+		if _, err := datasource.EnqueueSourceSync(context.WithoutCancel(ctx), s.taskEnqueuer, *dispatch,
+			ds.TenantID, ds.ID, types.TaskInitiatorFromContext(ctx)); err != nil {
+			logger.Errorf(ctx, "failed to enqueue follow-up source trigger ds=%s syncLog=%s: %v", ds.ID, dispatch.SyncLog.ID, err)
+		}
+	}
+	return runErr
 }
 
 func (s *DataSourceService) reconcileSourceFolderPaths(
@@ -1327,6 +1582,39 @@ func (s *DataSourceService) updateSyncRunResult(
 	syncLog.Result = resultJSON
 	if err := s.syncLogRepo.UpdateResult(ctx, syncLog); err != nil {
 		logger.Errorf(ctx, "failed to update sync log: %v", err)
+	}
+	if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
+		if status == types.SyncLogStatusSuccess {
+			ds.LastSyncAt = timePtr(time.Now().UTC())
+		}
+		if status == types.SyncLogStatusFailed {
+			if !wasPaused {
+				ds.Status = types.DataSourceStatusError
+			}
+		} else if wasPaused {
+			ds.Status = types.DataSourceStatusPaused
+		} else {
+			ds.Status = types.DataSourceStatusActive
+		}
+		ds.ErrorMessage = errorMessage
+		ds.LastSyncResult = resultJSON
+		if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
+			if err := control.CommitSourceRunResult(ctx, lease, ds); err != nil {
+				logger.Errorf(ctx, "failed to commit fenced source sync status: %v", err)
+			}
+		}
+		action := types.AuditActionDataSourceSyncCompleted
+		outcome := types.AuditOutcomeSuccess
+		if status == types.SyncLogStatusFailed {
+			action, outcome = types.AuditActionDataSourceSyncFailed, types.AuditOutcomeFailed
+		} else if status == types.SyncLogStatusPartial {
+			outcome = types.AuditOutcomePartial
+		}
+		recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, action, "data_source", ds.ID, outcome,
+			map[string]any{"name": ds.Name, "type": ds.Type, "sync_log_id": syncLog.ID,
+				"total": result.Total, "created": result.Created, "updated": result.Updated,
+				"deleted": result.Deleted, "skipped": result.Skipped, "failed": result.Failed})
+		return
 	}
 
 	if status == types.SyncLogStatusFailed {

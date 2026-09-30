@@ -69,7 +69,7 @@ func (r *fakeDataSourceRepo) FindActive(_ context.Context) ([]*types.DataSource,
 	defer r.mu.Unlock()
 	var result []*types.DataSource
 	for _, ds := range r.dataSources {
-		if ds.Status == types.DataSourceStatusActive && ds.SyncSchedule != "" {
+		if ds.Status == types.DataSourceStatusActive {
 			result = append(result, ds)
 		}
 	}
@@ -182,7 +182,7 @@ func TestScheduler_StartWithActiveDataSources(t *testing.T) {
 	})
 
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer, nil)
 
 	if err := scheduler.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error: %v", err)
@@ -205,7 +205,7 @@ func TestScheduler_CronFires(t *testing.T) {
 	})
 
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer, nil)
 
 	if err := scheduler.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error: %v", err)
@@ -225,7 +225,7 @@ func TestScheduler_CronFires(t *testing.T) {
 
 func TestScheduler_AddOrUpdate(t *testing.T) {
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer, nil)
 	scheduler.cron.Start()
 	defer scheduler.Stop()
 
@@ -256,7 +256,7 @@ func TestScheduler_AddOrUpdate(t *testing.T) {
 
 func TestScheduler_AddOrUpdate_PausedIsNoop(t *testing.T) {
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer, nil)
 	scheduler.cron.Start()
 	defer scheduler.Stop()
 
@@ -277,7 +277,7 @@ func TestScheduler_AddOrUpdate_PausedIsNoop(t *testing.T) {
 
 func TestScheduler_AddOrUpdate_EmptyScheduleIsNoop(t *testing.T) {
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer, nil)
 	scheduler.cron.Start()
 	defer scheduler.Stop()
 
@@ -296,9 +296,31 @@ func TestScheduler_AddOrUpdate_EmptyScheduleIsNoop(t *testing.T) {
 	}
 }
 
+func TestScheduler_AddOrUpdate_SourceModeDefaultsToHourly(t *testing.T) {
+	enqueuer := &fakeTaskEnqueuer{}
+	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer, nil)
+	scheduler.cron.Start()
+	defer scheduler.Stop()
+
+	ds := &types.DataSource{
+		ID:           "ds-source-default-schedule",
+		TenantID:     1,
+		Type:         types.ConnectorTypeGitLab,
+		Status:       types.DataSourceStatusActive,
+		Config:       types.JSON(`{"settings":{"content_mode":"source"}}`),
+		SyncSchedule: "",
+	}
+	if err := scheduler.AddOrUpdate(ds); err != nil {
+		t.Fatalf("AddOrUpdate() error: %v", err)
+	}
+	if scheduler.EntryCount() != 1 {
+		t.Fatalf("source mode with an empty schedule should use the hourly default; EntryCount() = %d", scheduler.EntryCount())
+	}
+}
+
 func TestScheduler_Remove(t *testing.T) {
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer, nil)
 	scheduler.cron.Start()
 	defer scheduler.Stop()
 
@@ -325,7 +347,7 @@ func TestScheduler_Remove(t *testing.T) {
 
 func TestScheduler_InvalidCron(t *testing.T) {
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(newFakeDataSourceRepo(), newFakeSyncLogRepo(), enqueuer, nil)
 	scheduler.cron.Start()
 	defer scheduler.Stop()
 
@@ -355,7 +377,7 @@ func TestScheduler_TriggerSync_InactiveSkipped(t *testing.T) {
 	})
 
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer, nil)
 
 	// Directly call triggerSync — it should skip because ds is not active
 	scheduler.triggerSync("ds-inactive", 1)
@@ -368,7 +390,7 @@ func TestScheduler_TriggerSync_InactiveSkipped(t *testing.T) {
 func TestScheduler_TriggerSync_NotFound(t *testing.T) {
 	repo := newFakeDataSourceRepo()
 	enqueuer := &fakeTaskEnqueuer{}
-	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer)
+	scheduler := NewScheduler(repo, newFakeSyncLogRepo(), enqueuer, nil)
 
 	// Should not panic, just skip
 	scheduler.triggerSync("nonexistent", 1)

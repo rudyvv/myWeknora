@@ -353,7 +353,7 @@ func TestSourceAgentQuestionRejectsPurgeAtProviderClose(t *testing.T) {
 func TestSourceQuestionIntersectsRepositoryFileAndTagsForAgentReads(t *testing.T) {
 	f := newJavaSourceFixture(t, map[string][]byte{"src/Other.java": []byte("class Other { String getPushSchedule() { return \"scope outsider\"; } }\n")})
 	syncSourceFixture(t, f)
-	second := &types.DataSource{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: f.kb.ID, Name: "same paths in another source", Type: f.ds.Type, Status: types.DataSourceStatusPaused, Config: append(types.JSON{}, f.ds.Config...)}
+	second := &types.DataSource{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: f.kb.ID, Name: "same paths in another source", Type: f.ds.Type, Status: types.DataSourceStatusActive, Config: append(types.JSON{}, f.ds.Config...)}
 	_, err := f.service.CreateDataSource(f.ctx, second)
 	require.NoError(t, err)
 	syncSourceFixture(t, f, second.ID)
@@ -534,7 +534,7 @@ func TestSourceScopesApplyBeforeTopKInRealIndexQueryPlans(t *testing.T) {
 	}
 	f := newJavaSourceFixture(t, files)
 	syncSourceFixture(t, f)
-	second := &types.DataSource{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: f.kb.ID, Name: "independent repository", Type: f.ds.Type, Status: types.DataSourceStatusPaused, Config: append(types.JSON{}, f.ds.Config...)}
+	second := &types.DataSource{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: f.kb.ID, Name: "independent repository", Type: f.ds.Type, Status: types.DataSourceStatusActive, Config: append(types.JSON{}, f.ds.Config...)}
 	_, err := f.service.CreateDataSource(f.ctx, second)
 	require.NoError(t, err)
 	syncSourceFixture(t, f, second.ID)

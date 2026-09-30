@@ -46,7 +46,13 @@ func (r *sourceSnapshotRepository) SaveParsedArtifact(ctx context.Context, tenan
 	if err != nil {
 		return err
 	}
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&types.SourceParsedArtifact{TenantID: tenant, DataSourceID: sourceID, ArtifactKey: key, Parsed: types.JSON(data)}).Error
+	artifact := &types.SourceParsedArtifact{TenantID: tenant, DataSourceID: sourceID, ArtifactKey: key, Parsed: types.JSON(data)}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(artifact).Error
+	})
 }
 func (r *sourceSnapshotRepository) GetEmbeddingArtifacts(ctx context.Context, tenant uint64, sourceID string, keys []string) (map[string][]float32, error) {
 	result := map[string][]float32{}
@@ -78,11 +84,19 @@ func (r *sourceSnapshotRepository) SaveEmbeddingArtifacts(ctx context.Context, t
 	if len(artifacts) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(artifacts, 100).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(artifacts, 100).Error
+	})
 }
 
 func (r *sourceSnapshotRepository) UpdateProgress(ctx context.Context, snapshot *types.SourceSnapshot, members []types.SourceSnapshotMember) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
 		updates := map[string]any{"state": snapshot.State, "error": snapshot.Error, "chunk_count": snapshot.ChunkCount,
 			"processing_version": snapshot.ProcessingVersion, "embedding_version": snapshot.EmbeddingVersion,
 			"parsed_count": snapshot.ParsedCount, "reused_file_count": snapshot.ReusedFileCount, "reused_chunk_count": snapshot.ReusedChunkCount,

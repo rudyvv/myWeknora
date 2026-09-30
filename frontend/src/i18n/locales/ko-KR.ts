@@ -912,6 +912,9 @@ export default {
       failed: '실패'
     },
     logStatus: {
+      queued: '동기화 대기 중',
+      waiting_for_catch_up: '따라잡기 대기 중',
+      retry_wait: '재시도 대기 중',
       running: '동기화 중',
       success: '성공',
       partial: '부분 성공',
