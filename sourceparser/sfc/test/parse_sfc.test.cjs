@@ -78,6 +78,24 @@ test('duplicate singleton descriptors receive a bounded source-free diagnostic',
   assert.ok(parsed.diagnostics.some(diagnostic => diagnostic.code === 'vue_sfc_duplicate_block'))
 })
 
+test('top-level inventory retains exact duplicate block bodies omitted by the descriptor', () => {
+  const source = '<script>const firstBlockMarker = 1;</script>\n' +
+    '<script>const secondBlockMarker = 2;</script>\n'
+  const parsed = parseSFC(request(source))
+
+  assert.equal(parsed.blocks.length, 1)
+  assert.equal(parsed.top_level_blocks.length, 2)
+  for (const [index, marker] of ['firstBlockMarker', 'secondBlockMarker'].entries()) {
+    const block = parsed.top_level_blocks[index]
+    assert.equal(block.type, 'script')
+    assert.equal(source.slice(block.start_utf16, block.end_utf16), `const ${marker} = ${index + 1};`)
+    assert.equal(source.slice(block.tag_start_utf16, block.tag_end_utf16).startsWith('<script>'), true)
+    assert.equal(source.slice(block.close_start_utf16, block.close_end_utf16), '</script>')
+    assert.match(block.content_sha256, /^[0-9a-f]{64}$/)
+  }
+  assert.ok(parsed.diagnostics.some(diagnostic => diagnostic.code === 'vue_sfc_duplicate_block'))
+})
+
 test('a literal closing script tag is bounded exactly as Vue defines the SFC block', () => {
   const source = '<script>const text = "</script>";\r\n' +
     'export default { name: "A" };\r\n</script>\r\n'

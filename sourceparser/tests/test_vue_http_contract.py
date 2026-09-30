@@ -9,15 +9,18 @@ import sys
 import tempfile
 import threading
 import time
+import tracemalloc
 import unittest
 from http.server import ThreadingHTTPServer
 import urllib.error
 import urllib.request
 
 try:
+    from sourceparser import runtime
     from sourceparser.runtime import load_runtime, load_sfc_runtime, runtime_version
     from sourceparser.server import Handler, SLOTS
 except ModuleNotFoundError:
+    import runtime
     from runtime import load_runtime, load_sfc_runtime, runtime_version
     from server import Handler, SLOTS
 
@@ -41,6 +44,29 @@ def _process_is_running(pid):
             return True
         except ProcessLookupError:
             return False
+
+
+class UTF16OffsetMapTests(unittest.TestCase):
+    def test_utf16_mapping_preserves_unicode_boundaries(self):
+        raw = 'A\r\n😀Z'.encode()
+        offsets = runtime._utf16_offsets(raw.decode(), raw)
+        self.assertEqual(offsets.get(0), 0)
+        self.assertEqual(offsets.get(3), 3)
+        self.assertIsNone(offsets.get(4), 'the interior of an emoji surrogate pair is not a source boundary')
+        self.assertEqual(offsets.get(5), 7)
+        self.assertEqual(offsets.get(6), 8)
+
+    def test_utf16_mapping_memory_is_bounded_for_large_sfc(self):
+        raw = b'a' * (1 << 20)
+        text = raw.decode()
+        tracemalloc.start()
+        try:
+            offsets = runtime._utf16_offsets(text, raw)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 32 << 20, 'one MiB of source coordinates must not allocate a per-character object map')
+        self.assertEqual(offsets.get(len(text)), len(raw))
 
 
 class VueHTTPContract(unittest.TestCase):
@@ -96,10 +122,10 @@ class VueHTTPContract(unittest.TestCase):
         self.assertEqual(status, 200, health)
         self.assertIn('vue', health['languages'])
         self.assertIn('rules-4-', health['parser_version'])
-        self.assertEqual(self.sfc_runtime, 'vue-sfc-node-24.19.0-compiler-2.7.16-rules-2')
+        self.assertEqual(self.sfc_runtime, 'vue-sfc-node-24.19.0-compiler-2.7.16-rules-3')
         self.assertEqual(health['parser_version'], runtime_version(self.versions))
         previous_rules = dict(self.versions)
-        previous_rules['vue'] = self.sfc_runtime.removesuffix('-rules-2') + '-rules-1'
+        previous_rules['vue'] = self.sfc_runtime.removesuffix('-rules-3') + '-rules-2'
         self.assertNotEqual(health['parser_version'], runtime_version(previous_rules),
                             'the SFC rules fingerprint must affect the complete parser fingerprint')
         status, parsed = self.parse(b'<template><div>ok</div></template>\r\n')
@@ -194,6 +220,51 @@ class VueHTTPContract(unittest.TestCase):
         diagnostic = body_chunks[0]['diagnostics'][0]['range']
         self.assertEqual(diagnostic['start_byte'], len(raw))
         self.assertEqual(diagnostic['end_byte'], len(raw), 'EOF remains a zero-width original parser location')
+
+    def test_duplicate_singleton_bodies_omitted_from_descriptor_are_retained_as_degraded_raw(self):
+        cases = (
+            ('script', ('function firstScriptMarker() { return 1; }',
+                        'function secondScriptMarker() { return 2; }'),
+             '<script>{}</script>\n<script>{}</script>\n'),
+            ('template', ('<div>firstTemplateMarker</div>', '<div>secondTemplateMarker</div>'),
+             '<template>{}</template>\n<template>{}</template>\n'),
+        )
+        for kind, bodies, wrapper in cases:
+            with self.subTest(kind=kind):
+                raw = wrapper.format(*bodies).encode()
+                status, parsed = self.parse(raw)
+                self.assertEqual(status, 200, parsed)
+                self.assertEqual(parsed['quality'], 'degraded')
+                for marker in (bodies[0].split('(')[0].split()[-1] if kind == 'script' else 'firstTemplateMarker',
+                               bodies[1].split('(')[0].split()[-1] if kind == 'script' else 'secondTemplateMarker'):
+                    body_chunks = [chunk for chunk in parsed['chunks']
+                                   if (chunk.get('region') or {}).get('kind') == kind and marker in chunk['content']]
+                    self.assertEqual(len(body_chunks), 1, marker)
+                    chunk = body_chunks[0]
+                    span = chunk['range']
+                    self.assertGreater(span['end_byte'], span['start_byte'])
+                    self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
+                    self.assertEqual(chunk['quality'], 'degraded')
+                    self.assertEqual(chunk['region']['quality'], 'degraded')
+                missing_symbol = 'firstScriptMarker' if kind == 'script' else 'firstTemplateMarker'
+                self.assertFalse(any(symbol.get('name') == missing_symbol for symbol in parsed['symbols']),
+                                 'the discarded block remains raw; no declaration is invented')
+                self.assertTrue(any(symbol.get('kind') == 'sfc_diagnostic' and
+                                    symbol['region']['kind'] == kind for symbol in parsed['symbols']))
+
+    def test_empty_template_warning_keeps_template_region_on_its_wrapper_chunk(self):
+        raw = b'<template>'
+        status, parsed = self.parse(raw)
+        self.assertEqual(status, 200, parsed)
+        warning_chunks = [chunk for chunk in parsed['chunks'] if chunk.get('diagnostics')]
+        self.assertEqual(len(warning_chunks), 1)
+        warning_chunk = warning_chunks[0]
+        self.assertEqual(warning_chunk['content'], raw.decode())
+        self.assertEqual(warning_chunk['region']['kind'], 'template')
+        self.assertEqual(warning_chunk['quality'], 'degraded')
+        self.assertEqual(warning_chunk['diagnostics'][0]['code'], 'vue_sfc_parse_warning')
+        warning_range = warning_chunk['diagnostics'][0]['range']
+        self.assertEqual(raw[warning_range['start_byte']:warning_range['end_byte']], b'<template>')
 
     def test_descriptor_warning_degrades_only_its_region_and_attaches_exact_safe_diagnostic(self):
         template_body = '<div>first ' + ('unrelated ' * 20)

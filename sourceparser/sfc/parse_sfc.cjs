@@ -101,8 +101,10 @@ function openingBlockTags(source, blocks) {
           let block = null
           if (stack.length === 0 && (['template', 'script', 'style'].includes(tag) || blockTypes.has(tag))) {
             block = { type: tag, start: index, open_end: Math.min(cursor + 1, source.length),
-              close_start: null, close_end: null }
+              close_start: null, close_end: null,
+              self_closing: /\/\s*>$/.test(source.slice(index, cursor + 1)) }
             openings.push(block)
+            if (openings.length > MAX_BLOCKS) throw new Error('block limit')
           }
           const selfClosing = /\/\s*>$/.test(source.slice(index, cursor + 1))
           if (!selfClosing && !voidTags.has(tag)) stack.push({ tag, block })
@@ -116,8 +118,7 @@ function openingBlockTags(source, blocks) {
   return openings
 }
 
-function attachBlockTagRanges(source, blocks) {
-  const tags = openingBlockTags(source, blocks)
+function attachBlockTagRanges(source, blocks, tags) {
   const used = new Set()
   for (const block of blocks) {
     const match = tags.find((tag, index) => !used.has(index) && tag.type === block.type.toLowerCase() &&
@@ -134,7 +135,24 @@ function attachBlockTagRanges(source, blocks) {
   }
 }
 
-function collectDiagnostics(errors, source, blocks) {
+function collectTopLevelBlocks(source, tags) {
+  return tags.map(tag => {
+    const start = tag.open_end
+    const end = Number.isSafeInteger(tag.close_start) ? tag.close_start :
+      tag.self_closing ? tag.open_end : source.length
+    const content = source.slice(start, end)
+    const block = { type: tag.type, start_utf16: start, end_utf16: end,
+      tag_start_utf16: tag.start, tag_end_utf16: tag.open_end,
+      content_sha256: createHash('sha256').update(content, 'utf8').digest('hex') }
+    if (Number.isSafeInteger(tag.close_start) && Number.isSafeInteger(tag.close_end)) {
+      block.close_start_utf16 = tag.close_start
+      block.close_end_utf16 = tag.close_end
+    }
+    return block
+  })
+}
+
+function collectDiagnostics(errors, source, blocks, tags) {
   if (!Array.isArray(errors) || errors.length > MAX_DIAGNOSTICS) throw new Error('diagnostic limit')
   const diagnostics = errors.map(error => {
     const start = error && Number.isSafeInteger(error.start) ? error.start : null
@@ -146,7 +164,7 @@ function collectDiagnostics(errors, source, blocks) {
     if (Object.prototype.hasOwnProperty.call(descriptorCounts, block.type)) descriptorCounts[block.type]++
   }
   const openingCounts = { template: [], script: [], style: [] }
-  for (const opening of openingBlockTags(source, blocks)) {
+  for (const opening of tags) {
     if (openingCounts[opening.type]) openingCounts[opening.type].push(opening.start)
   }
   for (const type of ['template', 'script']) {
@@ -172,7 +190,8 @@ function parseSFC(request) {
     compilerParseOptions: { pad: false, deindent: false, outputSourceRange: true },
   })
   const blocks = collectBlocks(parsed, request.source)
-  attachBlockTagRanges(request.source, blocks)
+  const tags = openingBlockTags(request.source, blocks)
+  attachBlockTagRanges(request.source, blocks, tags)
   return {
     node_version: process.version,
     compiler_version: COMPILER_VERSION,
@@ -180,13 +199,14 @@ function parseSFC(request) {
     sha256: digest,
     source_bytes: bytes.byteLength,
     blocks,
-    diagnostics: collectDiagnostics(parsed.errors, request.source, blocks),
+    top_level_blocks: collectTopLevelBlocks(request.source, tags),
+    diagnostics: collectDiagnostics(parsed.errors, request.source, blocks, tags),
   }
 }
 
 function main() {
   if (process.argv.length === 3 && process.argv[2] === '--health') {
-    process.stdout.write(JSON.stringify({ node_version: process.version, compiler_version: COMPILER_VERSION, rules_version: 2 }))
+    process.stdout.write(JSON.stringify({ node_version: process.version, compiler_version: COMPILER_VERSION, rules_version: 3 }))
     return
   }
   let body

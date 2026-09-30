@@ -1,6 +1,7 @@
 """Locked Tree-sitter runtime and a provenance adapter over the mature chunker."""
 import hashlib
-from bisect import bisect_left
+from array import array
+from bisect import bisect_left, bisect_right
 from importlib.metadata import version
 import json
 import os
@@ -31,7 +32,7 @@ def load_sfc_runtime():
         lock = json.loads((root / 'runtime.lock.json').read_text(encoding='utf-8'))
         package_lock = json.loads((root / 'package-lock.json').read_text(encoding='utf-8'))
         compiler_lock = package_lock['packages']['node_modules/@vue/compiler-sfc']
-        if (lock.get('rules_version') != 2 or compiler_lock.get('version') != lock.get('compiler_version') or
+        if (lock.get('rules_version') != 3 or compiler_lock.get('version') != lock.get('compiler_version') or
                 compiler_lock.get('integrity') != lock.get('compiler_integrity')):
             return None
         node = os.environ.get('SOURCE_PARSER_NODE') or shutil.which('node')
@@ -101,27 +102,68 @@ def _source_span(newlines, start, end):
             'end_line': bisect_left(newlines, max(start, end - 1)) + 1}
 
 
+class _UTF16OffsetMap:
+    """Map UTF-16 boundaries to UTF-8 bytes with bounded checkpoint storage."""
+
+    __slots__ = ('_text', '_utf16', '_byte', '_character', '_utf16_length')
+    _CHECKPOINT_STRIDE = 256
+
+    def __init__(self, text, raw):
+        self._text = text
+        self._utf16 = array('I', [0])
+        self._byte = array('I', [0])
+        self._character = array('I', [0])
+        utf16, byte = 0, 0
+        next_checkpoint = self._CHECKPOINT_STRIDE
+        for character_index, character in enumerate(text, 1):
+            codepoint = ord(character)
+            utf16 += 2 if codepoint > 0xFFFF else 1
+            byte += (1 if codepoint <= 0x7F else 2 if codepoint <= 0x7FF else
+                     3 if codepoint <= 0xFFFF else 4)
+            if utf16 >= next_checkpoint:
+                self._utf16.append(utf16)
+                self._byte.append(byte)
+                self._character.append(character_index)
+                next_checkpoint += self._CHECKPOINT_STRIDE
+        if byte != len(raw):
+            raise RuntimeError('SFC source encoding mismatch')
+        self._utf16_length = utf16
+
+    def get(self, position, default=None):
+        if type(position) is not int or position < 0 or position > self._utf16_length:
+            return default
+        checkpoint = bisect_right(self._utf16, position) - 1
+        utf16 = self._utf16[checkpoint]
+        byte = self._byte[checkpoint]
+        character_index = self._character[checkpoint]
+        if utf16 == position:
+            return byte
+        while character_index < len(self._text):
+            codepoint = ord(self._text[character_index])
+            utf16 += 2 if codepoint > 0xFFFF else 1
+            byte += (1 if codepoint <= 0x7F else 2 if codepoint <= 0x7FF else
+                     3 if codepoint <= 0xFFFF else 4)
+            character_index += 1
+            if utf16 == position:
+                return byte
+            if utf16 > position:
+                return default
+        return default
+
+
 def _utf16_offsets(text, raw):
-    offsets = {0: 0}
-    utf16, byte = 0, 0
-    for character in text:
-        utf16 += 2 if ord(character) > 0xFFFF else 1
-        byte += len(character.encode('utf-8'))
-        offsets[utf16] = byte
-    if byte != len(raw):
-        raise RuntimeError('SFC source encoding mismatch')
-    return offsets
+    return _UTF16OffsetMap(text, raw)
 
 
 def _offset_vue_blocks(text, raw, blocks, offsets=None):
     """Map compiler UTF-16 positions to verified original UTF-8 byte offsets."""
-    offsets = offsets or _utf16_offsets(text, raw)
+    offsets = offsets if offsets is not None else _utf16_offsets(text, raw)
     mapped = []
     for block in blocks:
         start, end = block['start_utf16'], block['end_utf16']
-        if start not in offsets or end not in offsets:
+        start_byte, end_byte = offsets.get(start), offsets.get(end)
+        if start_byte is None or end_byte is None:
             raise RuntimeError('SFC parser returned a split Unicode character range')
-        start_byte, end_byte = offsets[start], offsets[end]
         if hashlib.sha256(raw[start_byte:end_byte]).hexdigest() != block.get('content_sha256'):
             raise RuntimeError('SFC parser returned a non-verifiable block range')
         item = dict(block)
@@ -133,18 +175,18 @@ def _offset_vue_blocks(text, raw, blocks, offsets=None):
             raise RuntimeError('SFC parser returned an incomplete wrapper range')
         if all(present_tags[:2]):
             tag_start, tag_end = (block[key] for key in tag_keys[:2])
-            if any(value not in offsets for value in (tag_start, tag_end)):
+            tag_start_byte, tag_end_byte = offsets.get(tag_start), offsets.get(tag_end)
+            if tag_start_byte is None or tag_end_byte is None:
                 raise RuntimeError('SFC parser returned a split Unicode opening wrapper range')
-            tag_start_byte, tag_end_byte = offsets[tag_start], offsets[tag_end]
             if (tag_start_byte >= tag_end_byte or tag_end_byte != start_byte or
                     raw[tag_start_byte:tag_start_byte + 1] != b'<'):
                 raise RuntimeError('SFC parser returned a non-verifiable wrapper range')
             item.update(tag_start_byte=tag_start_byte, tag_end_byte=tag_end_byte)
         if all(present_tags[2:]):
             close_start, close_end = (block[key] for key in tag_keys[2:])
-            if any(value not in offsets for value in (close_start, close_end)):
+            close_start_byte, close_end_byte = offsets.get(close_start), offsets.get(close_end)
+            if close_start_byte is None or close_end_byte is None:
                 raise RuntimeError('SFC parser returned a split Unicode closing wrapper range')
-            close_start_byte, close_end_byte = offsets[close_start], offsets[close_end]
             if (close_start_byte != end_byte or close_end_byte <= close_start_byte or
                     raw[close_start_byte:close_start_byte + 2] != b'</'):
                 raise RuntimeError('SFC parser returned a non-verifiable closing wrapper range')
@@ -218,7 +260,25 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     newlines = [index for index, byte in enumerate(raw) if byte == 10]
     span = lambda start, end: _source_span(newlines, start, end)
     utf16_offsets = _utf16_offsets(text, raw)
-    blocks = _offset_vue_blocks(text, raw, response.get('blocks', []), utf16_offsets)
+    descriptor_blocks = _offset_vue_blocks(text, raw, response.get('blocks', []), utf16_offsets)
+    top_level_blocks = response.get('top_level_blocks')
+    if not isinstance(top_level_blocks, list) or len(top_level_blocks) > 512:
+        raise RuntimeError('SFC parser returned invalid top-level blocks')
+    mapped_top_level_blocks = _offset_vue_blocks(text, raw, top_level_blocks, utf16_offsets)
+    descriptor_keys = {(block['type'].lower(), block['start_utf16']) for block in descriptor_blocks}
+    recovered_blocks = []
+    for block in mapped_top_level_blocks:
+        if (block['type'].lower(), block['start_utf16']) in descriptor_keys:
+            continue
+        block.update(lang='', src='', setup=False, recovered=True)
+        recovered_blocks.append(block)
+    blocks = sorted(descriptor_blocks + recovered_blocks,
+                    key=lambda item: (item['start_byte'], item['end_byte']))
+    verified_block_end = 0
+    for block in blocks:
+        if block['start_byte'] < verified_block_end:
+            raise RuntimeError('SFC parser returned overlapping descriptor and recovered blocks')
+        verified_block_end = max(verified_block_end, block['end_byte'])
     chunks, symbols, block_infos = [], [], []
     cursor = 0
     degraded = False
@@ -252,27 +312,35 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         script_language = {'': 'javascript', 'js': 'javascript', 'javascript': 'javascript', 'jsx': 'javascript',
                            'ts': 'typescript', 'typescript': 'typescript', 'tsx': 'tsx'}.get(language)
         body = raw[start:end]
-        block_quality = 'structural'
+        recovered = bool(block.get('recovered'))
+        block_quality = 'degraded' if recovered else 'structural'
         block_symbols = []
         body_chunks = []
         external_script = kind == 'script' and bool(block.get('src'))
         unsupported_script = kind == 'script' and not external_script and script_language not in script_languages
         unsupported_preprocess = unsupported_script or language not in known_raw_languages[kind]
-        wrapper_quality = ('degraded' if kind == 'script' and block.get('src') else
+        wrapper_quality = ('degraded' if recovered or kind == 'script' and block.get('src') else
                            'unknown_preprocess' if unsupported_preprocess else '')
         wrapper_region = region_for(block, wrapper_quality) if wrapper_quality else None
+        if recovered:
+            degraded = True
         tag_start = block.get('tag_start_byte')
         if wrapper_quality and tag_start is None:
             raise RuntimeError('SFC parser omitted a required block wrapper range')
         if tag_start is not None and tag_start < cursor:
             raise RuntimeError('SFC parser returned an overlapping block wrapper range')
-        opening_start = tag_start if wrapper_quality else start
+        split_empty_wrappers = not body and tag_start is not None
+        opening_start = tag_start if wrapper_quality or split_empty_wrappers else start
         if opening_start > cursor:
             chunks.extend(_split_raw(raw, cursor, opening_start, max_bytes, span, 'structural', None))
         if wrapper_quality:
             opening_chunks = _split_raw(raw, tag_start, start, max_bytes, span, wrapper_quality, wrapper_region)
             chunks.extend(opening_chunks)
-        is_script = (kind == 'script' and not block.get('src') and
+        elif split_empty_wrappers:
+            empty_region = region_for(block, block_quality)
+            opening_chunks = _split_raw(raw, tag_start, start, max_bytes, span, block_quality, empty_region)
+            chunks.extend(opening_chunks)
+        is_script = (not recovered and kind == 'script' and not block.get('src') and
                      script_language in script_languages)
         if is_script and body:
             parsed = parse_source(body, max_bytes, parser_version, script_language, path)
@@ -308,11 +376,14 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             symbol['region'] = region
             symbols.append(symbol)
         cursor = end
-        if wrapper_quality and block.get('close_end_byte') is not None:
+        if (wrapper_quality or split_empty_wrappers) and block.get('close_end_byte') is not None:
             close_start, close_end = block['close_start_byte'], block['close_end_byte']
             if close_start != cursor or close_end <= close_start:
                 raise RuntimeError('SFC parser returned a non-contiguous closing wrapper range')
-            closing_chunks = _split_raw(raw, close_start, close_end, max_bytes, span, wrapper_quality, wrapper_region)
+            closing_quality = wrapper_quality or block_quality
+            closing_region = wrapper_region or region_for(block, block_quality)
+            closing_chunks = _split_raw(raw, close_start, close_end, max_bytes, span,
+                                        closing_quality, closing_region)
             chunks.extend(closing_chunks)
             cursor = close_end
         block_infos.append({
@@ -333,14 +404,17 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             raise RuntimeError('SFC parser returned an invalid diagnostic code')
         start_utf16 = diagnostic.get('start_utf16')
         end_utf16 = diagnostic.get('end_utf16')
-        if type(start_utf16) is not int or start_utf16 not in utf16_offsets:
+        start_byte = utf16_offsets.get(start_utf16) if type(start_utf16) is int else None
+        if start_byte is None:
             degraded = True
             continue
-        start_byte = utf16_offsets[start_utf16]
         if end_utf16 is None:
             end_byte = start_byte
-        elif type(end_utf16) is int and end_utf16 in utf16_offsets and end_utf16 >= start_utf16:
-            end_byte = utf16_offsets[end_utf16]
+        elif type(end_utf16) is int and end_utf16 >= start_utf16:
+            end_byte = utf16_offsets.get(end_utf16)
+            if end_byte is None:
+                degraded = True
+                continue
         else:
             degraded = True
             continue
@@ -360,6 +434,10 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             else:
                 affected_chunk = next((chunk for chunk in block_info['body_chunks']
                                        if chunk['range']['start_byte'] <= start_byte < chunk['range']['end_byte']), None)
+        if affected_chunk is None and block_info is not None and not block_info['body_chunks']:
+            affected_chunk = next((chunk for chunk in reversed(chunks)
+                                   if block_info['start_byte'] <= chunk['range']['start_byte'] <
+                                   chunk['range']['end_byte'] <= block_info['end_byte']), None)
         if affected_chunk is None:
             affected_chunk = next((chunk for chunk in chunks
                                    if chunk['range']['start_byte'] <= start_byte < chunk['range']['end_byte']), None)
@@ -377,6 +455,8 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             affected_chunk['quality'] = 'degraded'
         if affected_chunk.get('region') and affected_chunk['region']['quality'] == 'structural':
             affected_chunk['region']['quality'] = 'degraded'
+        elif block_info is not None and affected_chunk.get('region') is None:
+            affected_chunk['region'] = dict(diagnostic_region)
         affected_chunk.setdefault('diagnostics', []).append(diagnostic_evidence)
         point = span(start_byte, start_byte)
         symbols.append({'kind': 'sfc_diagnostic', 'name': 'SFC descriptor warning',
