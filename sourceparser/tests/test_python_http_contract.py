@@ -57,7 +57,7 @@ class PythonHTTPContract(unittest.TestCase):
         self.assertEqual(status, 200, health)
         self.assertTrue(health['ready'])
         self.assertIn('python', health['languages'])
-        self.assertIn('rules-4', health['parser_version'])
+        self.assertIn('rules-10' if 'java' in health['languages'] else 'rules-4', health['parser_version'])
 
     def test_python_parse_artifact_version_matches_updated_health_fingerprint(self):
         status, health = self.request('/health')
@@ -67,7 +67,8 @@ class PythonHTTPContract(unittest.TestCase):
         self.assertEqual(result['parser_version'], health['parser_version'])
         versions = load_runtime(os.environ['SOURCE_PARSER_CACHE'])
         self.assertIn('python-pack-1.19.0-rules-4-', versions['python'])
-        self.assertTrue(health['parser_version'].startswith('source-pack-1.19.0-rules-4-'))
+        expected_rules = 'rules-10' if 'java' in health['languages'] else 'rules-4'
+        self.assertTrue(health['parser_version'].startswith('source-pack-1.19.0-' + expected_rules + '-'))
 
     def test_module_class_methods_decorators_async_unicode_and_crlf_keep_parent_ranges(self):
         raw = ('@router.get("/预约")\r\n'

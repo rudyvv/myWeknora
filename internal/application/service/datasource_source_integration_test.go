@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,7 +95,11 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	})
 	parserVersion, err := source.ParserVersion(f.ctx, os.Getenv("SOURCE_PARSER_URL"))
 	require.NoError(t, err)
-	require.Contains(t, parserVersion, "-rules-4-")
+	expectedRules := "-rules-4-"
+	if strings.Contains(string(lock), `"java"`) {
+		expectedRules = "-rules-10-"
+	}
+	require.Contains(t, parserVersion, expectedRules)
 	config, err := f.ds.ParseConfig()
 	require.NoError(t, err)
 	_, rulesVersion, err := datasource.ParseSourceSettings(config)
@@ -234,6 +239,400 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	require.Equal(t, f.sha, pinnedDegraded.CommitSHA)
 	require.Equal(t, degradedView.FileVersionID, pinnedDegraded.FileVersionID)
 	require.Equal(t, "syntax_error", pinnedDegraded.Quality)
+}
+
+func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
+	files := map[string][]byte{
+		"src/PushScheduleMapper.java": []byte("package demo; public interface PushScheduleMapper { Schedule getPushSchedule(Long id); }\n"),
+		"src/mapper/PushScheduleMapper.xml": []byte(`<?xml version="1.0"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="demo.PushScheduleMapper">
+  <resultMap id="Base" type="demo.Base"><id column="id" property="id"/></resultMap>
+  <resultMap id="ScheduleMap" type="demo.Schedule" extends="Base"><association property="owner" resultMap="Base"/></resultMap>
+  <sql id="columns"><include refid="baseColumns"/>ORDER BY id</sql>
+  <sql id="baseColumns">id</sql>
+  <select id="getPushSchedule" resultMap="ScheduleMap">
+    SELECT id FROM push_schedule WHERE id = #{id} <include refid="columns"/>
+  </select>
+</mapper>`),
+	}
+	f := newJavaSourceFixture(t, files)
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, _ := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+
+	var javaFile, xmlFile types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/PushScheduleMapper.java").Take(&javaFile).Error)
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/mapper/PushScheduleMapper.xml").Take(&xmlFile).Error)
+	var snapshot types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&snapshot).Error)
+	require.True(t, snapshot.RelationsStaged)
+	require.Greater(t, snapshot.RelationCount, 0)
+
+	var mapperRelation types.SourceCodeRelation
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='mapper_statement' AND determinacy='certain'", snapshot.ID).Take(&mapperRelation).Error)
+	require.Equal(t, javaFile.ID, mapperRelation.FromFileID)
+	require.Equal(t, xmlFile.ID, mapperRelation.ToFileID)
+	require.Equal(t, "src/mapper/PushScheduleMapper.xml", mapperRelation.ToPath)
+	require.Equal(t, snapshot.ID, mapperRelation.SnapshotID)
+	var xmlVersion types.SourceFileVersion
+	require.NoError(t, f.db.Where("source_file_id=? AND snapshot_id=?", xmlFile.ID, snapshot.ID).Take(&xmlVersion).Error)
+	var javaVersion types.SourceFileVersion
+	require.NoError(t, f.db.Where("source_file_id=? AND snapshot_id=?", javaFile.ID, snapshot.ID).Take(&javaVersion).Error)
+	mapperTarget, err := f.knowledge.GetSourceFile(f.ctx, mapperRelation.ToFileID, mapperRelation.ToVersionID)
+	require.NoError(t, err, "a certain cross-file edge must resolve through the restricted fixed-version source read")
+	require.Equal(t, snapshot.ID, mapperTarget.SnapshotID)
+	require.Equal(t, xmlVersion.ID, mapperTarget.FileVersionID)
+	var mapperTargetRange types.SourceRange
+	require.NoError(t, json.Unmarshal(mapperRelation.ToRange, &mapperTargetRange))
+	require.LessOrEqual(t, mapperTargetRange.EndByte, len(mapperTarget.Content))
+	require.Contains(t, mapperTarget.Content[mapperTargetRange.StartByte:mapperTargetRange.EndByte], `<select id="getPushSchedule"`)
+	var storedFacts []types.ParsedSourceFact
+	require.NoError(t, json.Unmarshal(xmlVersion.Facts, &storedFacts))
+	factKinds := map[string]bool{}
+	for _, fact := range storedFacts {
+		factKinds[fact.Kind] = true
+	}
+	require.True(t, factKinds["mybatis_statement"])
+	require.True(t, factKinds["mybatis_sql_fragment"])
+	require.True(t, factKinds["mybatis_result_map_reference"])
+	var includeRelation, resultMapRelation, associationRelation, extendsRelation, tableRelation types.SourceCodeRelation
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='include' AND from_key=? AND determinacy='certain'", snapshot.ID,
+		"demo.PushScheduleMapper.columns -> include baseColumns").Take(&includeRelation).Error)
+	require.Equal(t, xmlFile.ID, includeRelation.FromFileID)
+	require.Equal(t, xmlFile.ID, includeRelation.ToFileID)
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='result_map' AND determinacy='certain'", snapshot.ID).Take(&resultMapRelation).Error)
+	require.Equal(t, xmlFile.ID, resultMapRelation.FromFileID)
+	require.Equal(t, xmlFile.ID, resultMapRelation.ToFileID)
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='result_map' AND from_key=? AND determinacy='certain'", snapshot.ID,
+		"demo.PushScheduleMapper.ScheduleMap -> association Base").Take(&associationRelation).Error)
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='result_map' AND from_key=? AND determinacy='certain'", snapshot.ID,
+		"demo.PushScheduleMapper.ScheduleMap -> extends Base").Take(&extendsRelation).Error)
+	var includeRange, includeTargetRange types.SourceRange
+	require.NoError(t, json.Unmarshal(includeRelation.FromRange, &includeRange))
+	require.NoError(t, json.Unmarshal(includeRelation.ToRange, &includeTargetRange))
+	require.Equal(t, `<include refid="baseColumns"/>`, string(files["src/mapper/PushScheduleMapper.xml"][includeRange.StartByte:includeRange.EndByte]))
+	require.Equal(t, `<sql id="baseColumns">id</sql>`, string(files["src/mapper/PushScheduleMapper.xml"][includeTargetRange.StartByte:includeTargetRange.EndByte]))
+	var extendsRange, extendsTargetRange types.SourceRange
+	require.NoError(t, json.Unmarshal(extendsRelation.FromRange, &extendsRange))
+	require.NoError(t, json.Unmarshal(extendsRelation.ToRange, &extendsTargetRange))
+	require.Contains(t, string(files["src/mapper/PushScheduleMapper.xml"][extendsRange.StartByte:extendsRange.EndByte]), `extends="Base"`)
+	require.Equal(t, `<resultMap id="Base" type="demo.Base"><id column="id" property="id"/></resultMap>`,
+		string(files["src/mapper/PushScheduleMapper.xml"][extendsTargetRange.StartByte:extendsTargetRange.EndByte]))
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='table_access' AND to_key='push_schedule' AND determinacy='certain'", snapshot.ID).Take(&tableRelation).Error)
+	require.Empty(t, tableRelation.ToFileID, "database table facts must not fabricate a readable source-file target")
+	require.Empty(t, tableRelation.ResolutionReason)
+
+	for _, params := range []types.SearchParams{
+		{QueryText: "getPushSchedule", MatchCount: 20, DisableVectorMatch: true},
+		{QueryText: "getPushSchedule", MatchCount: 20, DisableKeywordsMatch: true},
+	} {
+		hits, searchErr := f.kbs.HybridSearch(f.ctx, f.kb.ID, params)
+		require.NoError(t, searchErr)
+		paths := map[string]bool{}
+		for _, hit := range hits {
+			var evidence struct {
+				Source types.SourceEvidence `json:"source"`
+			}
+			require.NoError(t, json.Unmarshal(hit.ChunkMetadata, &evidence))
+			paths[evidence.Source.Path] = true
+		}
+		require.True(t, paths["src/PushScheduleMapper.java"], "mapper method is searchable in each real index")
+		require.True(t, paths["src/mapper/PushScheduleMapper.xml"], "XML statement is indexed independently of Java")
+	}
+
+	javaView, err := f.knowledge.GetSourceFile(f.ctx, javaFile.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(files["src/PushScheduleMapper.java"]), javaView.Content)
+	require.Empty(t, javaView.Relations, "single-file public scope must not expose the linked XML endpoint")
+	xmlOnly, releaseXMLOnly, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{xmlFile.ID}},
+	})
+	require.NoError(t, err)
+	xmlOnlyView, err := f.knowledge.GetSourceFile(xmlOnly, xmlFile.ID, xmlVersion.ID)
+	require.NoError(t, err)
+	require.NotContains(t, xmlOnlyView.Relations, mapperRelation, "the XML endpoint must not disclose a relation to an unauthorized Java file")
+	_, err = f.knowledge.GetSourceFile(xmlOnly, mapperRelation.FromFileID, mapperRelation.FromVersionID)
+	require.Error(t, err, "a reverse endpoint read must not expand the caller's XML-only scope")
+	releaseXMLOnly()
+
+	pinned, release, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	})
+	require.NoError(t, err)
+	defer release()
+	linked, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, linked.Relations)
+	require.Contains(t, linked.Relations, mapperRelation)
+	toolArgs, err := json.Marshal(map[string]any{"knowledge_id": javaFile.ID, "limit": 1})
+	require.NoError(t, err)
+	toolResult, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, toolArgs)
+	require.NoError(t, err)
+	require.True(t, toolResult.Success, toolResult.Error)
+	analysis, ok := toolResult.Data["source_analysis"].(map[string]interface{})
+	require.True(t, ok, "Agent chunk reads inside the existing question scope expose source facts and relations")
+	require.Equal(t, javaView.FileVersionID, analysis["file_version_id"])
+	require.NotEmpty(t, analysis["facts"])
+	var targetEvidence map[string]interface{}
+	for _, raw := range analysis["relations"].([]map[string]interface{}) {
+		if raw["kind"] == "mapper_statement" {
+			targetEvidence, _ = raw["target_evidence"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, targetEvidence)
+	require.Equal(t, xmlFile.ID, targetEvidence["knowledge_id"])
+	require.Equal(t, xmlVersion.ID, targetEvidence["file_version_id"])
+	require.Equal(t, xmlVersion.SHA256, targetEvidence["sha256"])
+	require.Equal(t, xmlFile.Path, targetEvidence["path"])
+	require.Contains(t, targetEvidence["snippet"], "getPushSchedule")
+	require.Contains(t, toolResult.Output, "<source_analysis>")
+	xmlPublishedView, err := f.knowledge.GetSourceFile(pinned, xmlFile.ID, xmlVersion.ID)
+	require.NoError(t, err)
+	require.Contains(t, xmlPublishedView.Relations, mapperRelation, "the same snapshot edge must be returned when the XML endpoint is read")
+	reverseView, err := f.knowledge.GetSourceFile(pinned, mapperRelation.FromFileID, mapperRelation.FromVersionID)
+	require.NoError(t, err, "the opposite endpoint must be re-read through the same authorized published scope")
+	require.Equal(t, snapshot.ID, reverseView.SnapshotID)
+	require.Equal(t, javaVersion.ID, reverseView.FileVersionID)
+	var javaMethodRange types.SourceRange
+	require.NoError(t, json.Unmarshal(mapperRelation.FromRange, &javaMethodRange))
+	require.LessOrEqual(t, javaMethodRange.EndByte, len(reverseView.Content))
+	require.Contains(t, reverseView.Content[javaMethodRange.StartByte:javaMethodRange.EndByte], "getPushSchedule")
+	xmlToolArgs, err := json.Marshal(map[string]any{"knowledge_id": xmlFile.ID, "limit": 1})
+	require.NoError(t, err)
+	xmlToolResult, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, xmlToolArgs)
+	require.NoError(t, err)
+	require.True(t, xmlToolResult.Success, xmlToolResult.Error)
+	xmlAnalysis := xmlToolResult.Data["source_analysis"].(map[string]interface{})
+	var reverseTargetEvidence map[string]interface{}
+	for _, raw := range xmlAnalysis["relations"].([]map[string]interface{}) {
+		if raw["kind"] == "mapper_statement" {
+			reverseTargetEvidence, _ = raw["target_evidence"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, reverseTargetEvidence, "Agent analysis on the XML endpoint must surface its Java method counterpart")
+	require.Equal(t, javaFile.ID, reverseTargetEvidence["knowledge_id"])
+	require.Equal(t, javaVersion.ID, reverseTargetEvidence["file_version_id"])
+	require.Equal(t, javaVersion.SHA256, reverseTargetEvidence["sha256"])
+	require.Equal(t, javaFile.Path, reverseTargetEvidence["path"])
+	require.Contains(t, reverseTargetEvidence["snippet"], "getPushSchedule")
+
+	probeRelations := make([]types.SourceCodeRelation, 110)
+	probeIDs := make(map[string]bool, len(probeRelations))
+	for i := range probeRelations {
+		probeRelations[i] = types.SourceCodeRelation{
+			ID: uuid.NewString(), TenantID: 1, DataSourceID: f.ds.ID, SnapshotID: snapshot.ID,
+			Kind: "pagination_probe", FromFileID: javaFile.ID, FromVersionID: javaView.FileVersionID,
+			FromPath: javaFile.Path, FromKey: fmt.Sprintf("probe-%03d", i),
+			FromRange: types.JSON(fmt.Sprintf(`{"start_byte":%d,"end_byte":%d,"start_line":1,"end_line":1}`, i, i+1)),
+			ToFileID:  xmlFile.ID, ToVersionID: xmlVersion.ID, ToPath: xmlFile.Path,
+			ToKey: fmt.Sprintf("probe-%03d", i), ToRange: mapperRelation.ToRange,
+			Determinacy: "certain", Quality: "structural", Context: types.JSON(`[]`),
+		}
+		probeIDs[probeRelations[i].ID] = true
+	}
+	require.NoError(t, f.db.Create(&probeRelations).Error)
+	agentFirstArgs, _ := json.Marshal(map[string]any{"knowledge_id": javaFile.ID, "limit": 1})
+	agentFirst, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, agentFirstArgs)
+	require.NoError(t, err)
+	firstAnalysis := agentFirst.Data["source_analysis"].(map[string]interface{})
+	firstAgentRelations := firstAnalysis["relations"].([]map[string]interface{})
+	require.Len(t, firstAgentRelations, 20, "Agent evidence pages stay within a small output budget")
+	require.True(t, firstAnalysis["relations_truncated"].(bool))
+	agentCursor := firstAnalysis["relations_next_cursor"].(string)
+	agentNextArgs, _ := json.Marshal(map[string]any{"knowledge_id": javaFile.ID, "limit": 1, "relation_cursor": agentCursor})
+	agentNext, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{javaFile.ID, xmlFile.ID}},
+	}).Execute(pinned, agentNextArgs)
+	require.NoError(t, err)
+	nextAnalysis := agentNext.Data["source_analysis"].(map[string]interface{})
+	nextAgentRelations := nextAnalysis["relations"].([]map[string]interface{})
+	require.Len(t, nextAgentRelations, 20)
+	var continuedTarget map[string]interface{}
+	for _, relation := range nextAgentRelations {
+		if target, ok := relation["target_evidence"].(map[string]interface{}); ok {
+			continuedTarget = target
+			break
+		}
+	}
+	require.NotNil(t, continuedTarget, "continuation target reads must not reuse the main-file cursor")
+	require.Equal(t, xmlFile.ID, continuedTarget["knowledge_id"])
+	require.Equal(t, xmlVersion.ID, continuedTarget["file_version_id"])
+	require.Contains(t, continuedTarget["snippet"], "getPushSchedule")
+	firstAgentIDs := map[string]bool{}
+	for _, relation := range firstAgentRelations {
+		firstAgentIDs[relation["id"].(string)] = true
+	}
+	for _, relation := range nextAgentRelations {
+		require.False(t, firstAgentIDs[relation["id"].(string)], "Agent relation cursor advances without repeating edges")
+	}
+	firstPage, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.Len(t, firstPage.Relations, 100)
+	require.True(t, firstPage.RelationsTruncated)
+	require.NotEmpty(t, firstPage.RelationsNextCursor)
+	secondCtx := source.WithRelationCursor(pinned, firstPage.RelationsNextCursor)
+	secondPage, err := f.knowledge.GetSourceFile(secondCtx, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.False(t, secondPage.RelationsTruncated)
+	require.Empty(t, secondPage.RelationsNextCursor)
+	seenProbeIDs := make(map[string]bool, len(probeIDs))
+	for _, relation := range append(firstPage.Relations, secondPage.Relations...) {
+		if probeIDs[relation.ID] {
+			require.False(t, seenProbeIDs[relation.ID], "keyset pagination must not repeat relations")
+			seenProbeIDs[relation.ID] = true
+		}
+	}
+	require.Len(t, seenProbeIDs, len(probeIDs), "continuation must return every relation after the first 100")
+	_, err = f.knowledge.GetSourceFile(source.WithRelationCursor(pinned, firstPage.RelationsNextCursor), xmlFile.ID, xmlVersion.ID)
+	require.ErrorContains(t, err, "invalid source relation cursor", "cursor is bound to one exact snapshot/file/version")
+	xmlView, err := f.knowledge.GetSourceFile(pinned, xmlFile.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(files["src/mapper/PushScheduleMapper.xml"]), xmlView.Content)
+
+	// A failed relation stage is part of the snapshot build, not a partial
+	// update: the preceding publication and its pinned relation remain usable.
+	actualSnapshots := f.service.sourceSnapshots
+	f.service.sourceSnapshots = relationStageFailure{SourceSnapshotRepository: actualSnapshots}
+	changedXML := strings.Replace(string(files["src/mapper/PushScheduleMapper.xml"]), "push_schedule", "push_schedule_next", 1)
+	f.advanceFiles(map[string][]byte{"src/mapper/PushScheduleMapper.xml": []byte(changedXML)})
+	failedLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	failedPayload, _ := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: failedLog.ID, Trigger: "manual"})
+	require.ErrorContains(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, failedPayload)), "injected relation staging failure")
+	f.service.sourceSnapshots = actualSnapshots
+	failedResult, err := f.service.GetSyncLog(f.ctx, failedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusFailed, failedResult.Status)
+	var stillPublished types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id=?", f.ds.ID).Take(&stillPublished).Error)
+	require.Equal(t, snapshot.ID, stillPublished.SnapshotID)
+	failedRun, err := actualSnapshots.GetRun(f.ctx, 1, f.ds.ID, failedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", failedRun.Snapshot.State)
+	var failedRelationCount int64
+	require.NoError(t, f.db.Model(&types.SourceCodeRelation{}).Where("snapshot_id=?", failedRun.Snapshot.ID).Count(&failedRelationCount).Error)
+	require.Zero(t, failedRelationCount)
+	stillPinned, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.Contains(t, stillPinned.Relations, mapperRelation)
+
+	// An empty complete manifest clears the active relation set without
+	// rewriting the prior snapshot pinned by this read lease.
+	f.advanceFiles(map[string][]byte{
+		"src/PushScheduleMapper.java":       nil,
+		"src/mapper/PushScheduleMapper.xml": nil,
+	})
+	nextLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	nextPayload, _ := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: nextLog.ID, Trigger: "manual"})
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, nextPayload)))
+	var emptySnapshot types.SourceSnapshot
+	require.NoError(t, f.db.Joins("JOIN source_publications p ON p.snapshot_id=source_snapshots.id").Where("p.data_source_id=?", f.ds.ID).Take(&emptySnapshot).Error)
+	require.NotEqual(t, snapshot.ID, emptySnapshot.ID)
+	require.True(t, emptySnapshot.RelationsStaged)
+	require.Zero(t, emptySnapshot.RelationCount)
+	var retained int64
+	require.NoError(t, f.db.Model(&types.SourceCodeRelation{}).Where("snapshot_id=? AND id=?", snapshot.ID, mapperRelation.ID).Count(&retained).Error)
+	require.EqualValues(t, 1, retained)
+	oldPinned, err := f.knowledge.GetSourceFile(pinned, javaFile.ID, javaView.FileVersionID)
+	require.NoError(t, err)
+	require.Equal(t, snapshot.ID, oldPinned.SnapshotID)
+	require.Contains(t, oldPinned.Relations, mapperRelation)
+	oldXMLPinned, err := f.knowledge.GetSourceFile(pinned, mapperRelation.ToFileID, mapperRelation.ToVersionID)
+	require.NoError(t, err, "a retained read lease keeps the relation's opposite endpoint on its original published snapshot")
+	require.Equal(t, snapshot.ID, oldXMLPinned.SnapshotID)
+	require.Equal(t, xmlVersion.ID, oldXMLPinned.FileVersionID)
+	oldJavaPinned, err := f.knowledge.GetSourceFile(pinned, mapperRelation.FromFileID, mapperRelation.FromVersionID)
+	require.NoError(t, err)
+	require.Equal(t, snapshot.ID, oldJavaPinned.SnapshotID)
+	require.Equal(t, javaVersion.ID, oldJavaPinned.FileVersionID)
+	_, err = f.knowledge.GetSourceFile(f.ctx, javaFile.ID)
+	require.Error(t, err, "the empty current publication must not expose a removed source file")
+	_, err = f.knowledge.GetSourceFile(f.ctx, mapperRelation.ToFileID, mapperRelation.ToVersionID)
+	require.Error(t, err, "the former cross-file relation target must not bypass the published read scope after deletion")
+}
+
+func TestMalformedMyBatisXMLFallsBackAndPublishesReadableSnapshot(t *testing.T) {
+	const path = "src/mapper/BrokenMapper.xml"
+	raw := []byte(`<mapper namespace="demo.M"><select id="x">SELECT * FROM t</mapper>`)
+	f := newJavaSourceFixture(t, map[string][]byte{path: raw})
+	unsafeXML := []byte(`<!DOCTYPE mapper SYSTEM "https://attacker.invalid/evil.dtd"><mapper namespace="demo.Unsafe"/>`)
+	_, err := source.ParseFile(f.ctx, os.Getenv("SOURCE_PARSER_URL"), "src/mapper/Unsafe.xml", unsafeXML)
+	require.Error(t, err, "explicitly forbidden external DTDs must remain rejected, not downgraded")
+	f.parseCount.Store(0)
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)),
+		"readable malformed XML must fall back instead of aborting snapshot publication")
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+	require.EqualValues(t, 2, f.parseCount.Load(), "both the malformed mapper and ordinary Java file reach the parser HTTP endpoint")
+
+	var file types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, path).Take(&file).Error)
+	view, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(raw), view.Content, "the published source read preserves the exact original bytes")
+	require.Equal(t, "text_fallback", view.Quality)
+	var facts []types.ParsedSourceFact
+	require.NoError(t, json.Unmarshal(view.Facts, &facts))
+	require.Empty(t, facts, "unreliable XML structure must not create structural facts")
+	var diagnostics []types.ParsedSourceDiagnostic
+	require.NoError(t, json.Unmarshal(view.Diagnostics, &diagnostics))
+	var syntaxDiagnostic *types.ParsedSourceDiagnostic
+	for index := range diagnostics {
+		if diagnostics[index].Code == "mybatis_xml_syntax_fallback" {
+			syntaxDiagnostic = &diagnostics[index]
+			break
+		}
+	}
+	require.NotNil(t, syntaxDiagnostic, "the fallback quality must include an actionable parse diagnostic")
+	require.Equal(t, "</mapper>", string(raw[syntaxDiagnostic.Range.StartByte:syntaxDiagnostic.Range.EndByte]),
+		"diagnostic coordinates must point to the original mismatched closing tag")
+
+	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
+		QueryText: "SELECT", MatchCount: 20, DisableVectorMatch: true,
+	})
+	require.NoError(t, err)
+	foundIndexedFallback := false
+	for _, hit := range hits {
+		var evidence struct {
+			Source types.SourceEvidence `json:"source"`
+		}
+		if json.Unmarshal(hit.ChunkMetadata, &evidence) == nil && evidence.Source.Path == path && strings.Contains(hit.Content, "SELECT * FROM t") {
+			foundIndexedFallback = true
+			break
+		}
+	}
+	require.True(t, foundIndexedFallback, "fallback text must be persisted in the published keyword index")
+}
+
+type relationStageFailure struct {
+	interfaces.SourceSnapshotRepository
+}
+
+func (r relationStageFailure) StageRelations(context.Context, uint64, string, string, []types.SourceCodeRelation) error {
+	return errors.New("injected relation staging failure")
 }
 
 func TestSourcePublishedChunksRemainReadOnlyButDescriptionMayChange(t *testing.T) {
@@ -650,6 +1049,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	incrementalMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000104_source_incremental_artifacts.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(incrementalMigration)).Error)
+	relationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000107_source_code_relations.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(relationMigration)).Error)
 	parser := exec.Command(python, filepath.Join(root, "sourceparser", "server.py"), "--host", "127.0.0.1", "--port", "0")
 	parser.Env = append(os.Environ(), "SOURCE_PARSER_CACHE="+cache)
 	stdout, err := parser.StdoutPipe()

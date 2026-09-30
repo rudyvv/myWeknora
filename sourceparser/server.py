@@ -51,7 +51,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.respond(200 if self.server.parser_version else 503, {
             'ready': bool(self.server.parser_version), 'parser_version': self.server.parser_version,
-            'languages': sorted(self.server.versions),
+            'languages': self.server.languages,
         })
 
     def do_POST(self):
@@ -76,8 +76,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError()
             language = body['language']
             extensions = {'java': ('.java',), 'javascript': ('.js', '.jsx', '.mjs', '.cjs'),
-                          'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',), 'python': ('.py',)}
-            if language not in self.server.versions or not path.lower().endswith(extensions[language]):
+                          'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',), 'python': ('.py',),
+                          'mybatis-xml': ('.xml',)}
+            available = language in self.server.versions or (language == 'mybatis-xml' and 'java' in self.server.versions)
+            if not available or not path.lower().endswith(extensions[language]):
                 raise ValueError()
             raw = base64.b64decode(body['content_base64'], validate=True)
             if len(raw) > MAX_FILE_BYTES or hashlib.sha256(raw).hexdigest() != body['sha256']:
@@ -128,7 +130,10 @@ def main():
         versions = {}
     parser_version = runtime_version(versions)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.cache, server.parser_version, server.versions = cache, parser_version, versions
+    languages = sorted(versions)
+    if 'java' in versions:
+        languages = sorted([*languages, 'mybatis-xml'])
+    server.cache, server.parser_version, server.versions, server.languages = cache, parser_version, versions, languages
     print(json.dumps({'port': server.server_port}), flush=True)
     server.serve_forever()
 

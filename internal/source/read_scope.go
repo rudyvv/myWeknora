@@ -10,6 +10,47 @@ import (
 )
 
 type readScopeKey struct{}
+type relationCursorKey struct{}
+type relationPageSizeKey struct{}
+
+// WithRelationCursor carries an opaque page token through the existing source
+// file read path. Repository readers bind it to the authorized file version
+// and snapshot before using it.
+func WithRelationCursor(ctx context.Context, cursor string) context.Context {
+	if cursor == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, relationCursorKey{}, cursor)
+}
+
+func RelationCursorFromContext(ctx context.Context) string {
+	cursor, _ := ctx.Value(relationCursorKey{}).(string)
+	return cursor
+}
+
+// WithoutRelationCursor preserves the read lease and all other source scope
+// while clearing a file-bound relation cursor before a cross-file endpoint
+// read.
+func WithoutRelationCursor(ctx context.Context) context.Context {
+	return context.WithValue(ctx, relationCursorKey{}, "")
+}
+
+// WithRelationPageSize may lower (never raise) the repository's bounded
+// default for consumers such as Agent output.
+func WithRelationPageSize(ctx context.Context, pageSize int) context.Context {
+	if pageSize < 1 || pageSize > 100 {
+		return ctx
+	}
+	return context.WithValue(ctx, relationPageSizeKey{}, pageSize)
+}
+
+func RelationPageSizeFromContext(ctx context.Context, defaultPageSize int) int {
+	pageSize, _ := ctx.Value(relationPageSizeKey{}).(int)
+	if pageSize < 1 || pageSize > defaultPageSize {
+		return defaultPageSize
+	}
+	return pageSize
+}
 
 type readScope struct {
 	leaseID    string

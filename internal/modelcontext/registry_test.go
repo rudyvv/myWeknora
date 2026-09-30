@@ -2,6 +2,9 @@ package modelcontext
 
 import (
 	"encoding/json"
+	"encoding/xml"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -59,6 +62,104 @@ func TestOutputFilesAreRenderedOnlyForLiveModelResults(t *testing.T) {
 	result.Success = false
 	result.Error = "timeout"
 	require.Contains(t, registry.ModelToolResultForTool("shell_exec", result), "sandbox:比赛信息.pptx")
+}
+
+func TestListKnowledgeChunksModelResultPreservesBoundedSourceAnalysis(t *testing.T) {
+	result := &types.ToolResult{
+		Success: true,
+		Output:  `<retrieval type="knowledge" mode="deep_read"><document><chunk>content</chunk></document></retrieval>`,
+		Data: map[string]interface{}{
+			"display_type": "knowledge_chunks_list",
+			"chunks":       []map[string]interface{}{{"chunk_id": "chunk-real", "knowledge_id": "knowledge-real", "content": "mapper"}},
+			"source_analysis": map[string]interface{}{
+				"path": "src/Mapper.xml", "quality": "structural", "parser_version": "mybatis-pack",
+				"facts":       []map[string]interface{}{{"kind": "mybatis_result_map_reference", "name": "Base"}},
+				"diagnostics": []map[string]interface{}{{"code": "result_map_missing", "message": "no Base"}},
+				"relations": []map[string]interface{}{{"kind": "result_map", "from_key": "Derived", "to_key": "Base",
+					"target_evidence": map[string]interface{}{"path": "src/Mapper.xml", "snippet": `<resultMap id="Base">`}}},
+				"relations_truncated": true, "relations_next_cursor": "opaque-next-page-token",
+			},
+		},
+	}
+	modelOutput := NewRegistry(true).ModelToolResultForTool("list_knowledge_chunks", result)
+	for _, marker := range []string{
+		"<source_analysis>", "mybatis_result_map_reference", "result_map_missing",
+		"opaque-next-page-token", "src/Mapper.xml", `&lt;resultMap id=\"Base\"&gt;`,
+	} {
+		require.Contains(t, modelOutput, marker)
+	}
+	require.NotContains(t, modelOutput, `<resultMap id="Base">`, "untrusted source text must remain escaped")
+	require.NotContains(t, modelOutput, "chunk-real", "the established model formatter still uses source handles")
+}
+
+func TestListKnowledgeChunksModelResultPreservesEveryRelationOnCurrentPage(t *testing.T) {
+	const cursor = "opaque-repository-cursor-after-edge-19"
+	rows := make([]map[string]interface{}, 100)
+	for index := range rows {
+		rows[index] = map[string]interface{}{
+			"id": fmt.Sprintf("edge-%02d", index), "kind": "include",
+			"from_file_id": "b155218f-2610-4198-9126-356549b64413", "to_file_id": "e5f577f4-b036-4f27-b1bc-23929263498c",
+			"from_path": "src/mapper/MainMapper.xml", "to_path": "src/mapper/CommonMapper.xml",
+			"from_key": "demo.Main.columns", "to_key": "demo.Common.Base", "determinacy": "certain", "quality": "structural",
+			"target_evidence": map[string]interface{}{
+				"knowledge_id": "e5f577f4-b036-4f27-b1bc-23929263498c", "snapshot_id": "145b5c56-2b41-49a2-8ad9-77c1852d83f0",
+				"file_version_id": "7a7c1822-e25c-44e7-bc0a-ec5e04cff007", "sha256": strings.Repeat("a", 64),
+				"path": "src/mapper/CommonMapper.xml", "snippet": strings.Repeat("源码", 120),
+			},
+		}
+	}
+
+	for _, test := range []struct {
+		name     string
+		rowCount int
+		cursor   string
+	}{
+		{name: "nonterminal page", rowCount: 20, cursor: cursor},
+		{name: "terminal page", rowCount: 20},
+		{name: "full repository page", rowCount: 100, cursor: cursor},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analysisInput := map[string]interface{}{
+				"path": "src/mapper/MainMapper.xml", "quality": "structural", "relations": rows[:test.rowCount],
+			}
+			if test.cursor != "" {
+				analysisInput["relations_next_cursor"] = test.cursor
+			}
+			result := &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"display_type": "knowledge_chunks_list",
+				"chunks":       []map[string]interface{}{{"chunk_id": "chunk-real", "knowledge_id": "source-knowledge", "content": "mapper"}},
+				"knowledge_id": "source-knowledge", "source_analysis": analysisInput,
+			}}
+			output := NewRegistry(true).ModelToolResultForTool("list_knowledge_chunks", result)
+			var envelope struct {
+				Analysis string `xml:"source_analysis"`
+			}
+			require.NoError(t, xml.Unmarshal([]byte(output), &envelope))
+			var parsed struct {
+				Relations []struct {
+					ID             string                 `json:"id"`
+					TargetEvidence map[string]interface{} `json:"target_evidence"`
+				} `json:"relations"`
+				Cursor             string `json:"relations_next_cursor"`
+				RelationsTruncated bool   `json:"relations_truncated"`
+				ModelTruncated     bool   `json:"model_output_truncated"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(envelope.Analysis), &parsed))
+			require.Len(t, parsed.Relations, test.rowCount, "a repository cursor follows the entire fetched page")
+			for index, relation := range parsed.Relations {
+				require.Equal(t, fmt.Sprintf("edge-%02d", index), relation.ID)
+			}
+			require.Equal(t, test.cursor, parsed.Cursor, "preserve only the repository-issued cursor")
+			require.False(t, parsed.RelationsTruncated, "budget compaction does not mean relation rows were dropped")
+			require.Equal(t, test.rowCount == 100, parsed.ModelTruncated, "only the large page needs compacted optional content")
+			if test.rowCount == 100 {
+				require.Equal(t, "7a7c1822-e25c-44e7-bc0a-ec5e04cff007", parsed.Relations[0].TargetEvidence["file_version_id"], "keep target identity while budgeting snippets and ranges")
+				require.NotContains(t, parsed.Relations[0].TargetEvidence, "snippet", "budget optional snippet text before relation rows")
+			}
+			require.LessOrEqual(t, len(envelope.Analysis), maxModelSourceAnalysisJSONBytes)
+			require.LessOrEqual(t, len(envelope.Analysis), maxModelSourceAnalysisBytes)
+		})
+	}
 }
 
 func TestRegistryAuditsUnresolvedAndPartiallyResolvedToolHandles(t *testing.T) {

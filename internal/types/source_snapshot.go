@@ -33,14 +33,48 @@ type ParsedSourceChunk struct {
 	Context []SourceContext `json:"context"`
 }
 
+// ParsedSourceFact is parser-authored syntax evidence. Its range always points
+// into the original immutable file; semantic fields are not source context.
+type ParsedSourceFact struct {
+	Kind            string      `json:"kind"`
+	Name            string      `json:"name,omitempty"`
+	Namespace       string      `json:"namespace,omitempty"`
+	StatementType   string      `json:"statement_type,omitempty"`
+	StatementID     string      `json:"statement_id,omitempty"`
+	MethodName      string      `json:"method_name,omitempty"`
+	Receiver        string      `json:"receiver,omitempty"`
+	TypeName        string      `json:"type_name,omitempty"`
+	SQL             string      `json:"sql,omitempty"`
+	ResultMapRefs   []string    `json:"result_map_refs,omitempty"`
+	IncludeRefs     []string    `json:"include_refs,omitempty"`
+	TargetNamespace string      `json:"target_namespace,omitempty"`
+	TargetName      string      `json:"target_name,omitempty"`
+	OwnerKind       string      `json:"owner_kind,omitempty"`
+	OwnerName       string      `json:"owner_name,omitempty"`
+	ReferenceKind   string      `json:"reference_kind,omitempty"`
+	Dynamic         bool        `json:"dynamic,omitempty"`
+	Certainty       string      `json:"certainty,omitempty"`
+	Quality         string      `json:"quality"`
+	Range           SourceRange `json:"range"`
+	Text            string      `json:"text,omitempty"`
+}
+
+type ParsedSourceDiagnostic struct {
+	Code    string      `json:"code"`
+	Message string      `json:"message"`
+	Range   SourceRange `json:"range,omitempty"`
+}
+
 type ParsedSourceFile struct {
-	ParserVersion string              `json:"parser_version"`
-	SHA256        string              `json:"sha256"`
-	ByteLength    int                 `json:"byte_length"`
-	Encoding      string              `json:"encoding"`
-	Quality       string              `json:"quality"`
-	Symbols       []SourceSymbol      `json:"symbols"`
-	Chunks        []ParsedSourceChunk `json:"chunks"`
+	ParserVersion string                   `json:"parser_version"`
+	SHA256        string                   `json:"sha256"`
+	ByteLength    int                      `json:"byte_length"`
+	Encoding      string                   `json:"encoding"`
+	Quality       string                   `json:"quality"`
+	Symbols       []SourceSymbol           `json:"symbols"`
+	Chunks        []ParsedSourceChunk      `json:"chunks"`
+	Facts         []ParsedSourceFact       `json:"facts"`
+	Diagnostics   []ParsedSourceDiagnostic `json:"diagnostics"`
 }
 
 // SourceFile's ID is also its stable KnowledgeID. Repository text is versioned
@@ -64,6 +98,8 @@ type SourceFileVersion struct {
 	ParserVersion string    `json:"parser_version"`
 	Quality       string    `json:"quality"`
 	Symbols       JSON      `json:"symbols" gorm:"type:jsonb"`
+	Facts         JSON      `json:"facts" gorm:"type:jsonb"`
+	Diagnostics   JSON      `json:"diagnostics" gorm:"type:jsonb"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -104,6 +140,8 @@ type SourceSnapshot struct {
 	MemberCount               int        `json:"member_count"`
 	FileCount                 int        `json:"file_count"`
 	ChunkCount                int        `json:"chunk_count"`
+	RelationCount             int        `json:"relation_count"`
+	RelationsStaged           bool       `json:"relations_staged"`
 	Error                     string     `json:"error,omitempty"`
 	CreatedAt                 time.Time  `json:"created_at"`
 	PublishedAt               *time.Time `json:"published_at,omitempty"`
@@ -168,22 +206,28 @@ type SourceReadLease struct {
 
 // SourceFileView is a single published, fixed-commit read of the complete file.
 type SourceFileView struct {
-	FileSize      int64  `json:"file_size"`
-	DataSourceID  string `json:"data_source_id"`
-	KnowledgeID   string `json:"knowledge_id"`
-	SnapshotID    string `json:"snapshot_id"`
-	FileVersionID string `json:"file_version_id"`
-	ProjectID     string `json:"project_id"`
-	CommitSHA     string `json:"commit_sha"`
-	RepositoryURL string `json:"repository_url"`
-	Path          string `json:"path"`
-	SHA256        string `json:"sha256"`
-	Encoding      string `json:"encoding"`
-	Quality       string `json:"quality"`
-	ParserVersion string `json:"parser_version"`
-	Content       string `json:"content" gorm:"-"`
-	RawContent    []byte `json:"-"`
-	Symbols       JSON   `json:"symbols"`
+	FileSize            int64                `json:"file_size"`
+	DataSourceID        string               `json:"data_source_id"`
+	KnowledgeBaseID     string               `json:"-"`
+	KnowledgeID         string               `json:"knowledge_id"`
+	SnapshotID          string               `json:"snapshot_id"`
+	FileVersionID       string               `json:"file_version_id"`
+	ProjectID           string               `json:"project_id"`
+	CommitSHA           string               `json:"commit_sha"`
+	RepositoryURL       string               `json:"repository_url"`
+	Path                string               `json:"path"`
+	SHA256              string               `json:"sha256"`
+	Encoding            string               `json:"encoding"`
+	Quality             string               `json:"quality"`
+	ParserVersion       string               `json:"parser_version"`
+	Content             string               `json:"content" gorm:"-"`
+	RawContent          []byte               `json:"-"`
+	Symbols             JSON                 `json:"symbols"`
+	Facts               JSON                 `json:"facts"`
+	Diagnostics         JSON                 `json:"diagnostics"`
+	Relations           []SourceCodeRelation `json:"relations,omitempty" gorm:"-"`
+	RelationsTruncated  bool                 `json:"relations_truncated" gorm:"-"`
+	RelationsNextCursor string               `json:"relations_next_cursor,omitempty" gorm:"-"`
 }
 
 type SourceParsedArtifact struct {

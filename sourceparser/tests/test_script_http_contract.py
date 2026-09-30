@@ -177,9 +177,9 @@ class ScriptHTTPContract(unittest.TestCase):
         status, health = self.request('/health')
         self.assertEqual(status, 200, health)
         lock = json.loads((Path(os.environ['SOURCE_PARSER_CACHE']) / 'grammar.lock.json').read_text(encoding='utf-8'))
-        expected = sorted(lock.get('grammars', {'java': lock}))
+        expected = sorted(set(lock.get('grammars', {'java': lock})) | ({'mybatis-xml'} if 'java' in lock.get('grammars', {'java': lock}) else set()))
         self.assertEqual(health['languages'], expected)
-        expected_rules = 'rules-4' if 'python' in expected else 'rules-3'
+        expected_rules = 'rules-10' if 'java' in expected else ('rules-4' if 'python' in expected else 'rules-3')
         self.assertIn(expected_rules, health['parser_version'])
 
     def test_legacy_java_cache_stays_ready_but_changed_script_grammar_cannot_advertise_readiness(self):
@@ -217,8 +217,8 @@ class ScriptHTTPContract(unittest.TestCase):
             (four_language / 'grammar.lock.json').write_text(json.dumps(four_language_lock), encoding='utf-8')
             status, health = health_for(four_language)
             self.assertEqual(status, 200, health)
-            self.assertEqual(health['languages'], ['java', 'javascript', 'tsx', 'typescript'])
-            self.assertIn('rules-3', health['parser_version'])
+            self.assertEqual(health['languages'], ['java', 'javascript', 'mybatis-xml', 'tsx', 'typescript'])
+            self.assertIn('rules-10', health['parser_version'])
             legacy = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             legacy.update(lock['grammars']['java'])
             grammar = destination / legacy['grammar']
@@ -227,7 +227,7 @@ class ScriptHTTPContract(unittest.TestCase):
             (destination / 'grammar.lock.json').write_text(json.dumps(legacy), encoding='utf-8')
             status, health = health_for(destination)
             self.assertEqual(status, 200, health)
-            self.assertEqual(health['languages'], ['java'])
+            self.assertEqual(health['languages'], ['java', 'mybatis-xml'])
             changed = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             changed['grammars'] = {'javascript': dict(lock['grammars']['javascript'])}
             grammar = destination / changed['grammars']['javascript']['grammar']

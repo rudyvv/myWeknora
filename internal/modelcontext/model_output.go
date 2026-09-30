@@ -263,7 +263,7 @@ func (r *sourceRegistry) modelKnowledgeChunksOutput(data map[string]interface{},
 	}
 	output := r.modelKnowledgeOutput("deep_read", rows, fallback)
 	if len(rows) == 0 {
-		return output
+		return appendModelSourceAnalysis(output, data["source_analysis"])
 	}
 	remaining := intValue(data, "total_chunks") - intValue(data, "fetched_chunks")
 	if remaining > 0 {
@@ -271,7 +271,7 @@ func (r *sourceRegistry) modelKnowledgeChunksOutput(data map[string]interface{},
 		output += fmt.Sprintf("  <pagination remaining=\"%d\" page=\"%d\" page_size=\"%d\" />\n</retrieval>",
 			remaining, intValue(data, "page"), intValue(data, "page_size"))
 	}
-	return output
+	return appendModelSourceAnalysis(output, data["source_analysis"])
 }
 
 func renderKnowledgeChunks(mode string, chunks []modelChunk) string {

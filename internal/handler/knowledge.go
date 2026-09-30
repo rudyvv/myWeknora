@@ -17,6 +17,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/filetransport"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/middleware"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -44,6 +45,7 @@ func (h *KnowledgeHandler) GetSourceFile(c *gin.Context) {
 		c.Error(err)
 		return
 	}
+	ctx = source.WithRelationCursor(ctx, c.Query("relation_cursor"))
 	file, err := h.kgService.GetSourceFile(ctx, id, c.Query("version_id"))
 	if err != nil {
 		c.Error(err)
