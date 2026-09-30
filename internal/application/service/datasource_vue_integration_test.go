@@ -34,8 +34,10 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 		"<i18n lang=\"json\">\r\n{\"title\":\"🧭\"}\r\n</i18n>\r\n")
 	externalVue := []byte("<template><div>external entry</div></template>\r\n" +
 		"<script src=\"./api.js\"></script>\r\n")
+	selfClosingExternalVue := []byte("<script src=\"./api.js\"/>")
+	crossDirectoryExternalVue := []byte("<script src=\"../shared/api.js\"></script>\r\n")
 	whitespaceExternalVue := []byte("<script src=\"./api.js\"> \r\n\t </script>\r\n")
-	rejectedVue := []byte("<script src=\"../private.js\"></script>\r\n")
+	rejectedVue := []byte("<script src=\"../../../private.js\"></script>\r\n")
 	missingVue := []byte("<script src=\"./missing.js\"></script>\r\n")
 	unknownVue := []byte("<template lang=\"pug\">\r\nsection unknown\r\n</template>\r\n")
 	dialectVue := []byte("<template lang=\"ts\">templateDialectMarker</template>\r\n" +
@@ -48,6 +50,8 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	files := map[string][]byte{
 		"src/components/BookingPanel.vue":       component,
 		"src/components/ExternalPanel.vue":      externalVue,
+		"src/components/SelfClosingPanel.vue":   selfClosingExternalVue,
+		"src/pages/Panel.vue":                   crossDirectoryExternalVue,
 		"src/components/RejectedPanel.vue":      rejectedVue,
 		"src/components/MissingPanel.vue":       missingVue,
 		"src/components/UnknownPanel.vue":       unknownVue,
@@ -55,6 +59,7 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 		"src/components/DiagnosticPanel.vue":    diagnosticVue,
 		"src/components/EOFDiagnosticPanel.vue": eofDiagnosticVue,
 		"src/components/api.js":                 api,
+		"src/shared/api.js":                     api,
 	}
 	f := newJavaSourceFixture(t, files)
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
@@ -290,6 +295,22 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 		require.True(t, foundClosing, "the original closing script tag must carry region evidence")
 	}
 	assertExternalEvidence(externalVue, externalParsed, "unchecked", "src/components/ExternalPanel.vue")
+	selfClosingParsed, err := source.ParseFile(f.ctx, parserURL,
+		"src/components/SelfClosingPanel.vue", selfClosingExternalVue)
+	require.NoError(t, err)
+	var selfClosingRegion *types.SourceRegion
+	for _, symbol := range selfClosingParsed.Symbols {
+		if symbol.Kind == "sfc_region" && symbol.Region != nil && symbol.Region.Kind == "script" {
+			selfClosingRegion = symbol.Region
+		}
+	}
+	require.NotNil(t, selfClosingRegion)
+	require.Equal(t, "./api.js", selfClosingRegion.ExternalSource)
+	require.Equal(t, "unchecked", selfClosingRegion.ExternalStatus)
+	require.Len(t, selfClosingParsed.Chunks, 1)
+	require.Equal(t, string(selfClosingExternalVue), selfClosingParsed.Chunks[0].Content,
+		"a self-closing external script keeps its positive-width original wrapper as source evidence")
+	require.Equal(t, "script", selfClosingParsed.Chunks[0].Region.Kind)
 	whitespaceParsed, err := source.ParseFile(f.ctx, parserURL,
 		"src/components/WhitespaceExternalPanel.vue", whitespaceExternalVue)
 	require.NoError(t, err)
@@ -297,9 +318,13 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	rejectedParsed, err := source.ParseFile(f.ctx, parserURL,
 		"src/components/RejectedPanel.vue", rejectedVue)
 	require.NoError(t, err)
-	assertExternalEvidence(rejectedVue, rejectedParsed, "rejected", "src/components/RejectedPanel.vue")
+	assertExternalEvidence(rejectedVue, rejectedParsed, "unchecked", "src/components/RejectedPanel.vue")
 	var externalID string
 	require.NoError(t, f.db.Raw("SELECT id FROM source_files WHERE path=?", "src/components/ExternalPanel.vue").Scan(&externalID).Error)
+	var selfClosingExternalID string
+	require.NoError(t, f.db.Raw("SELECT id FROM source_files WHERE path=?", "src/components/SelfClosingPanel.vue").Scan(&selfClosingExternalID).Error)
+	var crossDirectoryExternalID string
+	require.NoError(t, f.db.Raw("SELECT id FROM source_files WHERE path=?", "src/pages/Panel.vue").Scan(&crossDirectoryExternalID).Error)
 	var rejectedID string
 	require.NoError(t, f.db.Raw("SELECT id FROM source_files WHERE path=?", "src/components/RejectedPanel.vue").Scan(&rejectedID).Error)
 	var missingID string
@@ -326,6 +351,19 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	require.Equal(t, "unchecked", narrowRegion.ExternalStatus,
 		"a one-file read must not reveal whether an out-of-scope target exists")
 	require.Empty(t, narrowRegion.ResolvedPath)
+	selfClosingNarrowView, err := f.knowledge.GetSourceFile(f.ctx, selfClosingExternalID)
+	require.NoError(t, err)
+	selfClosingNarrowRegion := findScriptRegion(selfClosingNarrowView)
+	require.NotNil(t, selfClosingNarrowRegion)
+	require.Equal(t, "unchecked", selfClosingNarrowRegion.ExternalStatus)
+	require.Empty(t, selfClosingNarrowRegion.ResolvedPath)
+	crossDirectoryNarrowView, err := f.knowledge.GetSourceFile(f.ctx, crossDirectoryExternalID)
+	require.NoError(t, err)
+	crossDirectoryNarrowRegion := findScriptRegion(crossDirectoryNarrowView)
+	require.NotNil(t, crossDirectoryNarrowRegion)
+	require.Equal(t, "unchecked", crossDirectoryNarrowRegion.ExternalStatus,
+		"path normalization does not bypass the caller's source-file scope")
+	require.Empty(t, crossDirectoryNarrowRegion.ResolvedPath)
 
 	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase,
 		KnowledgeBaseID: f.kb.ID, TenantID: 1, SourceIDs: []string{f.ds.ID}}}
@@ -338,6 +376,20 @@ func TestSourceVueSFCRegionsPublishAndScopeExternalScriptResolution(t *testing.T
 	require.NotNil(t, broadRegion)
 	require.Equal(t, "resolved", broadRegion.ExternalStatus)
 	require.Equal(t, "src/components/api.js", broadRegion.ResolvedPath)
+	selfClosingBroadView, err := f.knowledge.GetSourceFile(pinned, selfClosingExternalID)
+	require.NoError(t, err)
+	selfClosingBroadRegion := findScriptRegion(selfClosingBroadView)
+	require.NotNil(t, selfClosingBroadRegion)
+	require.Equal(t, "resolved", selfClosingBroadRegion.ExternalStatus)
+	require.Equal(t, "src/components/api.js", selfClosingBroadRegion.ResolvedPath)
+	crossDirectoryView, err := f.knowledge.GetSourceFile(pinned, crossDirectoryExternalID)
+	require.NoError(t, err)
+	crossDirectoryRegion := findScriptRegion(crossDirectoryView)
+	require.NotNil(t, crossDirectoryRegion)
+	require.Equal(t, "../shared/api.js", crossDirectoryRegion.ExternalSource)
+	require.Equal(t, "resolved", crossDirectoryRegion.ExternalStatus)
+	require.Equal(t, "src/shared/api.js", crossDirectoryRegion.ResolvedPath,
+		"normalized sibling references resolve only to members of the same authorized snapshot")
 
 	rejectedView, err := f.knowledge.GetSourceFile(pinned, rejectedID)
 	require.NoError(t, err)

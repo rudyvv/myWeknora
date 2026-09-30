@@ -73,11 +73,6 @@ func sourceReferencePath(componentPath, reference string) (string, bool) {
 	if reference == "" || strings.HasPrefix(reference, "/") || strings.ContainsAny(reference, "\\:?#[\x00]") {
 		return "", false
 	}
-	for _, segment := range strings.Split(reference, "/") {
-		if segment == ".." {
-			return "", false
-		}
-	}
 	target := path.Clean(path.Join(path.Dir(componentPath), reference))
 	if target == "." || target == ".." || strings.HasPrefix(target, "../") || len(target) > 4096 {
 		return "", false

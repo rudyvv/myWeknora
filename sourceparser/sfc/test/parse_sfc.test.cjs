@@ -44,6 +44,26 @@ test('an external script is returned as a literal reference and never loaded', (
   assert.equal(parsed.blocks[0].start_utf16, parsed.blocks[0].end_utf16)
 })
 
+test('self-closing top-level blocks retain their zero-width bodies and wrappers', () => {
+  for (const [source, type, externalSource] of [
+    ['<template/>', 'template', ''],
+    ['<template />', 'template', ''],
+    ['<script src="./api.js"/>', 'script', './api.js'],
+    ['<script src="./api.js" />', 'script', './api.js'],
+  ]) {
+    const parsed = parseSFC(request(source))
+    assert.equal(parsed.blocks.length, 1)
+    const block = parsed.blocks[0]
+    assert.equal(block.type, type)
+    assert.equal(block.start_utf16, block.end_utf16)
+    assert.equal(block.src || '', externalSource)
+    const topLevel = parsed.top_level_blocks[0]
+    assert.equal(topLevel.type, type)
+    assert.equal(topLevel.start_utf16, topLevel.end_utf16)
+    assert.equal(source.slice(topLevel.tag_start_utf16, topLevel.tag_end_utf16), source)
+  }
+})
+
 test('block language and external source limits reject without losing authored values', () => {
   const maxLanguage = 'x'.repeat(64)
   assert.equal(parseSFC(request(`<script lang="${maxLanguage}"></script>`)).blocks[0].lang, maxLanguage)
@@ -94,6 +114,16 @@ test('top-level inventory retains exact duplicate block bodies omitted by the de
     assert.match(block.content_sha256, /^[0-9a-f]{64}$/)
   }
   assert.ok(parsed.diagnostics.some(diagnostic => diagnostic.code === 'vue_sfc_duplicate_block'))
+})
+
+test('top-level inventory retains bounded language attributes for recovered blocks', () => {
+  const source = '<template><div>first</div></template>\n' +
+    '<template lang="pug">section second</template>\n'
+  const parsed = parseSFC(request(source))
+
+  assert.equal(parsed.top_level_blocks.length, 2)
+  assert.equal(parsed.top_level_blocks[0].lang, '')
+  assert.equal(parsed.top_level_blocks[1].lang, 'pug')
 })
 
 test('a literal closing script tag is bounded exactly as Vue defines the SFC block', () => {

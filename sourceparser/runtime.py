@@ -32,7 +32,7 @@ def load_sfc_runtime():
         lock = json.loads((root / 'runtime.lock.json').read_text(encoding='utf-8'))
         package_lock = json.loads((root / 'package-lock.json').read_text(encoding='utf-8'))
         compiler_lock = package_lock['packages']['node_modules/@vue/compiler-sfc']
-        if (lock.get('rules_version') != 3 or compiler_lock.get('version') != lock.get('compiler_version') or
+        if (lock.get('rules_version') != 4 or compiler_lock.get('version') != lock.get('compiler_version') or
                 compiler_lock.get('integrity') != lock.get('compiler_integrity')):
             return None
         node = os.environ.get('SOURCE_PARSER_NODE') or shutil.which('node')
@@ -41,6 +41,7 @@ def load_sfc_runtime():
         environment = dict(os.environ)
         environment.pop('NODE_OPTIONS', None)
         environment.pop('NODE_PATH', None)
+        environment['NODE_ENV'] = 'development'
         result = subprocess.run(
             [node, str(root / 'parse_sfc.cjs'), '--health'], cwd=root,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -244,6 +245,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     environment = dict(os.environ)
     environment.pop('NODE_OPTIONS', None)
     environment.pop('NODE_PATH', None)
+    environment['NODE_ENV'] = 'development'
     try:
         result = subprocess.run(
             [node_runtime['node'], str(Path(node_runtime['root']) / 'parse_sfc.cjs')],
@@ -265,15 +267,31 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     if not isinstance(top_level_blocks, list) or len(top_level_blocks) > 512:
         raise RuntimeError('SFC parser returned invalid top-level blocks')
     mapped_top_level_blocks = _offset_vue_blocks(text, raw, top_level_blocks, utf16_offsets)
-    descriptor_keys = {(block['type'].lower(), block['start_utf16']) for block in descriptor_blocks}
-    recovered_blocks = []
+    descriptor_by_key = {(block['type'].lower(), block['start_utf16']): block
+                         for block in descriptor_blocks}
+    blocks = []
+    matched_descriptor_keys = set()
     for block in mapped_top_level_blocks:
-        if (block['type'].lower(), block['start_utf16']) in descriptor_keys:
+        key = (block['type'].lower(), block['start_utf16'])
+        descriptor = descriptor_by_key.get(key)
+        if (descriptor is not None and descriptor['end_utf16'] == block['end_utf16'] and
+                descriptor['content_sha256'] == block['content_sha256']):
+            blocks.append(descriptor)
+            matched_descriptor_keys.add(key)
             continue
-        block.update(lang='', src='', setup=False, recovered=True)
-        recovered_blocks.append(block)
-    blocks = sorted(descriptor_blocks + recovered_blocks,
-                    key=lambda item: (item['start_byte'], item['end_byte']))
+        if descriptor is not None:
+            block.update(lang=descriptor.get('lang', ''), src=descriptor.get('src', ''),
+                         setup=descriptor.get('setup', False))
+            matched_descriptor_keys.add(key)
+        language = block.get('lang', '')
+        if not isinstance(language, str) or len(language) > 64:
+            raise RuntimeError('SFC parser returned an invalid recovered block language')
+        block.update(lang=language, src=block.get('src', ''),
+                     setup=block.get('setup', False), recovered=True)
+        blocks.append(block)
+    blocks.extend(descriptor for key, descriptor in descriptor_by_key.items()
+                  if key not in matched_descriptor_keys)
+    blocks.sort(key=lambda item: (item['start_byte'], item['end_byte']))
     verified_block_end = 0
     for block in blocks:
         if block['start_byte'] < verified_block_end:
@@ -294,8 +312,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         status = ''
         if external:
             status = 'rejected' if (external.startswith(('/', '\\')) or '\\' in external or
-                                    ':' in external or any(mark in external for mark in ('\x00', '?', '#')) or
-                                    any(part == '..' for part in external.replace('\\', '/').split('/'))) else 'unchecked'
+                                    ':' in external or any(mark in external for mark in ('\x00', '?', '#'))) else 'unchecked'
         return {'kind': kind, 'language': language, 'quality': quality,
                 'external_source': external, 'external_status': status}
 
@@ -313,14 +330,15 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
                            'ts': 'typescript', 'typescript': 'typescript', 'tsx': 'tsx'}.get(language)
         body = raw[start:end]
         recovered = bool(block.get('recovered'))
-        block_quality = 'degraded' if recovered else 'structural'
         block_symbols = []
         body_chunks = []
         external_script = kind == 'script' and bool(block.get('src'))
         unsupported_script = kind == 'script' and not external_script and script_language not in script_languages
         unsupported_preprocess = unsupported_script or language not in known_raw_languages[kind]
-        wrapper_quality = ('degraded' if recovered or kind == 'script' and block.get('src') else
-                           'unknown_preprocess' if unsupported_preprocess else '')
+        block_quality = ('unknown_preprocess' if recovered and unsupported_preprocess else
+                         'degraded' if recovered else 'structural')
+        wrapper_quality = ('unknown_preprocess' if unsupported_preprocess else
+                           'degraded' if recovered or external_script else '')
         wrapper_region = region_for(block, wrapper_quality) if wrapper_quality else None
         if recovered:
             degraded = True

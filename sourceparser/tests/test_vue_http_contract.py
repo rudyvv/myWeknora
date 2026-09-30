@@ -121,11 +121,12 @@ class VueHTTPContract(unittest.TestCase):
         status, health = self.request('/health')
         self.assertEqual(status, 200, health)
         self.assertIn('vue', health['languages'])
-        self.assertIn('rules-4-', health['parser_version'])
-        self.assertEqual(self.sfc_runtime, 'vue-sfc-node-24.19.0-compiler-2.7.16-rules-3')
+        expected_rules = 'rules-4' if 'python' in health['languages'] else 'rules-3'
+        self.assertIn(expected_rules, health['parser_version'])
+        self.assertEqual(self.sfc_runtime, 'vue-sfc-node-24.19.0-compiler-2.7.16-rules-4')
         self.assertEqual(health['parser_version'], runtime_version(self.versions))
         previous_rules = dict(self.versions)
-        previous_rules['vue'] = self.sfc_runtime.removesuffix('-rules-3') + '-rules-2'
+        previous_rules['vue'] = self.sfc_runtime.removesuffix('-rules-4') + '-rules-3'
         self.assertNotEqual(health['parser_version'], runtime_version(previous_rules),
                             'the SFC rules fingerprint must affect the complete parser fingerprint')
         status, parsed = self.parse(b'<template><div>ok</div></template>\r\n')
@@ -251,6 +252,77 @@ class VueHTTPContract(unittest.TestCase):
                                  'the discarded block remains raw; no declaration is invented')
                 self.assertTrue(any(symbol.get('kind') == 'sfc_diagnostic' and
                                     symbol['region']['kind'] == kind for symbol in parsed['symbols']))
+
+    def test_recovered_unknown_template_language_keeps_unknown_preprocess_quality(self):
+        raw = ('<template><div>firstTemplateMarker</div></template>\n'
+               '<template lang="pug">secondTemplateMarker</template>\n').encode()
+        status, parsed = self.parse(raw)
+        self.assertEqual(status, 200, parsed)
+        recovered_chunks = [chunk for chunk in parsed['chunks'] if 'secondTemplateMarker' in chunk['content']]
+        self.assertEqual(len(recovered_chunks), 1)
+        recovered = recovered_chunks[0]
+        self.assertEqual(recovered['quality'], 'unknown_preprocess')
+        self.assertEqual(recovered['region']['kind'], 'template')
+        self.assertEqual(recovered['region']['language'], 'pug')
+        self.assertEqual(recovered['region']['quality'], 'unknown_preprocess')
+
+    def test_locked_parser_diagnostics_do_not_depend_on_parent_node_env(self):
+        raw = b'<template><div>first</template>\n'
+        results = []
+        request_body = {
+            'path': 'src/BookingPanel.vue', 'language': 'vue',
+            'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': 128,
+        }
+        for value in ('production', 'development'):
+            environment = dict(os.environ)
+            environment['NODE_ENV'] = value
+            process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).parents[1] / 'server.py'),
+                 '--host', '127.0.0.1', '--port', '0'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', env=environment)
+            try:
+                startup = process.stdout.readline()
+                if not startup:
+                    self.fail('isolated parser worker failed to start: ' + process.stderr.read())
+                url = 'http://127.0.0.1:' + str(json.loads(startup)['port']) + '/v1/parse'
+                request = urllib.request.Request(url, data=json.dumps(request_body).encode(),
+                                                 headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    parsed = json.load(response)
+                results.append((parsed['quality'], [symbol['range'] for symbol in parsed['symbols']
+                                                     if symbol['kind'] == 'sfc_diagnostic']))
+            finally:
+                process.terminate()
+                process.wait(timeout=10)
+                process.stdout.close()
+                process.stderr.close()
+        self.assertEqual(results[0], results[1])
+        self.assertTrue(results[0][1], 'the pinned compiler mode must retain the malformed-descriptor warning')
+
+    def test_self_closing_template_and_external_script_keep_wrapper_evidence(self):
+        cases = (
+            (b'<template/>', 'template', ''),
+            (b'<script src="./api.js"/>', 'script', './api.js'),
+        )
+        for raw, kind, external_source in cases:
+            with self.subTest(kind=kind):
+                status, parsed = self.parse(raw)
+                self.assertEqual(status, 200, parsed)
+                self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
+                wrapper_chunks = [chunk for chunk in parsed['chunks'] if chunk.get('region')]
+                self.assertEqual(len(wrapper_chunks), 1)
+                wrapper = wrapper_chunks[0]
+                area = wrapper['range']
+                self.assertGreater(area['end_byte'], area['start_byte'])
+                self.assertEqual(raw[area['start_byte']:area['end_byte']].decode(), wrapper['content'])
+                self.assertEqual(wrapper['content'], raw.decode())
+                self.assertEqual(wrapper['region']['kind'], kind)
+                if external_source:
+                    region = next(symbol['region'] for symbol in parsed['symbols']
+                                  if symbol['kind'] == 'sfc_region' and symbol['region']['kind'] == 'script')
+                    self.assertEqual(region['external_source'], external_source)
+                    self.assertEqual(region['external_status'], 'unchecked')
 
     def test_empty_template_warning_keeps_template_region_on_its_wrapper_chunk(self):
         raw = b'<template>'
@@ -438,7 +510,9 @@ class VueHTTPContract(unittest.TestCase):
     def test_external_script_references_are_literal_and_never_loaded(self):
         for source, body, status_value in (('./api.js', '', 'unchecked'),
                                            ('./api.js', ' \r\n\t ', 'unchecked'),
-                                           ('../private.js', '', 'rejected'),
+                                           ('../shared/api.js', '', 'unchecked'),
+                                           ('../private.js', '', 'unchecked'),
+                                           ('../../../private.js', '', 'unchecked'),
                                            ('/absolute.js', '', 'rejected')):
             raw = ('<script src="' + source + '">' + body + '</script>\r\n').encode()
             with self.subTest(source=source, body=body):

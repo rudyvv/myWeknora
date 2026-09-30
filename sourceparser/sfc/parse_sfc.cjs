@@ -24,7 +24,9 @@ function collectBlocks(descriptor, source) {
 
   return candidates.map(block => {
     const start = block.start
-    const end = block.end
+    let end = block.end
+    const emptySelfClosingRange = block.content === '' && end === 0 && start > 0
+    if (emptySelfClosingRange) end = start
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > source.length) {
       throw new Error('invalid compiler range')
     }
@@ -46,8 +48,48 @@ function collectBlocks(descriptor, source) {
     const src = type === 'script' && typeof block.src === 'string' ? block.src : ''
     const contentHash = createHash('sha256').update(block.content, 'utf8').digest('hex')
     return { type, lang, src, setup: Boolean(block.setup), content_sha256: contentHash,
+      compiler_self_closing_range: emptySelfClosingRange,
       start_utf16: start, end_utf16: end }
   }).sort((left, right) => left.start_utf16 - right.start_utf16 || left.end_utf16 - right.end_utf16)
+}
+
+function readBlockLanguage(source, start, end) {
+  let index = start
+  let language = ''
+  while (index < end) {
+    while (index < end && /\s/.test(source[index])) index++
+    if (source[index] === '/') break
+    const nameStart = index
+    while (index < end && !/[\s=/>]/.test(source[index])) index++
+    if (index === nameStart) {
+      index++
+      continue
+    }
+    const name = source.slice(nameStart, index).toLowerCase()
+    const isLanguage = name === 'lang'
+    while (index < end && /\s/.test(source[index])) index++
+    let value = ''
+    if (source[index] === '=') {
+      index++
+      while (index < end && /\s/.test(source[index])) index++
+      const quote = source[index] === '"' || source[index] === "'" ? source[index++] : ''
+      const attributeValueStart = index
+      if (quote) {
+        while (index < end && source[index] !== quote) index++
+      } else {
+        while (index < end && !/[\s/>]/.test(source[index])) index++
+      }
+      if (isLanguage && index - attributeValueStart > 64) {
+        const error = new Error('SFC attribute limit')
+        error.code = 'sfc_attribute_limit'
+        throw error
+      }
+      if (isLanguage) value = source.slice(attributeValueStart, index)
+      if (quote && index < end) index++
+    }
+    if (isLanguage) language = value
+  }
+  return language
 }
 
 function openingBlockTags(source, blocks) {
@@ -102,7 +144,8 @@ function openingBlockTags(source, blocks) {
           if (stack.length === 0 && (['template', 'script', 'style'].includes(tag) || blockTypes.has(tag))) {
             block = { type: tag, start: index, open_end: Math.min(cursor + 1, source.length),
               close_start: null, close_end: null,
-              self_closing: /\/\s*>$/.test(source.slice(index, cursor + 1)) }
+              self_closing: /\/\s*>$/.test(source.slice(index, cursor + 1)),
+              lang: readBlockLanguage(source, index + match[0].length, cursor) }
             openings.push(block)
             if (openings.length > MAX_BLOCKS) throw new Error('block limit')
           }
@@ -121,9 +164,14 @@ function openingBlockTags(source, blocks) {
 function attachBlockTagRanges(source, blocks, tags) {
   const used = new Set()
   for (const block of blocks) {
+    const compilerSelfClosingRange = block.compiler_self_closing_range
+    delete block.compiler_self_closing_range
     const match = tags.find((tag, index) => !used.has(index) && tag.type === block.type.toLowerCase() &&
       tag.open_end === block.start_utf16)
-    if (!match) continue
+    if (!match || (compilerSelfClosingRange && !match.self_closing)) {
+      if (compilerSelfClosingRange) throw new Error('invalid compiler range')
+      continue
+    }
     const index = tags.indexOf(match)
     used.add(index)
     block.tag_start_utf16 = match.start
@@ -141,7 +189,7 @@ function collectTopLevelBlocks(source, tags) {
     const end = Number.isSafeInteger(tag.close_start) ? tag.close_start :
       tag.self_closing ? tag.open_end : source.length
     const content = source.slice(start, end)
-    const block = { type: tag.type, start_utf16: start, end_utf16: end,
+    const block = { type: tag.type, lang: tag.lang, start_utf16: start, end_utf16: end,
       tag_start_utf16: tag.start, tag_end_utf16: tag.open_end,
       content_sha256: createHash('sha256').update(content, 'utf8').digest('hex') }
     if (Number.isSafeInteger(tag.close_start) && Number.isSafeInteger(tag.close_end)) {
@@ -206,7 +254,7 @@ function parseSFC(request) {
 
 function main() {
   if (process.argv.length === 3 && process.argv[2] === '--health') {
-    process.stdout.write(JSON.stringify({ node_version: process.version, compiler_version: COMPILER_VERSION, rules_version: 3 }))
+    process.stdout.write(JSON.stringify({ node_version: process.version, compiler_version: COMPILER_VERSION, rules_version: 4 }))
     return
   }
   let body

@@ -10,8 +10,10 @@ func TestSourceReferencePathAcceptsOnlyRepositoryRelativeLiteralPaths(t *testing
 		ok        bool
 	}{
 		{"src/pages/Panel.vue", "./api.js", "src/pages/api.js", true},
+		{"src/pages/Panel.vue", "../shared/api.js", "src/shared/api.js", true},
 		{"src/Panel.vue", "api.ts", "src/api.ts", true},
-		{"src/Panel.vue", "../api.js", "", false},
+		{"src/Panel.vue", "../../api.js", "", false},
+		{"src/pages/Panel.vue", "../../../shared/api.js", "", false},
 		{"src/Panel.vue", "/api.js", "", false},
 		{"src/Panel.vue", "C:/api.js", "", false},
 		{"src/Panel.vue", "https://host/api.js", "", false},
