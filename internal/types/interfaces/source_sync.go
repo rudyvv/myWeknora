@@ -12,6 +12,7 @@ import (
 // document sync contracts.
 type SourceSyncControlRepository interface {
 	RegisterSourceTrigger(context.Context, *types.DataSource, *types.SyncLog, string) (bool, int64, error)
+	IsCurrentSourceDelivery(context.Context, *types.DataSource, string, int64) (bool, error)
 	ClaimSourceRun(context.Context, *types.DataSource, string, int64, string, time.Duration) (types.SourceSyncLease, bool, error)
 	RenewSourceRun(context.Context, types.SourceSyncLease, time.Duration) (types.SourceSyncLease, error)
 	ReleaseSourceRun(context.Context, types.SourceSyncLease, bool) (*types.SourceSyncDispatch, error)

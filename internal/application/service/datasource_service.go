@@ -879,18 +879,37 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		_ = s.dsRepo.Update(ctx, ds)
 		return err
 	}
+	mode, modeErr := datasource.ContentMode(config)
+	if modeErr != nil {
+		s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
+			types.SyncLogStatusFailed, modeErr.Error(), wasPaused)
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, modeErr)
+	}
+	if payload.DeliveryGeneration > 0 {
+		control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository)
+		if !ok {
+			return fmt.Errorf("%w: source trigger coordination is unavailable", asynq.SkipRetry)
+		}
+		currentDelivery, err := control.IsCurrentSourceDelivery(ctx, ds, syncLog.ID, payload.DeliveryGeneration)
+		if err != nil {
+			return err
+		}
+		if !currentDelivery {
+			return nil
+		}
+	}
+	if mode != datasource.ContentModeSource && syncLog.Status == types.SyncLogStatusCanceled {
+		// Legacy source deliveries have no generation in their queue payload.
+		// A source→document transition fences their durable log before changing
+		// mode; don't let a delayed wake-up reinterpret that canceled log.
+		return nil
+	}
 	if validator, ok := connector.(datasource.DataSourceBindingValidator); ok {
 		if err := validator.ValidateDataSourceBinding(ctx, config, ds); err != nil {
 			s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
 				types.SyncLogStatusFailed, "Data source binding is invalid", wasPaused)
 			return err
 		}
-	}
-	mode, modeErr := datasource.ContentMode(config)
-	if modeErr != nil {
-		s.updateSyncRunResult(ctx, ds, syncLog, &types.SyncResult{}, nil,
-			types.SyncLogStatusFailed, modeErr.Error(), wasPaused)
-		return fmt.Errorf("%w: %v", asynq.SkipRetry, modeErr)
 	}
 	if mode == datasource.ContentModeSource {
 		if payload.TenantID != ds.TenantID || syncLog.TenantID != ds.TenantID || syncLog.DataSourceID != ds.ID {

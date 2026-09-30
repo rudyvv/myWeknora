@@ -351,6 +351,12 @@ func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.C
 			}
 		}
 		if event.Status == "delivered" {
+			if event.ConfigGeneration == state.ConfigGeneration {
+				// The consumer may already have acknowledged and removed this
+				// generation's pending-op row. A same-generation no-op must not
+				// recreate consumed work; only a new generation is a new delivery.
+				return nil
+			}
 			// A claimed operation belongs to the consumer holding its row ID:
 			// never refresh or unclaim that row. A new generation gets a distinct
 			// deterministic delivery key and therefore a separate durable row.

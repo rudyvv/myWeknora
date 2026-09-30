@@ -127,6 +127,185 @@ func TestSourceSchedulerRecoversPendingManualTriggerAfterRestart(t *testing.T) {
 	}
 }
 
+func TestSourceSchedulerRecoversLegacyQueuedSourceRunWithoutCoordinatorState(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	legacyLog := &types.SyncLog{
+		DataSourceID: f.ds.ID,
+		TenantID:     f.ds.TenantID,
+		Status:       types.SyncLogStatusQueued,
+		StartedAt:    time.Now().UTC(),
+	}
+	require.NoError(t, f.db.Create(legacyLog).Error)
+	var stateCount int64
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).Count(&stateCount).Error)
+	require.Zero(t, stateCount, "this row represents pre-coordinator persisted work")
+
+	recoveredTasks := make(chan *asynq.Task, 1)
+	scheduler := datasource.NewScheduler(
+		repository.NewDataSourceRepository(f.db),
+		repository.NewSyncLogRepository(f.db),
+		sourceTestTaskEnqueuer{tasks: recoveredTasks},
+		f.service.sourceSnapshots,
+	)
+	require.NoError(t, scheduler.Start(f.ctx))
+	defer scheduler.Stop()
+
+	select {
+	case task := <-recoveredTasks:
+		var payload types.DataSourceSyncPayload
+		require.NoError(t, json.Unmarshal(task.Payload(), &payload))
+		require.Equal(t, legacyLog.ID, payload.SyncLogID,
+			"startup must discover a queued legacy source log even though no coordinator row exists")
+		require.Equal(t, f.ds.ID, payload.DataSourceID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup recovery skipped the legacy queued source log")
+	}
+	var runCount int64
+	require.NoError(t, f.db.Table("source_sync_runs").Where("sync_log_id=?", legacyLog.ID).Count(&runCount).Error)
+	require.EqualValues(t, 1, runCount, "recovery must adopt the legacy log into coordinator state")
+}
+
+func TestSourceSchedulerDoesNotAdoptLegacyQueuedDocumentRun(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(f.ds.Config, &config))
+	config["settings"].(map[string]any)["content_mode"] = "document"
+	f.ds.Config, _ = json.Marshal(config)
+	require.NoError(t, repository.NewDataSourceRepository(f.db).Update(f.ctx, f.ds))
+	legacyLog := &types.SyncLog{
+		DataSourceID: f.ds.ID,
+		TenantID:     f.ds.TenantID,
+		Status:       types.SyncLogStatusQueued,
+		StartedAt:    time.Now().UTC(),
+	}
+	require.NoError(t, f.db.Create(legacyLog).Error)
+
+	recoveredTasks := make(chan *asynq.Task, 2)
+	scheduler := datasource.NewScheduler(
+		repository.NewDataSourceRepository(f.db),
+		repository.NewSyncLogRepository(f.db),
+		sourceTestTaskEnqueuer{tasks: recoveredTasks},
+		f.service.sourceSnapshots,
+	)
+	require.NoError(t, scheduler.Start(f.ctx))
+	defer scheduler.Stop()
+	select {
+	case task := <-recoveredTasks:
+		t.Fatalf("document-mode queued work must not be adopted as a source trigger: %s", task.Type())
+	default:
+	}
+	var stateCount, runCount int64
+	require.NoError(t, f.db.Table("source_sync_states").Where("data_source_id=?", f.ds.ID).Count(&stateCount).Error)
+	require.NoError(t, f.db.Table("source_sync_runs").Where("sync_log_id=?", legacyLog.ID).Count(&runCount).Error)
+	require.Zero(t, stateCount)
+	require.Zero(t, runCount)
+}
+
+func TestSourceDeliveryCannotRunDocumentPipelineAfterModeSwitch(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	deliveries := make(chan *asynq.Task, 1)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: deliveries}
+	queuedLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	var staleDelivery *asynq.Task
+	select {
+	case staleDelivery = <-deliveries:
+	case <-time.After(time.Second):
+		t.Fatal("manual source trigger was not enqueued")
+	}
+
+	documentConfig := *f.ds
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(documentConfig.Config, &config))
+	config["settings"].(map[string]any)["content_mode"] = "document"
+	documentConfig.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	_, err = f.service.UpdateDataSource(f.ctx, &documentConfig)
+	require.NoError(t, err)
+	canceled, err := f.service.GetSyncLog(f.ctx, queuedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, canceled.Status,
+		"switching out of source mode fences the queued source run")
+
+	require.NoError(t, f.service.ProcessSync(f.ctx, staleDelivery),
+		"a stale source wake-up is already fenced and should be an idempotent no-op")
+	require.Zero(t, f.gitTransportRequests.Load(),
+		"the old source delivery must not enter GitLab's document-fetch pipeline")
+	after, err := f.service.GetSyncLog(f.ctx, queuedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, after.Status,
+		"processing an old source delivery must not overwrite its canceled source log")
+}
+
+func TestLegacySourceDeliveryCannotRunDocumentPipelineAfterModeSwitch(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	legacyLog := &types.SyncLog{
+		DataSourceID: f.ds.ID,
+		TenantID:     f.ds.TenantID,
+		Status:       types.SyncLogStatusQueued,
+		StartedAt:    time.Now().UTC(),
+	}
+	require.NoError(t, f.db.Create(legacyLog).Error)
+	legacyPayload, err := json.Marshal(types.DataSourceSyncPayload{
+		DataSourceID: f.ds.ID, TenantID: f.ds.TenantID, SyncLogID: legacyLog.ID, Trigger: "manual",
+	})
+	require.NoError(t, err)
+	legacyDelivery := asynq.NewTask(types.TypeDataSourceSync, legacyPayload)
+
+	documentConfig := *f.ds
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(documentConfig.Config, &config))
+	config["settings"].(map[string]any)["content_mode"] = "document"
+	documentConfig.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	_, err = f.service.UpdateDataSource(f.ctx, &documentConfig)
+	require.NoError(t, err)
+
+	require.NoError(t, f.service.ProcessSync(f.ctx, legacyDelivery),
+		"a pre-coordinator source delivery has no generation field and must be fenced during the mode transition")
+	require.Zero(t, f.gitTransportRequests.Load(),
+		"a legacy source task must not fall through into GitLab's document-fetch pipeline")
+	after, err := f.service.GetSyncLog(f.ctx, legacyLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, after.Status)
+}
+
+func TestSourceModeSwitchCancelsUntrackedLegacyDeliveryWithCoordinatorState(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
+	coordinatedLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, coordinatedLog.Status)
+	legacyLog := &types.SyncLog{
+		DataSourceID: f.ds.ID,
+		TenantID:     f.ds.TenantID,
+		Status:       types.SyncLogStatusQueued,
+		StartedAt:    time.Now().UTC(),
+	}
+	require.NoError(t, f.db.Create(legacyLog).Error)
+	legacyPayload, err := json.Marshal(types.DataSourceSyncPayload{
+		DataSourceID: f.ds.ID, TenantID: f.ds.TenantID, SyncLogID: legacyLog.ID, Trigger: "manual",
+	})
+	require.NoError(t, err)
+
+	documentConfig := *f.ds
+	var config map[string]any
+	require.NoError(t, json.Unmarshal(documentConfig.Config, &config))
+	config["settings"].(map[string]any)["content_mode"] = "document"
+	documentConfig.Config, err = json.Marshal(config)
+	require.NoError(t, err)
+	_, err = f.service.UpdateDataSource(f.ctx, &documentConfig)
+	require.NoError(t, err)
+
+	delayedLegacyDelivery := asynq.NewTask(types.TypeDataSourceSync, legacyPayload)
+	require.NoError(t, f.service.ProcessSync(f.ctx, delayedLegacyDelivery))
+	require.Zero(t, f.gitTransportRequests.Load())
+	after, err := f.service.GetSyncLog(f.ctx, legacyLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusCanceled, after.Status,
+		"disabling source mode must cancel untracked legacy queue rows even when coordinator state exists")
+}
+
 func TestSourceSchedulerRepairsConfigFenceAfterDatasourceWriteCrash(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
@@ -901,6 +1080,34 @@ func TestSourceWikiNotificationRefreshesDeliveredEventAfterCredentialRotation(t 
 		require.Zero(t, accepted, "relaying an already delivered event must be idempotent")
 		require.Len(t, peekOps(), 1, "duplicate relay must not duplicate the durable Wiki op")
 	}
+}
+
+func TestSourceWikiSameGenerationNoOpDoesNotRequeueAcknowledgedDelivery(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	firstLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, firstLog)))
+
+	accepted, err := f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, accepted)
+	pendingOps := repository.NewTaskPendingOpsRepository(f.db)
+	claimed, err := pendingOps.ClaimBatch(f.ctx, types.TypeSourceWikiUpdate,
+		types.TaskScopeKnowledgeBase, f.kb.ID, 10, time.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	require.Len(t, claimed, 1, "the downstream consumer should claim the delivered notification")
+	require.NotNil(t, claimed[0].ClaimedAt)
+	require.NoError(t, pendingOps.DeleteByIDs(f.ctx, []int64{claimed[0].ID}),
+		"the downstream consumer acknowledgement consumes this generation's queue row")
+
+	secondLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, sourceTestSyncTask(t, f, secondLog)))
+	remaining, err := pendingOps.PeekBatch(f.ctx, types.TypeSourceWikiUpdate,
+		types.TaskScopeKnowledgeBase, f.kb.ID, 10)
+	require.NoError(t, err)
+	require.Empty(t, remaining,
+		"a same-generation no-op must not recreate a delivery already consumed by its consumer")
 }
 
 func TestSourcePublicationOutboxAcceptsTypedPendingUpdateAtomically(t *testing.T) {
@@ -1685,6 +1892,7 @@ type javaSourceFixture struct {
 	gitlabBranchMissing     bool
 	gitlabTokenInvalid      bool
 	gitTransportUnavailable bool
+	gitTransportRequests    atomic.Int64
 	modelService            interfaces.ModelService
 	advanceJava             func(string) string
 	shares                  interfaces.KBShareService
@@ -1925,6 +2133,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 			}
 			fmt.Fprintf(w, `{"name":"main","commit":{"id":%q}}`, sha)
 		case "/repo.git/info/refs", "/repo.git/git-upload-pack":
+			f.gitTransportRequests.Add(1)
 			if f.gitTransportUnavailable {
 				http.Error(w, "repository unavailable", http.StatusBadGateway)
 				return

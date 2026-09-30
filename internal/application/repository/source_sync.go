@@ -120,6 +120,21 @@ func cancelSourceRunTx(tx *gorm.DB, id, reason string) error {
 		Updates(map[string]any{"status": types.SyncLogStatusCanceled, "finished_at": &now, "error_message": reason, "updated_at": now}).Error
 }
 
+func cancelUntrackedQueuedSourceRunsTx(tx *gorm.DB, dataSourceID string, tenantID uint64) error {
+	var logs []types.SyncLog
+	if err := tx.Model(&types.SyncLog{}).Where(`data_source_id=? AND tenant_id=? AND status=? AND NOT EXISTS (
+		SELECT 1 FROM source_sync_runs AS source_run WHERE source_run.sync_log_id=sync_logs.id
+	)`, dataSourceID, tenantID, types.SyncLogStatusQueued).Find(&logs).Error; err != nil {
+		return err
+	}
+	for i := range logs {
+		if err := cancelSourceRunTx(tx, logs[i].ID, "source mode was disabled; legacy source trigger was canceled"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *SyncLogRepository) invalidateSourceGeneration(tx *gorm.DB, state *sourceSyncStateRow, ds *types.DataSource) error {
 	if state.ConfigFingerprint == sourceConfigFingerprint(ds) {
 		return nil
@@ -238,6 +253,49 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 	return shouldDispatch, deliveryGeneration, err
 }
 
+// IsCurrentSourceDelivery validates a queued source wake-up without creating
+// coordinator state or claiming the run. ProcessSync uses it before dispatching
+// by the datasource's current content mode, so a stale source task cannot fall
+// through into the document pipeline after a source-mode transition.
+func (r *SyncLogRepository) IsCurrentSourceDelivery(ctx context.Context, ds *types.DataSource, logID string, deliveryGeneration int64) (bool, error) {
+	if ds == nil || ds.ID == "" || logID == "" || deliveryGeneration <= 0 {
+		return false, nil
+	}
+	currentDelivery := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var state sourceSyncStateRow
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Table("source_sync_states").
+			Where("data_source_id=? AND tenant_id=?", ds.ID, ds.TenantID).Take(&state).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		persisted, err := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+		if err != nil {
+			if errors.Is(err, errSourceConfigurationNotCurrent) {
+				return nil
+			}
+			return err
+		}
+		fingerprint := sourceConfigFingerprint(persisted)
+		if sourceConfigFingerprint(ds) != fingerprint || !sourceModeEnabled(persisted) || state.ConfigFingerprint != fingerprint {
+			return nil
+		}
+		var run sourceSyncRunRow
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Table("source_sync_runs").
+			Where("sync_log_id=? AND data_source_id=? AND tenant_id=?", logID, ds.ID, ds.TenantID).Take(&run).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		currentDelivery = run.ConfigGeneration == state.ConfigGeneration && run.DeliveryGeneration == deliveryGeneration
+		return nil
+	})
+	return currentDelivery, err
+}
+
 // AdvanceSourceConfig increments the generation and fences running workers as
 // soon as persisted connector settings change, before another task is needed.
 func (r *SyncLogRepository) AdvanceSourceConfig(ctx context.Context, ds *types.DataSource, enabled bool) error {
@@ -250,13 +308,37 @@ func (r *SyncLogRepository) AdvanceSourceConfig(ctx context.Context, ds *types.D
 			return err
 		}
 		if !exists && !enabled {
-			return nil
+			// Before the coordinator migration, source-mode triggers could be
+			// persisted as queued sync_logs without a source_sync_states row.
+			// Fence those wake-ups when source mode is disabled so an old task
+			// cannot be reinterpreted as a document sync under the new config.
+			var current types.DataSource
+			if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
+				Where("id=? AND tenant_id=?", ds.ID, ds.TenantID).Take(&current).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
+			if !sourceModeEnabled(&current) {
+				return nil
+			}
+			return cancelUntrackedQueuedSourceRunsTx(tx, ds.ID, ds.TenantID)
 		}
 		state, err := r.ensureSourceSyncState(tx, ds)
 		if err != nil {
 			return err
 		}
 		if !enabled {
+			current, currentErr := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+			if currentErr != nil && !errors.Is(currentErr, errSourceConfigurationNotCurrent) {
+				return currentErr
+			}
+			if currentErr == nil && sourceModeEnabled(current) {
+				if err := cancelUntrackedQueuedSourceRunsTx(tx, ds.ID, ds.TenantID); err != nil {
+					return err
+				}
+			}
 			return r.invalidateDisabledSourceGeneration(tx, state, ds)
 		}
 		return r.invalidateSourceGeneration(tx, state, ds)
@@ -530,9 +612,15 @@ func pendingDispatchTx(tx *gorm.DB, state *sourceSyncStateRow) (*types.SourceSyn
 func (r *SyncLogRepository) RecoverAllSourceTriggers(ctx context.Context) ([]types.SourceSyncDispatch, error) {
 	var sources []types.DataSource
 	if err := r.db.WithContext(ctx).Model(&types.DataSource{}).
-		Joins(`JOIN source_sync_states AS source_state
+		Joins(`LEFT JOIN source_sync_states AS source_state
 			ON source_state.data_source_id = data_sources.id
 			AND source_state.tenant_id = data_sources.tenant_id`).
+		Where(`source_state.data_source_id IS NOT NULL OR EXISTS (
+			SELECT 1 FROM sync_logs AS legacy_sync_log
+			WHERE legacy_sync_log.data_source_id = data_sources.id
+			AND legacy_sync_log.tenant_id = data_sources.tenant_id
+			AND legacy_sync_log.status = ?
+		)`, types.SyncLogStatusQueued).
 		Order("data_sources.id ASC").Find(&sources).Error; err != nil {
 		return nil, err
 	}
@@ -565,6 +653,9 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 					return nil
 				}
 				return err
+			}
+			if !sourceModeEnabled(&current) {
+				return nil
 			}
 			var logs []types.SyncLog
 			if err := tx.Where("data_source_id=? AND tenant_id=? AND status=?", ds.ID, ds.TenantID, types.SyncLogStatusQueued).Order("created_at DESC").Limit(1).Find(&logs).Error; err != nil {
