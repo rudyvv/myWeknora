@@ -129,6 +129,69 @@ func TestSourceCodeExactPathTierBeatsRepeatedBM25AndIsConsumedByKeywordOnlySearc
 	require.Equal(t, embedCallsBeforeBackfill, f.embedCount.Load(), "projection backfill must not call the embedding model")
 }
 
+func TestSourceSearchTermsBackfillPreservesSnakeAndIdentifierNormalization(t *testing.T) {
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"src/Snake.java": []byte(`class Snake { String sample() { return "find_by_id getHTTPResponse $value"; } }` + "\n"),
+	})
+	syncSourceFixture(t, f)
+
+	queries := []struct {
+		name      string
+		predicate string
+	}{
+		{name: "snake spelling and parts", predicate: `normalized_terms @> ARRAY['find_by_id','find','by','id']::text[]`},
+		{name: "camel and acronym terms", predicate: `normalized_terms @> ARRAY['gethttpresponse','get','http','response']::text[]`},
+		{name: "dollar edge normalization", predicate: `normalized_terms @> ARRAY['value']::text[]`},
+	}
+	before := make([]int64, len(queries))
+	for i, query := range queries {
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND "+query.predicate, "src/Snake.java").Scan(&before[i]).Error)
+		require.Positive(t, before[i], query.name+" must be available in the new projection")
+	}
+	require.NoError(t, f.db.Exec("DELETE FROM source_chunk_search_terms WHERE path=?", "src/Snake.java").Error)
+
+	migrationPath, err := filepath.Abs(filepath.Join("..", "..", "..", "migrations", "versioned", "000111_source_chunk_search_terms.up.sql"))
+	require.NoError(t, err)
+	migration, err := os.ReadFile(migrationPath)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+
+	for i, query := range queries {
+		var after int64
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND "+query.predicate, "src/Snake.java").Scan(&after).Error)
+		require.Equal(t, before[i], after, query.name+" must match after migration backfill")
+	}
+}
+
+func TestSourceMyBatisResultMapAndSQLFragmentIdentifiersSurviveBackfill(t *testing.T) {
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"src/ParityMapper.xml": []byte(`<?xml version="1.0"?><!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd"><mapper namespace="demo.ParityMapper"><resultMap id="basic_map" type="demo.Row"><id column="id" property="id"/></resultMap><sql id="base_columns">id,name</sql><select id="find" resultMap="basic_map">select <include refid="base_columns"/> from fixture_table</select></mapper>`),
+	})
+	syncSourceFixture(t, f)
+
+	identifiers := []string{"demo.ParityMapper#basic_map", "demo.ParityMapper#base_columns"}
+	for _, identifier := range identifiers {
+		var staged int64
+		err := f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND ?=ANY(full_identifiers)", "src/ParityMapper.xml", identifier).Scan(&staged).Error
+		require.NoError(t, err)
+		if staged == 0 {
+			t.Errorf("newly staged MyBatis exact identifier is missing: %s", identifier)
+		}
+	}
+	require.NoError(t, f.db.Exec("DELETE FROM source_chunk_search_terms WHERE path=?", "src/ParityMapper.xml").Error)
+
+	migrationPath, err := filepath.Abs(filepath.Join("..", "..", "..", "migrations", "versioned", "000111_source_chunk_search_terms.up.sql"))
+	require.NoError(t, err)
+	migration, err := os.ReadFile(migrationPath)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	for _, identifier := range identifiers {
+		var backfilled int64
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND ?=ANY(full_identifiers)", "src/ParityMapper.xml", identifier).Scan(&backfilled).Error)
+		require.Positive(t, backfilled, "migration backfill must preserve MyBatis exact identifier "+identifier)
+	}
+}
+
 func TestSourceAndOrdinaryDocumentsMixWithoutWideningRepositoryPrompt(t *testing.T) {
 	f := newJavaSourceFixture(t, map[string][]byte{"src/Other.java": []byte("class Other { String getPushSchedule() { return \"unselected tagged source\"; } }\n")})
 	syncSourceFixture(t, f)

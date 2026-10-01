@@ -110,6 +110,11 @@ func BuildSourceChunkSearchTerms(path string, chunk types.ParsedSourceChunk, sym
 			if fact.Namespace != "" && statementID != "" {
 				identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Namespace+"#"+statementID)
 			}
+		case "mybatis_result_map", "mybatis_sql_fragment":
+			identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Name)
+			if fact.Namespace != "" && fact.Name != "" {
+				identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Namespace+"#"+fact.Name)
+			}
 		case "java_mapper_method":
 			identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Name)
 			if fact.Namespace != "" {

@@ -113,11 +113,15 @@ BEGIN
                ARRAY(
                    SELECT term
                    FROM (
-                       SELECT lower(token) AS term, 1 AS priority
+                       SELECT lower(btrim(token, '_$')) AS term, 1 AS priority
                        FROM unnest(p.full_identifiers) identifier(value)
                        CROSS JOIN LATERAL regexp_split_to_table(identifier.value, '[^A-Za-z0-9$]+') AS pieces(token)
                        UNION ALL
-                       SELECT lower(token) AS term, 1 AS priority
+                       SELECT lower(btrim(token, '_$')) AS term, 1 AS priority
+                       FROM unnest(p.full_identifiers) identifier(value)
+                       CROSS JOIN LATERAL regexp_split_to_table(identifier.value, '[^A-Za-z0-9_$]+') AS pieces(token)
+                       UNION ALL
+                       SELECT lower(btrim(token, '_$')) AS term, 1 AS priority
                        FROM unnest(p.full_identifiers) identifier(value)
                        CROSS JOIN LATERAL regexp_split_to_table(
                            regexp_replace(
@@ -127,10 +131,13 @@ BEGIN
                            '[^A-Za-z0-9$]+'
                        ) AS pieces(token)
                        UNION ALL
-                       SELECT lower(token) AS term, 0 AS priority
+                       SELECT lower(btrim(token, '_$')) AS term, 0 AS priority
                        FROM regexp_split_to_table(p.path, '[^A-Za-z0-9$]+') AS pieces(token)
                        UNION ALL
-                       SELECT lower(token) AS term, 0 AS priority
+                       SELECT lower(btrim(token, '_$')) AS term, 0 AS priority
+                       FROM regexp_split_to_table(p.path, '[^A-Za-z0-9_$]+') AS pieces(token)
+                       UNION ALL
+                       SELECT lower(btrim(token, '_$')) AS term, 0 AS priority
                        FROM regexp_split_to_table(
                            regexp_replace(
                                regexp_replace(p.path, '([a-z0-9])([A-Z])', '\1 \2', 'g'),
@@ -139,10 +146,13 @@ BEGIN
                            '[^A-Za-z0-9$]+'
                        ) AS pieces(token)
                        UNION ALL
-                       SELECT lower(token) AS term, 2 AS priority
+                       SELECT lower(btrim(token, '_$')) AS term, 2 AS priority
                        FROM regexp_split_to_table(p.content, '[^A-Za-z0-9$]+') AS pieces(token)
                        UNION ALL
-                       SELECT lower(token) AS term, 2 AS priority
+                       SELECT lower(btrim(token, '_$')) AS term, 2 AS priority
+                       FROM regexp_split_to_table(p.content, '[^A-Za-z0-9_$]+') AS pieces(token)
+                       UNION ALL
+                       SELECT lower(btrim(token, '_$')) AS term, 2 AS priority
                        FROM regexp_split_to_table(
                            regexp_replace(
                                regexp_replace(p.content, '([a-z0-9])([A-Z])', '\1 \2', 'g'),
