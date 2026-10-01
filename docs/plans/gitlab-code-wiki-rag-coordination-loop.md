@@ -87,3 +87,9 @@ T12 编码合同（回应执行者问题，待其读取）：首期不要为 T12
 2026-09-30 本轮验收：T09 冻结 `a81bc0db` 已双轴审查通过；合并 T10 时修复真实 parser 清理槽位与 HTTP 响应次序竞争，旧实现确定性复现第二个顺序请求 429，合并后 Script/Vue/MyBatis HTTP 15/22/19 全通过。两项 Vue 发布/代表组件 PostgreSQL 通过；集成 `04d99577` 已推送并关闭 #17。T11/#19 以此提交为批准审查起点，在原 T09 工作树启动；独立对话发送工具暂报 thread not found，根对话使用同一工作树的 Luna/xhigh 子 Agent 执行，避免停工或新建重复侧边栏对话。
 
 T06 冻结 `309f1958` 双轴审查 Spec0、Standards硬0/判断2P3；根独立 PostgreSQL 的 legacy coalescing/pause 两项通过。与 T09/T10 合并时发现已暂存文件重试后丢静态关系，真实回归先红（2→0）后绿（2→2）。合并后另五项真实 PostgreSQL、Go 五包、前端 typecheck 与同步日志组件测试通过；集成提交 `ce6a6cf2`，详见 `gitlab-code-wiki-rag-t06-309f1958-review.md`。T12 新冻结 `c87d56d5`，批准起点 `9e2ef826`；根已派两位 Sol/high 分别做 Standards/Spec 审查，在审查与独立复验通过前不集成或关 #20。
+
+2026-10-01 额度恢复后权威状态：根树干净 `55847749`，已推送；#14/#17/#18 已关闭，累计11/22。独立对话消息工具恢复，未新建重复对话。三个原 Luna/xhigh 对话均 active：原T06接续T20/#28，分支 `codex/t20-gitlab-webhook-reconciliation`，审查起点 `55847749`；原T09接续T11/#19，分支 `codex/t11-business-chain`，审查起点 `04d99577`，保留此前子Agent的四个dirty文件，旧子Agent已不运行；原T10继续T12/#20，审查起点 `9e2ef826`。
+
+T12 `c87d56d5` 完成双轴：Standards硬0/判断2P3，Spec1P2（必需path头/最小正文不可能容纳于模型预算时，preview仍CanSync=true）。UTF16显式失败属于已批准合同，不报新finding。root两项真实HTTP、Go source、三项独立PG PASS30.298s；冻结树保持干净至验证结束。P2已交原对话先红后绿修复，不集成/关票，详见 `gitlab-code-wiki-rag-t12-c87d56d5-review.md`。只发布验收里程碑到GitHub，不写过程流水。
+
+最新游标：T20 `f240afa9-c9aa-4f0d-9d1d-2da1a28a568c:3`；T11 `6e63683c-2884-4658-ad68-24f56513ae9d:3`；T12 `8c8c4f1d-1fe3-4463-9e9f-07cba9ba876a:2`。专用 `weknora-source-batch-two-test` 因Docker中断曾退出，仅重新启动它且pg_isready通过；仍用127.0.0.1:57521/source_test，无旧凭据读取，共享应用不动。
