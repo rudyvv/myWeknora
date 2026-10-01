@@ -110,3 +110,5 @@ T12 仍修复 c87d56d5 的唯一阻断 P2；root 进一步限定 preflight 只�
 
 根补充完整相关Go包验证已收取：source/modelcontext/repository/types及全部datasource connector包通过。完整service包未全绿，失败来自未修改的既有sandbox/skill测试：Windows npipe scheme、缺sh/Unix脚本不可直接执行及skill Python/CLI命令不可用（9009）。LOG_FORMAT=json实际是现有logger字面模板，清空仅测试进程该变量后完整Feishu Wiki包通过15.907s；没有修改logger或全局环境。全部失败路径及logger/Feishu代码对55847749..fa0dcad7无diff，不声称全基线套件已独立跑绿，不扩大本票修无关沙箱。完整JSON保存在本机临时日志，所有root测试会话已收取，无遗留运行。
 最新游标更新：T20 f240afa9-c9aa-4f0d-9d1d-2da1a28a568c:39；T11 6e63683c-2884-4658-ad68-24f56513ae9d:44；T13 8c8c4f1d-1fe3-4463-9e9f-07cba9ba876a:39，均active未有新READY。T20正在核对旧route审计，T11正在保留不确定静态路由候选且不可导航，T13正式分支干净、已开始现有检索链映射。
+
+2026-10-01 T13 主动规划提案已收取并答复：root选择B类型化独立源码search terms表，不先做正文扫描A；批准Spec §93(22)、实施计划§116–118已有类型化字段依据。关键词侧原样full path/symbol/Mapper ID > 规范化代码词 > BM25，再沿现有RRF；规范化不能宣称exact。root发现keyword-only消费会按Score重排，要求内部显式rank贯通消费回归、不可伪造BM25分数。terms同staging事务/发布完整检查/寿命清理，版本化派生并有界幂等旧数据升级，不调模型、不重嵌入；各lane本身在LIMIT前遵守T03完整范围。T20 migration110，T13安排111先核对未占用。原文本/普通doc分析器/外部API保持，派生terms不进入原文证据或无界Embedding。完整合同已直接送达原T13 Luna/xhigh，不需人类重批既批准票内接口方案。
