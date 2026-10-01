@@ -18,7 +18,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
@@ -28,6 +30,9 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000105_source_wiki.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.DB.Exec(string(migration)).Error)
+	batchMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(batchMigration)).Error)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Messages []struct {
@@ -63,6 +68,9 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	group.POST("/source/generate", h.GenerateSourceModule)
 	group.GET("/source/evidence", h.ReadSourceWikiEvidence)
 	group.GET("/source/attempts", h.ListSourceWikiAttempts)
+	group.GET("/source/batches", h.ListSourceWikiBatches)
+	group.GET("/source/batches/:batch_id", h.GetSourceWikiBatch)
+	group.GET("/source/coverage", h.ListSourceWikiCoverage)
 	group.GET("/pages/*slug", h.GetPage)
 	group.GET("/index", h.GetIndex)
 	group.GET("/search", h.SearchPages)
@@ -85,6 +93,37 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	page, err := wiki.GetPageBySlug(f.Ctx, f.KB.ID, response.Data.Slug)
 	require.NoError(t, err)
 	require.Len(t, page.SourceProvenance.Evidence, 2)
+	var publication types.SourcePublication
+	require.NoError(t, f.DB.Where("data_source_id = ?", f.Source.ID).Take(&publication).Error)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := &types.SourceWikiBatch{
+		ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: f.KB.ID, SourceID: f.Source.ID, SnapshotID: publication.SnapshotID,
+		SourceConfigFingerprint: strings.Repeat("a", 64), SourceUpdatedAt: f.Source.UpdatedAt,
+		ModelID: model.ID, ModelSettingsFingerprint: strings.Repeat("b", 64), ModelContextWindow: 65536,
+		MaxCompletionTokens: types.SourceWikiBatchMaxCompletionTokens, Status: "running", Phase: "skeleton",
+		MaxCalls: types.SourceWikiBatchMaxCalls, MaxTokens: types.SourceWikiBatchMaxTokens,
+		MaxElapsedMS: types.SourceWikiBatchMaxElapsed.Milliseconds(), MaxInitialTopics: types.SourceWikiBatchMaxInitialTopics,
+		SkeletonMaxCalls: types.SourceWikiBatchSkeletonMaxCalls, SkeletonMaxTokens: types.SourceWikiBatchSkeletonMaxTokens,
+		QAMaxCalls: types.SourceWikiBatchQAMaxCalls, QAMaxTokens: types.SourceWikiBatchQAMaxTokens,
+		DeadlineAt: now.Add(types.SourceWikiBatchMaxElapsed), CreatedAt: now, UpdatedAt: now,
+	}
+	batchLedger := repository.NewSourceWikiBatchLedger(f.DB)
+	require.NoError(t, batchLedger.Create(f.Ctx, batch))
+	topics := []types.SourceWikiTopic{
+		{SourceID: f.Source.ID, SnapshotID: publication.SnapshotID, TopicKey: "system", Kind: "system", Title: "System overview", Priority: 120, Status: "planned"},
+		{SourceID: f.Source.ID, SnapshotID: publication.SnapshotID, TopicKey: "module/src", Kind: "module", ModulePath: "src", Title: "src", Priority: 90, Status: "planned"},
+	}
+	require.NoError(t, batchLedger.SavePlan(f.Ctx, batch.ID, topics, now.Add(time.Second)))
+	out = invoke(http.MethodGet, "/source/coverage?source_id="+url.QueryEscape(f.Source.ID), nil)
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), `"topic_key":"module/src"`)
+	require.Contains(t, out.Body.String(), `"status":"planned"`)
+	out = invoke(http.MethodGet, "/source/batches?source_id="+url.QueryEscape(f.Source.ID), nil)
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), batch.ID)
+	out = invoke(http.MethodGet, "/source/batches/"+batch.ID+"?source_id="+url.QueryEscape(f.Source.ID), nil)
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), `"deadline_at"`)
 	query := "?slug=" + url.QueryEscape(page.Slug) + "&evidence_id=e001&version=1"
 	out = invoke(http.MethodGet, "/source/evidence"+query, nil)
 	require.Equal(t, http.StatusOK, out.Code, out.Body.String())

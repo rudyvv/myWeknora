@@ -297,6 +297,9 @@ func RegisterWikiPageRoutes(r *gin.RouterGroup, wikiHandler *handler.WikiPageHan
 	wikiRead := wiki.With(apiKeyRetrieve(apiKeyFullAccess()))
 	{
 		wikiRead.GET("/source/attempts", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.ListSourceWikiAttempts)
+		wikiRead.GET("/source/batches", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.ListSourceWikiBatches)
+		wikiRead.GET("/source/batches/:batch_id", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.GetSourceWikiBatch)
+		wikiRead.GET("/source/coverage", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.ListSourceWikiCoverage)
 		wikiRead.GET("/source/evidence", g.Viewer(), g.KBAccessRead("kb_id"), wikiHandler.ReadSourceWikiEvidence)
 		wiki.POST("/source/generate", g.OwnedWikiKBOrAdmin(), g.KBAccessWrite("kb_id"), wikiHandler.GenerateSourceModule)
 		// Page CRUD

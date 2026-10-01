@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { listDataSources, type DataSource } from '@/api/datasource'
-import { generateSourceWikiModule, listSourceWikiAttempts, type SourceWikiAttempt } from '@/api/wiki'
+import { generateSourceWikiModule, listSourceWikiAttempts, listSourceWikiCoverage, type SourceWikiAttempt, type SourceWikiCoverageTopic } from '@/api/wiki'
 const props = defineProps<{ kbId: string; canEdit?: boolean }>()
 const emit = defineEmits<{ (e: 'ready', slug: string): void }>()
 const sources = ref<DataSource[]>([])
 const attempts = ref<SourceWikiAttempt[]>([])
+const coverage = ref<SourceWikiCoverageTopic[]>([])
 const sourceID = ref('')
 const modulePath = ref('')
 const title = ref('')
@@ -13,6 +14,7 @@ const busy = ref(false)
 const error = ref('')
 let generation = 0
 let requestGeneration = 0
+let coverageGeneration = 0
 async function load() {
   const current = ++generation
   try {
@@ -22,6 +24,26 @@ async function load() {
     attempts.value = attemptRes.data || []
     if (!sources.value.some(s => s.id === sourceID.value)) sourceID.value = sources.value[0]?.id || ''
   } catch { if (current === generation) error.value = '暂时无法读取技术卡片状态。' }
+}
+async function loadCoverage() {
+  const current = ++coverageGeneration
+  const kbID = props.kbId
+  const activeSourceID = sourceID.value
+  if (!activeSourceID) { coverage.value = []; return }
+  coverage.value = []
+  try {
+    const response: any = await listSourceWikiCoverage(kbID, activeSourceID)
+    if (current !== coverageGeneration || kbID !== props.kbId || activeSourceID !== sourceID.value) return
+    coverage.value = response.data || []
+  } catch {
+    if (current === coverageGeneration && kbID === props.kbId && activeSourceID === sourceID.value) {
+      coverage.value = []
+      error.value = '暂时无法读取源码主题覆盖清单。'
+    }
+  }
+}
+function statusText(status: SourceWikiCoverageTopic['status']) {
+  return ({ planned: '计划中', ready: '已就绪', draft: '草稿已保留', failed: '失败', insufficient_evidence: '证据不足', expansion: '待扩展' })[status]
 }
 async function generate(attempt?: SourceWikiAttempt) {
   if (busy.value || !props.canEdit) return
@@ -44,9 +66,11 @@ async function generate(attempt?: SourceWikiAttempt) {
 }
 watch(() => props.kbId, () => {
   ++requestGeneration
-  sources.value = []; attempts.value = []; sourceID.value = ''; modulePath.value = ''; title.value = ''; error.value = ''; busy.value = false
+  ++coverageGeneration
+  sources.value = []; attempts.value = []; coverage.value = []; sourceID.value = ''; modulePath.value = ''; title.value = ''; error.value = ''; busy.value = false
   void load()
 }, { immediate: true })
+watch(sourceID, () => { void loadCoverage() })
 </script>
 
 <template>
@@ -59,6 +83,20 @@ watch(() => props.kbId, () => {
       <button :disabled="busy || !sourceID || !modulePath || !title" type="submit">{{ busy ? '正在核验证据…' : '生成模块卡片' }}</button>
     </form>
     <p v-if="error" role="alert">{{ error }}</p>
+    <section v-if="sourceID" class="coverage" aria-label="源码主题覆盖">
+      <h3>主题覆盖清单</h3>
+      <p v-if="!coverage.length">此仓库尚无主题骨架记录。</p>
+      <ul v-else>
+        <li v-for="topic in coverage" :key="topic.topic_key">
+          <strong>{{ topic.title }}</strong>
+          <span>{{ statusText(topic.status) }}</span>
+          <small>{{ topic.kind === 'system' ? '系统概览' : topic.kind === 'module' ? (topic.module_path || '模块') : '业务流程' }} · {{ topic.topic_key }}</small>
+          <p v-if="topic.uncertain">关系不确定：{{ topic.uncertainty_reasons.join('；') }}</p>
+          <p v-if="topic.reason">{{ topic.reason }}</p>
+          <button v-if="topic.status === 'ready' && topic.wiki_slug" type="button" @click="emit('ready', topic.wiki_slug)">阅读卡片</button>
+        </li>
+      </ul>
+    </section>
     <ul>
       <li v-for="attempt in attempts" :key="attempt.id">
         <strong>{{ attempt.title }}</strong> · {{ attempt.module_path }}

@@ -28,6 +28,7 @@ test('module failure reason is visible and manual retry uses a fresh bounded att
   '@/api/datasource': { async listDataSources() { return { data: [{ id: 'repo-one', name: 'Repository', config: { settings: { content_mode: 'source' } } }] } } },
   '@/api/wiki': {
    async listSourceWikiAttempts() { return { data: attempts } },
+   async listSourceWikiCoverage() { return { data: [] } },
    async generateSourceWikiModule(_kb: string, request: any) { requests.push(request); attempts = [{ ...attempts[0], id: 'retry-two', status: 'ready', reason: '', calls: 2, repairs: 0 }]; return { data: attempts[0] } }
   }
  })
@@ -72,7 +73,7 @@ test('switching KB discards a pending generation result and reason', async () =>
   const ready: string[] = []
   const view = component('./SourceWikiModules.vue', {
    '@/api/datasource': { async listDataSources(kb: string) { return { data: [{ id: kb+'-source', name: kb, config: { settings: { content_mode: 'source' } } }] } } },
-   '@/api/wiki': { async listSourceWikiAttempts() { return { data: [] } }, async generateSourceWikiModule() { return pending } }
+   '@/api/wiki': { async listSourceWikiAttempts() { return { data: [] } }, async listSourceWikiCoverage() { return { data: [] } }, async generateSourceWikiModule() { return pending } }
   })
   const props = reactive({ kbId: 'old-kb', canEdit: true })
   const host = document.createElement('div'); document.body.append(host)
@@ -90,6 +91,32 @@ test('switching KB discards a pending generation result and reason', async () =>
    assert.ok(!host.textContent?.includes('old-kb'))
   } finally { app.unmount(); host.remove() }
  }
+})
+
+test('coverage distinguishes backlog and uncertainty while ready topics keep their existing Wiki link', async () => {
+ const coverage = [
+  { source_id: 'repo-one', topic_key: 'system', snapshot_id: 'snapshot-one', kind: 'system', title: 'System overview', priority: 120, status: 'planned', uncertain: false, uncertainty_reasons: [] },
+  { source_id: 'repo-one', topic_key: 'flow/POST /orders', snapshot_id: 'snapshot-one', kind: 'flow', title: 'POST /orders', priority: 100, status: 'expansion', uncertain: true, uncertainty_reasons: ['No static backend route was found'] },
+  { source_id: 'repo-one', topic_key: 'module/src/orders', snapshot_id: 'snapshot-one', kind: 'module', module_path: 'src/orders', title: 'Orders', priority: 90, status: 'ready', uncertain: false, uncertainty_reasons: [], wiki_slug: 'concept/source-repo-one/module-orders' },
+ ]
+ const ready: string[] = []
+ const view = component('./SourceWikiModules.vue', {
+  '@/api/datasource': { async listDataSources() { return { data: [{ id: 'repo-one', name: 'Repository', config: { settings: { content_mode: 'source' } } }] } } },
+  '@/api/wiki': { async listSourceWikiAttempts() { return { data: [] } }, async listSourceWikiCoverage(_kb: string, source: string) { assert.equal(source, 'repo-one'); return { data: coverage } } }
+ })
+ const host = document.createElement('div'); document.body.append(host)
+ const app = createApp({ render: () => h(view, { kbId: 'kb-one', canEdit: false, onReady: (slug: string) => ready.push(slug) }) })
+ app.mount(host)
+ try {
+  await settle()
+  assert.ok(host.textContent?.includes('计划中'))
+  assert.ok(host.textContent?.includes('待扩展'))
+  assert.ok(host.textContent?.includes('关系不确定'))
+  assert.ok(host.textContent?.includes('No static backend route was found'))
+  const read = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '阅读卡片')
+  assert.ok(read); read.click(); await settle()
+  assert.deepEqual(ready, ['concept/source-repo-one/module-orders'])
+ } finally { app.unmount(); host.remove() }
 })
 
 test('ordinary Wiki revision selection shows its body without a selection hint', async () => {

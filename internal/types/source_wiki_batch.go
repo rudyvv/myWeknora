@@ -1,0 +1,141 @@
+package types
+
+import "time"
+
+const (
+	SourceWikiSkeletonMaxFiles         = 50_000
+	SourceWikiSkeletonMaxRelations     = 200_000
+	SourceWikiBatchMaxCalls            = 240
+	SourceWikiBatchMaxTokens           = 4_000_000
+	SourceWikiBatchMaxElapsed          = time.Hour
+	SourceWikiBatchMaxInitialTopics    = 40
+	SourceWikiBatchMaxCompletionTokens = 4096
+	SourceWikiBatchSkeletonMaxCalls    = 6
+	SourceWikiBatchSkeletonMaxTokens   = 120_000
+	SourceWikiBatchQAMaxCalls          = 12
+	SourceWikiBatchQAMaxTokens         = 240_000
+	SourceWikiBatchChildMaxCalls       = 18
+	SourceWikiBatchChildMaxTokens      = 360_000
+)
+
+type SourceWikiSkeletonFile struct {
+	Path      string
+	Generated bool
+	Facts     []ParsedSourceFact
+}
+
+// SourceWikiTopic is a source-owned stable subject planned against one fixed
+// snapshot. TopicKey omits SnapshotID; SourceID is its identity namespace.
+type SourceWikiTopic struct {
+	SourceID           string               `json:"source_id"`
+	SnapshotID         string               `json:"snapshot_id"`
+	TopicKey           string               `json:"topic_key"`
+	Kind               string               `json:"kind"`
+	ModulePath         string               `json:"module_path,omitempty"`
+	Title              string               `json:"title"`
+	Priority           int                  `json:"priority"`
+	Status             string               `json:"status"`
+	Uncertain          bool                 `json:"uncertain"`
+	UncertaintyReasons []string             `json:"uncertainty_reasons,omitempty"`
+	Relations          []SourceCodeRelation `json:"relations,omitempty"`
+}
+
+// SourceWikiBatch is an immutable-budget parent over a fixed published
+// snapshot. DeadlineAt is absolute and is never extended by a resumed worker.
+type SourceWikiBatch struct {
+	ID                       string     `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID                 uint64     `json:"tenant_id"`
+	KnowledgeBaseID          string     `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
+	SourceID                 string     `json:"source_id" gorm:"type:varchar(36);index"`
+	SnapshotID               string     `json:"snapshot_id" gorm:"type:varchar(36);index"`
+	SourceConfigFingerprint  string     `json:"-" gorm:"type:varchar(64)"`
+	SourceUpdatedAt          time.Time  `json:"source_updated_at"`
+	ModelID                  string     `json:"model_id" gorm:"type:varchar(36)"`
+	ModelSettingsFingerprint string     `json:"-" gorm:"type:varchar(64)"`
+	ModelContextWindow       int        `json:"model_context_window"`
+	MaxCompletionTokens      int        `json:"max_completion_tokens"`
+	Status                   string     `json:"status"`
+	Phase                    string     `json:"phase"`
+	CurrentTopicKey          string     `json:"current_topic_key,omitempty"`
+	Cursor                   int        `json:"cursor"`
+	CandidateCount           int        `json:"candidate_count"`
+	InitialCount             int        `json:"initial_count"`
+	CallsReserved            int        `json:"calls_reserved"`
+	TokensReserved           int        `json:"tokens_reserved"`
+	SkeletonCallsReserved    int        `json:"skeleton_calls_reserved"`
+	SkeletonTokensReserved   int        `json:"skeleton_tokens_reserved"`
+	QACallsReserved          int        `json:"qa_calls_reserved" gorm:"column:qa_calls_reserved"`
+	QATokensReserved         int        `json:"qa_tokens_reserved" gorm:"column:qa_tokens_reserved"`
+	MaxCalls                 int        `json:"max_calls"`
+	MaxTokens                int        `json:"max_tokens"`
+	MaxElapsedMS             int64      `json:"max_elapsed_ms"`
+	MaxInitialTopics         int        `json:"max_initial_topics"`
+	SkeletonMaxCalls         int        `json:"skeleton_max_calls"`
+	SkeletonMaxTokens        int        `json:"skeleton_max_tokens"`
+	QAMaxCalls               int        `json:"qa_max_calls" gorm:"column:qa_max_calls"`
+	QAMaxTokens              int        `json:"qa_max_tokens" gorm:"column:qa_max_tokens"`
+	DeadlineAt               time.Time  `json:"deadline_at"`
+	Reason                   string     `json:"reason,omitempty"`
+	CreatedAt                time.Time  `json:"created_at"`
+	UpdatedAt                time.Time  `json:"updated_at"`
+	FinishedAt               *time.Time `json:"finished_at,omitempty"`
+}
+
+func (SourceWikiBatch) TableName() string { return "source_wiki_batches" }
+
+// SourceWikiCoverageTopic is the latest planned/attempted state for a stable
+// source topic. WikiSlug remains populated for ready and historical cards so
+// existing directory links continue to resolve.
+type SourceWikiCoverageTopic struct {
+	ID                  string    `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID            uint64    `json:"tenant_id"`
+	KnowledgeBaseID     string    `json:"knowledge_base_id" gorm:"type:varchar(36);index"`
+	SourceID            string    `json:"source_id" gorm:"type:varchar(36);uniqueIndex:source_wiki_topic_identity"`
+	TopicKey            string    `json:"topic_key" gorm:"type:text;uniqueIndex:source_wiki_topic_identity"`
+	SnapshotID          string    `json:"snapshot_id" gorm:"type:varchar(36);index"`
+	Kind                string    `json:"kind"`
+	ModulePath          string    `json:"module_path,omitempty"`
+	Title               string    `json:"title"`
+	Priority            int       `json:"priority"`
+	Status              string    `json:"status"`
+	Uncertain           bool      `json:"uncertain"`
+	UncertaintyReasons  JSON      `json:"uncertainty_reasons" gorm:"type:jsonb"`
+	Relations           JSON      `json:"relations" gorm:"type:jsonb"`
+	BatchID             *string   `json:"batch_id,omitempty" gorm:"type:varchar(36);index"`
+	AttemptID           *string   `json:"attempt_id,omitempty" gorm:"type:varchar(36);index"`
+	WikiSlug            string    `json:"wiki_slug,omitempty"`
+	LastReadySnapshotID string    `json:"last_ready_snapshot_id,omitempty" gorm:"type:varchar(36)"`
+	Reason              string    `json:"reason,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+func (SourceWikiCoverageTopic) TableName() string { return "source_wiki_topics" }
+
+// SourceWikiBatchCallReservation is the parent-level durable charge. Card
+// calls mirror T17's per-attempt reservation in the same DB transaction;
+// skeleton and whole-batch QA use this ledger directly.
+type SourceWikiBatchCallReservation struct {
+	ID             string     `json:"id" gorm:"type:varchar(36);primaryKey"`
+	BatchID        string     `json:"batch_id" gorm:"type:varchar(36);index"`
+	AttemptID      *string    `json:"attempt_id,omitempty" gorm:"type:varchar(36);index"`
+	AttemptCallID  *string    `json:"attempt_call_id,omitempty" gorm:"type:varchar(36);uniqueIndex"`
+	Phase          string     `json:"phase"`
+	ProviderPhase  string     `json:"provider_phase,omitempty"`
+	ReservedTokens int        `json:"reserved_tokens"`
+	ActualTokens   *int       `json:"actual_tokens,omitempty"`
+	Outcome        string     `json:"outcome"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+}
+
+func (SourceWikiBatchCallReservation) TableName() string { return "source_wiki_batch_calls" }
+
+type SourceWikiBatchReserveCallRequest struct {
+	BatchID        string
+	AttemptID      string
+	AttemptCallID  string
+	Phase          string
+	ProviderPhase  string
+	ReservedTokens int
+	Now            time.Time
+}

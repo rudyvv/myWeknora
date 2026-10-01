@@ -365,6 +365,32 @@ export function generateSourceWikiModule(kbId: string, request: { source_id: str
 export function listSourceWikiAttempts(kbId: string) {
  return get(`/api/v1/knowledgebase/${kbId}/wiki/source/attempts`);
 }
+export type SourceWikiTopicStatus = 'planned' | 'ready' | 'draft' | 'failed' | 'insufficient_evidence' | 'expansion';
+export interface SourceWikiCoverageTopic {
+ source_id: string; topic_key: string; snapshot_id: string; kind: 'system' | 'module' | 'flow';
+ module_path?: string; title: string; priority: number; status: SourceWikiTopicStatus; uncertain: boolean;
+ uncertainty_reasons: string[]; batch_id?: string; attempt_id?: string; wiki_slug?: string;
+ last_ready_snapshot_id?: string; reason?: string;
+}
+export interface SourceWikiBatch {
+ id: string; source_id: string; snapshot_id: string; status: string; phase: string;
+ current_topic_key?: string; cursor: number; candidate_count: number; initial_count: number;
+ calls_reserved: number; tokens_reserved: number; skeleton_calls_reserved: number;
+ skeleton_tokens_reserved: number; qa_calls_reserved: number; qa_tokens_reserved: number;
+ deadline_at: string; reason?: string; created_at: string; updated_at: string; finished_at?: string;
+}
+export function listSourceWikiCoverage(kbId: string, sourceId: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/coverage?${query.toString()}`);
+}
+export function listSourceWikiBatches(kbId: string, sourceId: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/batches?${query.toString()}`);
+}
+export function getSourceWikiBatch(kbId: string, sourceId: string, batchId: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/batches/${encodeURIComponent(batchId)}?${query.toString()}`);
+}
 export function readSourceWikiEvidence(kbId: string, slug: string, evidenceId: string, version = 0) {
  const query = new URLSearchParams({ slug, evidence_id: evidenceId, version: String(version) });
  return get(`/api/v1/knowledgebase/${kbId}/wiki/source/evidence?${query}`);
