@@ -6,9 +6,9 @@
 
 | 执行对话 | thread ID | worktree / branch |
 | --- | --- | --- |
-| T06 源码更新调度与重启恢复 | 01a0ebfe-56df-7223-8644-ca717bd658bd | C:/Users/28211/.codex/worktrees/b0df/WeKnora；codex/source-durable-triggers |
-| T09 Vue SFC 区域解析与检索 | 01a0ebfe-8153-70e0-898e-2b7ffa91eaad | C:/Users/28211/.codex/worktrees/a8ea/WeKnora；codex/source-vue-sfc |
-| T10 MyBatis Mapper 与 XML SQL 关联检索 | 01a0ebfe-da20-71d2-a963-fa965754b497 | C:/Users/28211/.codex/worktrees/2119/WeKnora；codex/source-mybatis-sql |
+| 原 T06，现 T20 Webhook 与定时校验 | 01a0ebfe-56df-7223-8644-ca717bd658bd | C:/Users/28211/.codex/worktrees/b0df/WeKnora；codex/t20-gitlab-webhook-reconciliation |
+| 原 T09，现 T11 业务调用链 | 01a0ebfe-8153-70e0-898e-2b7ffa91eaad | C:/Users/28211/.codex/worktrees/a8ea/WeKnora；codex/t11-business-chain |
+| 原 T10，现 T13 代码检索排序 | 01a0ebfe-da20-71d2-a963-fa965754b497 | C:/Users/28211/.codex/worktrees/2119/WeKnora；codex/t13-code-retrieval |
 
 ## 通信规则
 
@@ -99,3 +99,14 @@ T12 `c87d56d5` 完成双轴：Standards硬0/判断2P3，Spec1P2（必需path头/
 T12 仍修复 c87d56d5 的唯一阻断 P2；root 进一步限定 preflight 只提前拒绝已确定不可行的必需路径头/最小正文预算，复用范围扫描，不将 preview 扩成全仓解析或 Embedding。等待针对性红绿、完整干净 SHA 后双轴复审；同一旧 SHA 不重审。三个后续任务仍分别 T20/#28、T11/#19、T12/#20，累计11/22，不因 active 或部分测试通过计完成。
 
 当前游标：T20 `f240afa9-c9aa-4f0d-9d1d-2da1a28a568c:14`；T11 `6e63683c-2884-4658-ad68-24f56513ae9d:18`；T12 `8c8c4f1d-1fe3-4463-9e9f-07cba9ba876a:8`。root HEAD fc574d4b 为仅本地审查文档提交，后续随实际验收推送，不为过程流水单独调用 GitHub。
+
+2026-10-01 最新权威状态（优先于上方历史）：T12/#20 已通过完整冻结 f94b4a085e90e8397ab7d13c1336412ce5b90248 的 Sol/high 双轴审查，Standards 硬0/判断3P3，Spec0；根独立必要验证和合并验证通过。集成 fa0dcad79646dcd08dd39dfe17cfc8eeaaf185b9 已推送，#20 CLOSED，累计12/22。详情见 gitlab-code-wiki-rag-t12-f94b4a08-review.md。T06/#14、T09/#17、T10/#18 已验收，不再重审旧冻结。
+
+原 T10 对话已收到 REVIEW_PASSED 后正式接续 T13/#21，从 fa0dcad79646dcd08dd39dfe17cfc8eeaaf185b9 创建干净 codex/t13-code-retrieval 分支，固定审查起点同该提交。此前执行者将“不能自行进入下一票”解释为永久禁止，根用用户原始连续执行和总控派发授权澄清；执行者已读取根消息确认，不需用户再次批准。T13 按本地批准票实现源码标识符/路径和中文业务检索；两路及精确候选必须在 topK 前遵守 T03 授权/仓库/文件/标签/固定快照，普通文档行为保留，schema/API 新决定先向根提案。
+
+原 T06 的 T20/#28 保持 active，固定起点55847749344ae08bb9c2969dd32a5d397b18a0c6；新管理路由必须有 manage_datasources 等现有权限元数据，公共回调单独验证注册令牌，暂停/解绑/清凭据不可被事件复活。原 T09 的 T11/#19 保持 active，固定起点04d99577814d3786b7e004f81124885638dffced，已报告真实快照/授权集成通过，仍在消费者与只读代表链验证，未提交新READY，不计验收。
+
+最新紧凑游标：T20 f240afa9-c9aa-4f0d-9d1d-2da1a28a568c:38；T11 6e63683c-2884-4658-ad68-24f56513ae9d:43；T13 8c8c4f1d-1fe3-4463-9e9f-07cba9ba876a:38。worker→root T12 READY 和 root→worker 派发已直接送达；无需用户人工转达。保留独立57521数据库、已有锁定依赖及缓存；只发布验收里程碑，过程不反复写GitHub。
+
+根补充完整相关Go包验证已收取：source/modelcontext/repository/types及全部datasource connector包通过。完整service包未全绿，失败来自未修改的既有sandbox/skill测试：Windows npipe scheme、缺sh/Unix脚本不可直接执行及skill Python/CLI命令不可用（9009）。LOG_FORMAT=json实际是现有logger字面模板，清空仅测试进程该变量后完整Feishu Wiki包通过15.907s；没有修改logger或全局环境。全部失败路径及logger/Feishu代码对55847749..fa0dcad7无diff，不声称全基线套件已独立跑绿，不扩大本票修无关沙箱。完整JSON保存在本机临时日志，所有root测试会话已收取，无遗留运行。
+最新游标更新：T20 f240afa9-c9aa-4f0d-9d1d-2da1a28a568c:39；T11 6e63683c-2884-4658-ad68-24f56513ae9d:44；T13 8c8c4f1d-1fe3-4463-9e9f-07cba9ba876a:39，均active未有新READY。T20正在核对旧route审计，T11正在保留不确定静态路由候选且不可导航，T13正式分支干净、已开始现有检索链映射。
