@@ -53,6 +53,39 @@ func TestLanguageForPathRoutesSupportedSourceAndTextFiles(t *testing.T) {
 	}
 }
 
+func TestParseFileAcceptsBusinessFlowFactsFromParserHTTP(t *testing.T) {
+	raw := []byte("fixture")
+	digest := sha256.Sum256(raw)
+	rangeValue := types.SourceRange{StartByte: 0, EndByte: len(raw), StartLine: 1, EndLine: 1}
+	kinds := []string{"java_import", "java_type", "java_supertype_reference", "java_injection", "java_method", "spring_mapping",
+		"java_method_call", "java_dynamic_dispatch", "api_request", "api_prefix", "api_proxy"}
+	facts := make([]types.ParsedSourceFact, 0, len(kinds))
+	for _, kind := range kinds {
+		fact := types.ParsedSourceFact{Kind: kind, Name: kind, RoutePath: "/api/fixture",
+			HTTPMethod: "GET", Quality: "structural", Range: rangeValue, Text: string(raw)}
+		if kind == "java_supertype_reference" {
+			fact.TargetName, fact.Namespace, fact.OwnerKind = kind, "app.Worker", "class"
+			fact.ReferenceKind, fact.Certainty, fact.Reason = "implements", "uncertain", "identity unresolved"
+		}
+		facts = append(facts, fact)
+	}
+	parsed := types.ParsedSourceFile{ParserVersion: "fixture-parser", SHA256: hex.EncodeToString(digest[:]),
+		ByteLength: len(raw), Encoding: "utf-8", Quality: "structural", Facts: facts,
+		Chunks: []types.ParsedSourceChunk{{Content: string(raw), Range: rangeValue, Quality: "structural"}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(parsed)
+	}))
+	defer server.Close()
+
+	result, err := ParseFile(context.Background(), server.URL, "Example.java", raw)
+	if err != nil {
+		t.Fatalf("ParseFile rejected parser-authored business flow facts: %v", err)
+	}
+	if len(result.Facts) != len(kinds) {
+		t.Fatalf("ParseFile returned %d facts, want %d", len(result.Facts), len(kinds))
+	}
+}
+
 func TestSourceRegionValidationOnlyAcceptsUnresolvedLiteralReferences(t *testing.T) {
 	valid := []types.SourceRegion{
 		{Kind: "template", Language: "html", Quality: "structural"},

@@ -100,8 +100,8 @@ func modelSourceAnalysis(raw interface{}) map[string]interface{} {
 
 var modelFactFields = []string{
 	"kind", "name", "namespace", "statement_type", "statement_id", "method_name", "receiver",
-	"type_name", "result_map_refs", "include_refs", "target_namespace", "target_name", "owner_kind",
-	"owner_name", "reference_kind", "dynamic", "certainty", "quality", "range",
+	"type_name", "route_path", "http_method", "http_methods", "http_methods_specified", "http_methods_certain", "parameter_types", "signature_certain", "is_abstract", "is_default", "super_types", "result_map_refs", "include_refs", "target_namespace", "target_name", "owner_kind",
+	"owner_name", "reference_kind", "dynamic", "certainty", "reason", "quality", "range",
 }
 
 func boundedModelRows(raw interface{}, limit int, fields []string, textLimit int) ([]map[string]interface{}, bool) {
@@ -124,7 +124,7 @@ func boundedModelRows(raw interface{}, limit int, fields []string, textLimit int
 				}
 				continue
 			}
-			if key == "result_map_refs" || key == "include_refs" {
+			if key == "result_map_refs" || key == "include_refs" || key == "super_types" || key == "http_methods" || key == "parameter_types" {
 				values, wasTruncated := boundedModelStringList(value, 8, textLimit)
 				item[key], truncated = values, truncated || wasTruncated
 				continue

@@ -1469,6 +1469,115 @@ func sourceTestSyncTask(t *testing.T, f *javaSourceFixture, log *types.SyncLog) 
 	return asynq.NewTask(types.TypeDataSourceSync, payload)
 }
 
+func TestQuestionnaireBusinessFlowRelationsStayOnPublishedSnapshotAndAuthorizedAgentScope(t *testing.T) {
+	files := map[string][]byte{
+		"src/web/QuestionnaireDetail.vue": []byte(`<template><div /></template>
+<script>
+export default { mounted() { this.$_HTTP.get('/api/questionnaire/detail') } }
+</script>`),
+		"src/server/QuestionnaireController.java": []byte(`package demo;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.beans.factory.annotation.Autowired;
+@Controller @RequestMapping("/api/questionnaire")
+public class QuestionnaireController {
+  @Autowired private IQuestionnaireService questionnaireService;
+  @RequestMapping(value="/detail", method=RequestMethod.GET)
+  public Object getQuestionnaireDetail() {
+    return questionnaireService.getDetail();
+  }
+}`),
+		"src/server/IQuestionnaireService.java": []byte(`package demo;
+public interface IQuestionnaireService {
+  Object getDetail();
+}`),
+		"src/server/QuestionnaireServiceImpl.java": []byte(`package demo;
+import org.springframework.beans.factory.annotation.Autowired;
+public class QuestionnaireServiceImpl implements IQuestionnaireService {
+  @Autowired private QuestionnaireMapper questionnaireMapper;
+  public Object getDetail() {
+    return questionnaireMapper.getDetail();
+  }
+}`),
+		"src/server/QuestionnaireMapper.java": []byte(`package demo;
+public interface QuestionnaireMapper {
+  Object getDetail();
+}`),
+		"src/server/QuestionnaireMapper.xml": []byte(`<mapper namespace="demo.QuestionnaireMapper">
+  <select id="getDetail">SELECT id FROM questionnaire_answer</select>
+</mapper>`),
+	}
+	f := newJavaSourceFixture(t, files)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, _ := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+
+	var snapshot types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&snapshot).Error)
+	var vueFile, controllerFile types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/web/QuestionnaireDetail.vue").Take(&vueFile).Error)
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/server/QuestionnaireController.java").Take(&controllerFile).Error)
+	var vueVersion types.SourceFileVersion
+	require.NoError(t, f.db.Where("source_file_id=? AND snapshot_id=?", vueFile.ID, snapshot.ID).Take(&vueVersion).Error)
+	var routeRelation types.SourceCodeRelation
+	require.NoError(t, f.db.Where("snapshot_id=? AND kind='http_route' AND determinacy='certain'", snapshot.ID).Take(&routeRelation).Error)
+	require.Equal(t, vueFile.ID, routeRelation.FromFileID)
+	require.Equal(t, vueVersion.ID, routeRelation.FromVersionID)
+	require.Equal(t, controllerFile.ID, routeRelation.ToFileID)
+	require.Equal(t, snapshot.ID, routeRelation.SnapshotID)
+
+	sourceReads := f.kbs.(interfaces.SourceReadService)
+	vueOnly, releaseVueOnly, err := sourceReads.BeginSourceRead(f.ctx, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: []string{vueFile.ID}},
+	})
+	require.NoError(t, err)
+	vueOnlyView, err := f.knowledge.GetSourceFile(vueOnly, vueFile.ID, vueVersion.ID)
+	require.NoError(t, err)
+	require.Empty(t, vueOnlyView.Relations, "an endpoint outside the authorized source scope is not disclosed")
+	releaseVueOnly()
+
+	var fileIDs []string
+	require.NoError(t, f.db.Model(&types.SourceSnapshotMember{}).Where("snapshot_id=?", snapshot.ID).Pluck("source_file_id", &fileIDs).Error)
+	pinned, release, err := sourceReads.BeginSourceRead(f.ctx, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: fileIDs},
+	})
+	require.NoError(t, err)
+	defer release()
+	vueView, err := f.knowledge.GetSourceFile(pinned, vueFile.ID, vueVersion.ID)
+	require.NoError(t, err)
+	require.Contains(t, vueView.Relations, routeRelation)
+	require.Equal(t, snapshot.ID, vueView.SnapshotID)
+
+	toolArgs, err := json.Marshal(map[string]any{"knowledge_id": vueFile.ID, "limit": 1})
+	require.NoError(t, err)
+	tool := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, KnowledgeIDs: fileIDs},
+	})
+	toolResult, err := tool.Execute(pinned, toolArgs)
+	require.NoError(t, err)
+	require.True(t, toolResult.Success, toolResult.Error)
+	analysis := toolResult.Data["source_analysis"].(map[string]interface{})
+	require.Equal(t, vueVersion.ID, analysis["file_version_id"])
+	require.NotEmpty(t, analysis["facts"])
+	var routeEvidence map[string]interface{}
+	for _, relation := range analysis["relations"].([]map[string]interface{}) {
+		if relation["kind"] == "http_route" {
+			routeEvidence, _ = relation["target_evidence"].(map[string]interface{})
+			break
+		}
+	}
+	require.NotNil(t, routeEvidence, "Agent source analysis can read the fixed-version route target only inside the authorized scope")
+	require.Equal(t, controllerFile.ID, routeEvidence["knowledge_id"])
+	require.Equal(t, snapshot.ID, routeEvidence["snapshot_id"])
+	require.Equal(t, routeRelation.ToVersionID, routeEvidence["file_version_id"])
+	require.Contains(t, routeEvidence["snippet"], "/detail")
+}
+
 func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	cache := os.Getenv("SOURCE_PARSER_CACHE")
 	lock, err := os.ReadFile(filepath.Join(cache, "grammar.lock.json"))

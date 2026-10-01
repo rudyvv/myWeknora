@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from urllib.parse import urlsplit
 
 if __package__:
     from .mybatis_parser import extract_java_facts, parse_mybatis_xml
@@ -18,7 +19,7 @@ import tree_sitter_language_pack as pack
 
 PACK_VERSION = '1.19.0'
 LANGUAGES = ('java', 'javascript', 'typescript', 'tsx', 'python')
-RULES_VERSIONS = {'java': 10, 'javascript': 3, 'typescript': 3, 'tsx': 3, 'python': 4}
+RULES_VERSIONS = {'java': 11, 'javascript': 4, 'typescript': 4, 'tsx': 4, 'python': 4}
 TEXT_EXTENSIONS = (
     '.html', '.htm', '.jsp', '.jspx', '.tag', '.tagx', '.ftl', '.ftlh', '.vm',
     '.css', '.scss', '.sass', '.less', '.styl', '.yaml', '.yml', '.json', '.toml',
@@ -254,6 +255,163 @@ def _shift_sfc_fragment(fragment, base, span):
     return shifted
 
 
+def _javascript_configuration_facts(raw, tree, path):
+    """Capture literal frontend request prefixes and proxy rewrites as evidence."""
+    facts = []
+    newlines = [index for index, byte in enumerate(raw) if byte == 10]
+    configuration_root = Path(path).parent.as_posix()
+
+    def literal(node):
+        if node is None or node.type not in ('string', 'template_string'):
+            return None
+        value = raw[node.start_byte:node.end_byte].decode('utf-8')
+        quote = value[:1]
+        if quote in ("'", '"') and value.endswith(quote) and '\\' not in value:
+            return value[1:-1]
+        if quote == '`' and value.endswith('`') and '${' not in value:
+            return value[1:-1]
+        return None
+
+    def pairs(node):
+        return [child for child in node.named_children if child.type == 'pair'] if node is not None else []
+
+    def pair_value(node):
+        return node.child_by_field_name('value') if node is not None else None
+
+    def pair_key(node):
+        if node is None:
+            return None
+        key = node.child_by_field_name('key')
+        static = literal(key)
+        if static is not None:
+            return static
+        if key is not None and key.type in ('property_identifier', 'identifier'):
+            return raw[key.start_byte:key.end_byte].decode('utf-8')
+        return None
+
+    def contains_config_url(node):
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current.type == 'member_expression':
+                prop = current.child_by_field_name('property')
+                obj = current.child_by_field_name('object')
+                if (prop is not None and obj is not None and
+                        raw[prop.start_byte:prop.end_byte] == b'url' and
+                        raw[obj.start_byte:obj.end_byte] == b'config'):
+                    return True
+            stack.extend(current.named_children)
+        return False
+
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == 'assignment_expression':
+            left = node.child_by_field_name('left')
+            right = node.child_by_field_name('right')
+            if left is not None and left.type == 'member_expression' and right is not None:
+                prop = left.child_by_field_name('property')
+                obj = left.child_by_field_name('object')
+                if (prop is not None and obj is not None and
+                        raw[prop.start_byte:prop.end_byte] == b'url' and
+                        raw[obj.start_byte:obj.end_byte] == b'config' and
+                        right.type == 'binary_expression'):
+                    children = right.named_children
+                    for candidate in children:
+                        prefix = literal(candidate)
+                        other = next((child for child in children if child != candidate), None)
+                        if prefix and prefix.startswith('/') and other is not None and contains_config_url(other):
+                            facts.append({
+                                'kind': 'api_prefix', 'name': prefix, 'route_path': prefix,
+                                'owner_kind': 'conditional_prefix', 'dynamic': False, 'certainty': 'uncertain',
+                                'range': _source_span(newlines, node.start_byte, node.end_byte),
+                                'text': raw[node.start_byte:node.end_byte].decode('utf-8'), 'quality': 'structural',
+                            })
+                            if len(facts) > 50000:
+                                raise RuntimeError('source request fact limit exceeded')
+                            break
+
+        for proxy_pair in pairs(node):
+            if pair_key(proxy_pair) != 'proxy':
+                continue
+            proxy_object = pair_value(proxy_pair)
+            for context_pair in pairs(proxy_object):
+                context = pair_key(context_pair)
+                if not context or not context.startswith('/'):
+                    continue
+                options = pair_value(context_pair)
+                target = next((literal(pair_value(pair)) for pair in pairs(options) if pair_key(pair) == 'target'), None)
+                rewrite = next((pair_value(pair) for pair in pairs(options) if pair_key(pair) == 'pathRewrite'), None)
+                target_path = ''
+                if target:
+                    parsed_target = urlsplit(target)
+                    if parsed_target.scheme in ('http', 'https') and parsed_target.hostname:
+                        target_path = parsed_target.path or '/'
+                rewrite_pattern, replacement = '', ''
+                rewrite_pairs = pairs(rewrite)
+                if len(rewrite_pairs) == 1:
+                    rewrite_pattern = pair_key(rewrite_pairs[0]) or ''
+                    replacement = literal(pair_value(rewrite_pairs[0])) or ''
+                start, end = context_pair.start_byte, context_pair.end_byte
+                facts.append({
+                    'kind': 'api_proxy', 'name': context, 'route_path': target_path,
+                    'target_name': rewrite_pattern, 'namespace': replacement,
+                    'owner_kind': 'dev_server_proxy', 'owner_name': configuration_root,
+                    'dynamic': not bool(target_path and rewrite_pattern and len(rewrite_pairs) == 1),
+                    'certainty': 'certain' if target_path and rewrite_pattern and len(rewrite_pairs) == 1 else 'uncertain',
+                    'range': _source_span(newlines, start, end),
+                    'text': raw[start:end].decode('utf-8'), 'quality': 'structural',
+                })
+                if len(facts) > 50000:
+                    raise RuntimeError('source request fact limit exceeded')
+        stack.extend(reversed(node.named_children))
+    return facts
+
+
+def _api_request_facts(raw, tree, path):
+    """Capture literal requests made through recognizable HTTP clients only."""
+    facts = _javascript_configuration_facts(raw, tree, path)
+    methods = {'get': 'GET', 'post': 'POST', 'put': 'PUT', 'patch': 'PATCH',
+               'delete': 'DELETE', 'head': 'HEAD', 'options': 'OPTIONS'}
+    clients = {'$_HTTP', '$http', '$axios', 'axios', 'http'}
+    newlines = [index for index, byte in enumerate(raw) if byte == 10]
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == 'call_expression':
+            function = node.child_by_field_name('function')
+            arguments = node.child_by_field_name('arguments')
+            if function is not None and function.type == 'member_expression' and arguments is not None:
+                property_node = function.child_by_field_name('property')
+                object_node = function.child_by_field_name('object')
+                method = raw[property_node.start_byte:property_node.end_byte].decode('utf-8').lower() if property_node else ''
+                client = raw[object_node.start_byte:object_node.end_byte].decode('utf-8') if object_node else ''
+                client_name = client.rsplit('.', 1)[-1].strip()
+                if method in methods and client_name in clients:
+                    args = arguments.named_children
+                    route_node = args[0] if args else None
+                    route = ''
+                    if route_node is not None and route_node.type in ('string', 'template_string'):
+                        literal = raw[route_node.start_byte:route_node.end_byte].decode('utf-8')
+                        quote = literal[:1]
+                        if (quote in ("'", '"') and literal.endswith(quote) and '\\' not in literal):
+                            route = literal[1:-1]
+                        elif quote == '`' and literal.endswith('`') and '${' not in literal:
+                            route = literal[1:-1]
+                    start, end = node.start_byte, node.end_byte
+                    facts.append({
+                        'kind': 'api_request', 'name': route, 'route_path': route,
+                        'http_method': methods[method], 'dynamic': not bool(route),
+                        'certainty': 'certain' if route else 'uncertain',
+                        'range': _source_span(newlines, start, end),
+                        'text': raw[start:end].decode('utf-8'), 'quality': 'structural',
+                    })
+                    if len(facts) > 50000:
+                        raise RuntimeError('source request fact limit exceeded')
+        stack.extend(reversed(node.named_children))
+    return facts
+
+
 def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_languages):
     """Extract static Vue SFC structure; embedded script is syntax-only Tree-sitter."""
     raw.decode('utf-8', errors='strict')
@@ -311,7 +469,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         if block['start_byte'] < verified_block_end:
             raise RuntimeError('SFC parser returned overlapping descriptor and recovered blocks')
         verified_block_end = max(verified_block_end, block['end_byte'])
-    chunks, symbols, block_infos = [], [], []
+    chunks, symbols, block_infos, facts = [], [], [], []
     cursor = 0
     degraded = False
     unknown_preprocess = False
@@ -380,6 +538,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             syntax_error = syntax_error or block_quality == 'syntax_error'
             block_symbols = [_shift_sfc_fragment(symbol, start, span) for symbol in parsed['symbols']]
             block_chunks = [_shift_sfc_fragment(chunk, start, span) for chunk in parsed['chunks']]
+            facts.extend(_shift_sfc_fragment(fact, start, span) for fact in parsed.get('facts', []))
             for chunk in block_chunks:
                 chunk['region'] = region_for(block, block_quality)
             chunks.extend(block_chunks)
@@ -503,6 +662,11 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
                             if symbol['kind'] not in ('sfc_diagnostic',) and
                             symbol['range']['start_byte'] < area['end_byte'] and
                             symbol['range']['end_byte'] > area['start_byte']]
+        chunk['symbols'].extend(
+            ((fact.get('http_method', 'HTTP') + ' ' + fact.get('route_path', 'dynamic route')).strip())
+            for fact in facts if fact['kind'] == 'api_request' and
+            fact['range']['start_byte'] < area['end_byte'] and fact['range']['end_byte'] > area['start_byte']
+        )
     chunks.sort(key=lambda item: item['range']['start_byte'])
     verified_cursor = 0
     for chunk in chunks:
@@ -519,7 +683,8 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     symbols.sort(key=lambda symbol: (symbol['range']['start_byte'], symbol['range']['end_byte'], symbol['kind']))
     return {'parser_version': parser_version, 'sha256': digest, 'byte_length': len(raw),
             'encoding': 'utf-8-bom' if raw.startswith(b'\xef\xbb\xbf') else 'utf-8',
-            'quality': quality, 'symbols': symbols, 'chunks': chunks}
+            'quality': quality, 'symbols': symbols, 'chunks': chunks,
+            'facts': sorted(facts, key=lambda fact: (fact['range']['start_byte'], fact['range']['end_byte'], fact['kind']))}
 def is_text_fallback_path(path):
     basename = Path(path).name.lower()
     return (basename in ('dockerfile', 'containerfile') or basename.startswith(('dockerfile.', 'containerfile.'))
@@ -870,6 +1035,8 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         facts, diagnostics = extract_java_facts(raw, tree, path)
     elif xml_result is not None:
         facts, diagnostics = xml_result['facts'], xml_result['diagnostics']
+    elif language in ('javascript', 'typescript', 'tsx'):
+        facts = _api_request_facts(raw, tree, path)
     facts.sort(key=lambda fact: (fact['range']['start_byte'], fact['range']['end_byte'], fact['kind'], fact.get('name', '')))
     chunks = []
     cursor = 0

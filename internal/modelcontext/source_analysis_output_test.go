@@ -58,3 +58,27 @@ func TestModelSourceAnalysisIsBoundedAndPreservesContinuationCursor(t *testing.T
 	require.Contains(t, output, "&lt;unsafe&gt;&amp;")
 	require.Contains(t, output, cursor)
 }
+
+func TestModelSourceAnalysisPreservesBoundedBusinessFlowFields(t *testing.T) {
+	analysis := modelSourceAnalysis(map[string]interface{}{
+		"facts": []map[string]interface{}{{
+			"kind": "api_request", "route_path": "/api/questionnaire/detail", "http_method": "GET",
+			"super_types": []string{"demo.IQuestionnaireService"}, "quality": "structural",
+		}, map[string]interface{}{
+			"kind": "java_method", "parameter_types": []string{"int", "java.lang.String"},
+			"signature_certain": true, "is_abstract": true, "is_default": false, "quality": "structural",
+		}, map[string]interface{}{
+			"kind": "java_supertype_reference", "name": "Contract", "target_name": "Contract",
+			"certainty": "uncertain", "reason": "Java supertype identity is unresolved across wildcard imports", "quality": "structural",
+		}},
+	})
+	facts := analysis["facts"].([]map[string]interface{})
+	require.Len(t, facts, 3)
+	require.Equal(t, "/api/questionnaire/detail", facts[0]["route_path"])
+	require.Equal(t, "GET", facts[0]["http_method"])
+	require.Equal(t, []string{"demo.IQuestionnaireService"}, facts[0]["super_types"])
+	require.Equal(t, []string{"int", "java.lang.String"}, facts[1]["parameter_types"])
+	require.Equal(t, true, facts[1]["signature_certain"])
+	require.Equal(t, true, facts[1]["is_abstract"])
+	require.Equal(t, "Java supertype identity is unresolved across wildcard imports", facts[2]["reason"])
+}

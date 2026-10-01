@@ -6,7 +6,7 @@ import test from 'node:test'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { JSDOM } from 'jsdom'
 import ts from 'typescript'
-import { sourceFactLabel, sourceQualityLabel } from '../utils/sourceQuality'
+import { sourceFactLabel, sourceQualityLabel, sourceRelationKindLabel } from '../utils/sourceQuality'
 
 const dom = new JSDOM('<html><body></body></html>', { url: 'http://localhost/' })
 for (const key of ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'SVGElement', 'Node']) {
@@ -15,7 +15,7 @@ for (const key of ['window', 'document', 'navigator', 'Element', 'HTMLElement', 
 const require = createRequire(import.meta.url)
 const { createApp, h, nextTick, reactive } = require('vue') as typeof import('vue')
 function testRequire(name: string) {
-  if (name === '@/utils/sourceQuality') return { sourceFactLabel, sourceQualityLabel }
+  if (name === '@/utils/sourceQuality') return { sourceFactLabel, sourceQualityLabel, sourceRelationKindLabel }
   return require(name)
 }
 
@@ -40,12 +40,18 @@ test('published source is escaped, read-only, and links the selected symbol to t
     content: 'class Service {\r\n String getPushSchedule() { return "<img src=x onerror=alert(1)>"; }\r\n}',
     symbols: [{ kind: 'method', name: 'getPushSchedule', qualified_name: 'Service.getPushSchedule', range: { start_line: 2, end_line: 2 },
       region: { kind: 'script', language: 'ts', quality: 'structural', external_source: './api.js', external_status: 'unavailable' } }],
-    facts: [{ kind: 'java_mapper_method', method_name: 'getPushSchedule', quality: 'structural', range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 } }],
+    facts: [
+      { kind: 'java_mapper_method', method_name: 'getPushSchedule', quality: 'structural', range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 } },
+      { kind: 'api_request', route_path: '/api/attendance/push-schedule', http_method: 'GET', quality: 'structural', range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 } },
+      { kind: 'java_supertype_reference', name: 'Contract', target_name: 'Contract', reference_kind: 'implements', certainty: 'uncertain', reason: 'Java supertype identity is unresolved across wildcard imports', quality: 'structural', range: { start_byte: 10, end_byte: 18, start_line: 2, end_line: 2 } },
+    ],
     diagnostics: [{ code: 'statement_id_duplicate', message: 'Mapper statement id is duplicated', range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 } }],
     relations: [
       { id: 'relation-one', kind: 'mapper_statement', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'getPushSchedule', from_range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 }, to_file_id: 'file-one', to_version_id: 'version-one', to_path: 'src/Service.java', to_key: 'statement', to_range: { start_byte: 21, end_byte: 35, start_line: 2, end_line: 2 }, determinacy: 'certain', quality: 'structural' },
       { id: 'relation-two', kind: 'mapper_statement', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'getPushSchedule', from_range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 }, to_file_id: 'file-xml', to_version_id: 'version-xml', to_path: 'src/mapper/ServiceMapper.xml', to_key: 'statement', to_range: { start_byte: 42, end_byte: 90, start_line: 3, end_line: 3 }, determinacy: 'certain', quality: 'structural' },
       { id: 'relation-uncertain', kind: 'mapper_statement', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'possibleMapper', from_range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 }, to_file_id: 'file-xml', to_version_id: 'version-xml', to_path: 'src/mapper/ServiceMapper.xml', to_key: 'ambiguous', to_range: { start_byte: 42, end_byte: 90, start_line: 3, end_line: 3 }, determinacy: 'uncertain', quality: 'partial', resolution_reason: 'ambiguous mapper method' },
+      { id: 'relation-supertype-uncertain', kind: 'type_supertype', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'app.Worker -> Contract', from_range: { start_byte: 10, end_byte: 18, start_line: 2, end_line: 2 }, to_file_id: '', to_version_id: '', to_path: '', to_key: 'left.Contract', to_range: { start_byte: 0, end_byte: 0, start_line: 0, end_line: 0 }, determinacy: 'uncertain', quality: 'structural', resolution_reason: 'Java supertype identity is unresolved across wildcard imports' },
+      { id: 'relation-route-uncertain', kind: 'http_route', from_file_id: 'file-one', from_version_id: 'version-one', from_path: 'src/Service.java', from_key: 'GET /api/attendance/push-schedule.do', from_range: { start_byte: 10, end_byte: 20, start_line: 2, end_line: 2 }, to_key: 'demo.AttendanceController#getPushSchedule /api/attendance/push-schedule', to_range: { start_byte: 0, end_byte: 0, start_line: 0, end_line: 0 }, determinacy: 'uncertain', quality: 'structural', resolution_reason: 'legacy .do route suffix matching is not verified by source configuration' },
     ],
     relations_truncated: true, relations_next_cursor: 'opaque-next' }
   const sourceModule = compileSFC(path, (name: string) => {
@@ -76,6 +82,9 @@ test('published source is escaped, read-only, and links the selected symbol to t
     assert.ok(host.textContent?.includes('a'.repeat(40)))
     assert.ok(host.textContent?.includes('<img src=x onerror=alert(1)>'))
     assert.ok(host.textContent?.includes('java_mapper_method'))
+    assert.ok(host.textContent?.includes('GET /api/attendance/push-schedule'))
+    assert.ok(host.textContent?.includes('Java supertype identity is unresolved across wildcard imports'))
+    assert.ok(host.textContent?.includes('HTTP 请求 → Spring 映射'))
     assert.ok(host.textContent?.includes('statement_id_duplicate'))
     assert.ok(host.textContent?.includes('Mapper statement id is duplicated'))
     assert.equal(host.querySelector('img'), null)
@@ -92,12 +101,16 @@ test('published source is escaped, read-only, and links the selected symbol to t
     const uncertainRelation = Array.from(host.querySelectorAll<HTMLLIElement>('.source-relations li')).find(li => li.textContent?.includes('ambiguous mapper method'))
     assert.ok(uncertainRelation)
     assert.equal(uncertainRelation.querySelector('button'), null, 'uncertain endpoints must not be presented as a verified navigation target')
+    const unresolvedSupertype = Array.from(host.querySelectorAll<HTMLLIElement>('.source-relations li')).find(li => li.textContent?.includes('left.Contract'))
+    assert.ok(unresolvedSupertype)
+    assert.ok(unresolvedSupertype.textContent?.includes('Java supertype identity is unresolved across wildcard imports'))
+    assert.equal(unresolvedSupertype.querySelector('button'), null, 'snapshot candidates with unresolved identity must not be navigable')
     const moreRelations = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('读取更多关系'))
     assert.ok(moreRelations)
     moreRelations.click()
     for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
     assert.deepEqual(requests[1], ['file-one', 'version-one', 'opaque-next'])
-    assert.equal(host.querySelectorAll('.source-relations li').length, 3)
+    assert.equal(host.querySelectorAll('.source-relations li').length, 5)
     const crossFile = Array.from(host.querySelectorAll<HTMLButtonElement>('.source-relations button')).find(b => b.textContent?.includes('src/mapper/ServiceMapper.xml'))
     assert.ok(crossFile, 'cross-file relation should offer a fixed-version target-range action')
     crossFile.click()
@@ -173,4 +186,15 @@ test('non-structural source quality is not mislabeled as a syntax error', async 
     assert.ok(host.textContent?.includes('mapper_namespace_missing'))
     assert.ok(!host.textContent?.includes('语法错误'))
   } finally { app.unmount(); host.remove() }
+})
+
+test('business flow fact and relation labels preserve route semantics and uncertainty', () => {
+  assert.equal(sourceFactLabel({ kind: 'api_request', route_path: '/api/questionnaire/detail', http_method: 'GET' }),
+    'GET /api/questionnaire/detail')
+  assert.equal(sourceFactLabel({ kind: 'spring_mapping', route_path: '/multi', http_methods: ['GET', 'POST'], http_methods_specified: true, http_methods_certain: true }),
+    'GET|POST /multi')
+  assert.equal(sourceFactLabel({ kind: 'spring_mapping', route_path: '/dynamic', http_methods_specified: true, http_methods_certain: false }),
+    'HTTP? /dynamic')
+  assert.equal(sourceRelationKindLabel('method_call'), 'Java 调用 → 声明目标')
+  assert.equal(sourceRelationKindLabel('unknown_relation'), 'unknown_relation')
 })

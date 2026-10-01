@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { readSourceWikiEvidence } from '@/api/wiki'
 import { getSourceFile, type SourceCodeRelation, type SourceFact, type SourceFileView, type SourceRange } from '@/api/knowledge-base'
 import SourceRegionBadge from '@/components/SourceRegionBadge.vue'
-import { sourceFactLabel, sourceQualityLabel } from '@/utils/sourceQuality'
+import { sourceFactLabel, sourceQualityLabel, sourceRelationKindLabel } from '@/utils/sourceQuality'
 
 const props = defineProps<{ knowledgeId: string; fileVersionId?: string; wikiEvidence?: { kbId: string; slug: string; id: string; version: number; commitSHA: string }; evidenceRange?: SourceRange }>()
 const file = ref<SourceFileView | null>(null)
@@ -41,6 +41,9 @@ function factLabel(fact: SourceFact) {
 }
 function relationLabel(relation: SourceCodeRelation) {
   return relation.to_key ? `${relation.from_key} → ${relation.to_key}` : relation.from_key
+}
+function relationKindLabel(kind: string) {
+  return sourceRelationKindLabel(kind)
 }
 function hasNavigableRange(range?: SourceRange) {
   return !!range && range.end_byte > range.start_byte && range.start_line > 0 && range.end_line >= range.start_line
@@ -193,8 +196,10 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
           <li v-for="(fact, index) in file.facts" :key="`${fact.kind}:${fact.range?.start_byte ?? index}`">
             <code>{{ fact.kind }}</code> · {{ factLabel(fact) }}
             <span v-if="fact.range"> · L{{ fact.range.start_line }}–{{ fact.range.end_line }}</span>
-            <span v-if="fact.dynamic"> · 动态 SQL</span>
+            <span v-if="fact.dynamic"> · 动态/未解析</span>
             <span v-if="fact.certainty"> · {{ fact.certainty === 'certain' ? '确定' : '不确定' }}</span>
+            <span v-if="fact.reason"> · {{ fact.reason }}</span>
+            <span v-if="fact.super_types?.length"> · 父类型: {{ fact.super_types.join(', ') }}</span>
             <span v-if="fact.result_map_refs?.length"> · resultMap: {{ fact.result_map_refs.join(', ') }}</span>
             <span v-if="fact.include_refs?.length"> · include: {{ fact.include_refs.join(', ') }}</span>
           </li>
@@ -202,7 +207,7 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
         <p v-if="file.relations?.length || file.relations_truncated" class="source-analysis-heading">源码关系（{{ file.relations?.length || 0 }}）</p>
         <ul v-if="file.relations?.length" class="source-relations">
           <li v-for="relation in file.relations" :key="relation.id">
-            <code>{{ relation.kind }}</code> · {{ relationLabel(relation) }} · {{ relation.determinacy }} / {{ relation.quality }}
+            <code>{{ relationKindLabel(relation.kind) }}</code> · {{ relationLabel(relation) }} · {{ relation.determinacy }} / {{ relation.quality }}
             <span v-if="relation.resolution_reason"> · {{ relation.resolution_reason }}</span>
             <button v-if="relationOppositeEndpoint(relation)" type="button" :disabled="targetLoading" @click="openRelationTarget(relation)">
               {{ targetLoading ? '正在读取关联文件…' : relationNavigationLabel(relation) }}
