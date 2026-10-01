@@ -146,7 +146,7 @@ func (s *Scheduler) addEntryLocked(ds *types.DataSource) error {
 	return nil
 }
 
-const defaultSourceSyncSchedule = "0 0 * * * *"
+const DefaultSourceSyncSchedule = "0 0 * * * *"
 
 // scheduledSync keeps the historical opt-in scheduling behavior for document
 // sources while giving source-mode repositories the agreed hourly default.
@@ -163,7 +163,7 @@ func scheduledSync(ds *types.DataSource) (string, bool) {
 		return ds.SyncSchedule, false
 	}
 	if ds.SyncSchedule == "" {
-		return defaultSourceSyncSchedule, true
+		return DefaultSourceSyncSchedule, true
 	}
 	return ds.SyncSchedule, true
 }

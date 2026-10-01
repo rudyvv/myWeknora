@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/utils"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -308,6 +311,193 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 		})
 	})
 	return shouldDispatch, deliveryGeneration, err
+}
+
+type sourceGitLabWebhookConfigRow struct {
+	DataSourceID     string     `gorm:"column:data_source_id"`
+	TenantID         uint64     `gorm:"column:tenant_id"`
+	Enabled          bool       `gorm:"column:enabled"`
+	SecretCiphertext string     `gorm:"column:secret_ciphertext"`
+	LastReceivedAt   *time.Time `gorm:"column:last_received_at"`
+	LastEventID      string     `gorm:"column:last_event_id"`
+}
+
+func (r *SyncLogRepository) GetGitLabWebhookConfig(ctx context.Context, dataSourceID string, tenantID uint64) (*types.GitLabWebhookConfig, error) {
+	var row sourceGitLabWebhookConfigRow
+	err := r.db.WithContext(ctx).Table("source_gitlab_webhook_configs").
+		Where("data_source_id=? AND tenant_id=?", dataSourceID, tenantID).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return &types.GitLabWebhookConfig{DataSourceID: dataSourceID, TenantID: tenantID}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	secret, err := utils.DecryptStoredSecret(row.SecretCiphertext)
+	if err != nil {
+		return nil, err
+	}
+	return &types.GitLabWebhookConfig{DataSourceID: row.DataSourceID, TenantID: row.TenantID, Enabled: row.Enabled,
+		Secret: secret, LastReceivedAt: row.LastReceivedAt, LastEventID: row.LastEventID}, nil
+}
+
+func (r *SyncLogRepository) SetGitLabWebhookConfig(ctx context.Context, dataSourceID string, tenantID uint64, update types.GitLabWebhookUpdate) error {
+	if dataSourceID == "" || tenantID == 0 {
+		return errors.New("GitLab webhook identity is invalid")
+	}
+	var encryptedSecret *string
+	if update.Secret != nil {
+		encrypted, err := utils.EncryptAESGCM(*update.Secret, utils.GetAESKey())
+		if err != nil {
+			return err
+		}
+		encryptedSecret = &encrypted
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var source types.DataSource
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND deleted_at IS NULL", dataSourceID, tenantID).Take(&source).Error; err != nil {
+			return err
+		}
+		row := sourceGitLabWebhookConfigRow{DataSourceID: dataSourceID, TenantID: tenantID}
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("source_gitlab_webhook_configs").
+			Where("data_source_id=? AND tenant_id=?", dataSourceID, tenantID).Take(&row).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if update.ClearSecret {
+			row.SecretCiphertext = ""
+		} else if encryptedSecret != nil {
+			row.SecretCiphertext = *encryptedSecret
+		}
+		if update.Enabled != nil {
+			row.Enabled = *update.Enabled
+		}
+		if update.ClearSecret {
+			row.Enabled = false
+		}
+		if row.Enabled && row.SecretCiphertext == "" {
+			return errors.New("a shared secret is required to enable the GitLab webhook")
+		}
+		if row.Enabled {
+			secret, decryptErr := utils.DecryptStoredSecret(row.SecretCiphertext)
+			if decryptErr != nil {
+				return decryptErr
+			}
+			if secret == "" {
+				return errors.New("a shared secret is required to enable the GitLab webhook")
+			}
+		}
+		row.DataSourceID, row.TenantID = dataSourceID, tenantID
+		return tx.Table("source_gitlab_webhook_configs").Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "data_source_id"}},
+			DoUpdates: clause.Assignments(map[string]interface{}{
+				"tenant_id": row.TenantID, "enabled": row.Enabled, "secret_ciphertext": row.SecretCiphertext,
+				"updated_at": time.Now().UTC(),
+			}),
+		}).Create(&row).Error
+	})
+}
+
+// RegisterGitLabPushTrigger validates the currently persisted source and
+// webhook config, deduplicates the receipt, and registers a coordinator run in
+// the same transaction. The caller has already matched the payload against the
+// registered project/ref; this method rechecks the persisted identity and
+// authenticated secret to fence concurrent config changes.
+func (r *SyncLogRepository) RegisterGitLabPushTrigger(
+	ctx context.Context,
+	ds *types.DataSource,
+	log *types.SyncLog,
+	event types.GitLabPushEvent,
+	authenticatedSecret string,
+) (shouldDispatch bool, duplicate bool, deliveryGeneration int64, err error) {
+	if ds == nil || log == nil || ds.ID == "" || log.DataSourceID != ds.ID || log.TenantID != ds.TenantID ||
+		event.DeliveryID == "" || authenticatedSecret == "" {
+		return false, false, 0, errors.New("GitLab webhook trigger identity is invalid")
+	}
+	if log.ID == "" {
+		log.ID = uuid.NewString()
+	}
+	log.Status = types.SyncLogStatusQueued
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		state, txErr := r.ensureSourceSyncState(tx, ds)
+		if txErr != nil {
+			return txErr
+		}
+		current, txErr := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+		if txErr != nil {
+			return txErr
+		}
+		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) || !sourceStateMatchesPersistedDataSource(state, current) {
+			return datasource.ErrGitLabWebhookUnauthorized
+		}
+		if current.Type != types.ConnectorTypeGitLab || current.Status != types.DataSourceStatusActive || !sourceModeEnabled(current) {
+			return datasource.ErrDataSourceNotActive
+		}
+		var webhook sourceGitLabWebhookConfigRow
+		if txErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("source_gitlab_webhook_configs").
+			Where("data_source_id=? AND tenant_id=?", ds.ID, ds.TenantID).Take(&webhook).Error; txErr != nil {
+			if errors.Is(txErr, gorm.ErrRecordNotFound) {
+				return datasource.ErrDataSourceNotActive
+			}
+			return txErr
+		}
+		storedSecret, txErr := utils.DecryptStoredSecret(webhook.SecretCiphertext)
+		if txErr != nil {
+			return txErr
+		}
+		want, got := sha256.Sum256([]byte(storedSecret)), sha256.Sum256([]byte(authenticatedSecret))
+		if !webhook.Enabled || subtle.ConstantTimeCompare(want[:], got[:]) != 1 {
+			return datasource.ErrDataSourceNotActive
+		}
+		insert := tx.Exec(`INSERT INTO source_gitlab_webhook_deliveries
+			(data_source_id,tenant_id,delivery_id,event_id,ref,before_sha,after_sha,received_at)
+			VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(data_source_id,delivery_id) DO NOTHING`,
+			ds.ID, ds.TenantID, event.DeliveryID, event.EventID, event.Ref, event.Before, event.After, time.Now().UTC())
+		if insert.Error != nil {
+			return insert.Error
+		}
+		if insert.RowsAffected == 0 {
+			now := time.Now().UTC()
+			if txErr := tx.Table("source_gitlab_webhook_configs").Where("data_source_id=? AND tenant_id=?", ds.ID, ds.TenantID).
+				Updates(map[string]interface{}{"last_received_at": now, "last_event_id": event.EventID, "updated_at": now}).Error; txErr != nil {
+				return txErr
+			}
+			duplicate = true
+			return nil
+		}
+		now := time.Now().UTC()
+		if txErr := tx.Table("source_gitlab_webhook_configs").Where("data_source_id=? AND tenant_id=?", ds.ID, ds.TenantID).
+			Updates(map[string]interface{}{"last_received_at": now, "last_event_id": event.EventID, "updated_at": now}).Error; txErr != nil {
+			return txErr
+		}
+		if txErr := r.invalidateSourceGeneration(tx, state, current); txErr != nil {
+			return txErr
+		}
+		if txErr := tx.Create(log).Error; txErr != nil {
+			return txErr
+		}
+		if previous := derefSourceID(state.PendingSyncLogID); previous != "" {
+			if txErr := cancelSourceRunWithPhaseTx(tx, previous, "a newer source trigger is waiting", "superseded"); txErr != nil {
+				return txErr
+			}
+		}
+		phase := "queued"
+		if derefSourceID(state.ActiveSyncLogID) != "" {
+			phase = "waiting_for_catch_up"
+		}
+		deliveryGeneration = state.PendingDeliveryGeneration + 1
+		state.PendingSyncLogID = stringPointer(log.ID)
+		state.PendingDeliveryGeneration = deliveryGeneration
+		state.PendingTrigger = "gitlab_webhook"
+		if txErr := tx.Exec(`INSERT INTO source_sync_runs(sync_log_id,data_source_id,tenant_id,config_generation,delivery_generation,trigger,phase,updated_at)
+			VALUES(?,?,?,?,?,?,?,?)`, log.ID, ds.ID, ds.TenantID, state.ConfigGeneration, deliveryGeneration, "gitlab_webhook", phase, now).Error; txErr != nil {
+			return txErr
+		}
+		shouldDispatch = state.ActiveSyncLogID == nil
+		return sourceStateUpdate(tx, state, map[string]any{
+			"pending_sync_log_id": log.ID, "pending_delivery_generation": deliveryGeneration, "pending_trigger": "gitlab_webhook",
+		})
+	})
+	return shouldDispatch, duplicate, deliveryGeneration, err
 }
 
 // IsCurrentSourceDelivery validates a queued source wake-up without creating

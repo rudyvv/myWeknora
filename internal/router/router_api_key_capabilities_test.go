@@ -374,6 +374,9 @@ func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
 		{http.MethodGet, "/api/v1/embed-channels", types.APIKeyCapabilityManageChannels},
 		{http.MethodGet, "/api/v1/im-channels", types.APIKeyCapabilityManageChannels},
 		{http.MethodGet, "/api/v1/datasource", types.APIKeyCapabilityManageDataSources},
+		{http.MethodGet, "/api/v1/datasource/:id/gitlab-webhook", types.APIKeyCapabilityManageDataSources},
+		{http.MethodPut, "/api/v1/datasource/:id/gitlab-webhook", types.APIKeyCapabilityManageDataSources},
+		{http.MethodPost, "/api/v1/datasource/:id/gitlab-webhook/test", types.APIKeyCapabilityManageDataSources},
 		{http.MethodGet, "/api/v1/models/weknoracloud/status", types.APIKeyCapabilityManageModels},
 	}
 

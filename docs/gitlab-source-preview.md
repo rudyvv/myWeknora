@@ -44,3 +44,13 @@
 ![源码预览管理界面（夹具数据）](images/gitlab-source-preview-t01.png)
 
 前端类型检查及编辑器 10 项测试通过；源码服务/HTTP 权限、文档入库及普通 Wiki 后处理与修订的针对性回归通过。最终全量前端测试 586/587 通过，CLI POSIX-shell 测试因 Windows 缺少 `/bin/sh` 失败。独立规范与 Spec 双轴复审均无剩余问题。全量 Go 测试已执行但未全通过，完整分类见 [T01 验证记录](plans/gitlab-code-wiki-rag-t01-validation.md)。源码解析及真实双索引发布属于 T02，此处数据库替身仅验证预检行为。
+
+## 可选 Push Hook（T20）
+
+源码模式的数据源卡片提供 Push Hook 配置和测试。管理员在界面输入共享 Secret 并启用回调后，仍需**手动**进入已绑定 GitLab 项目的 Settings → Webhooks：粘贴界面生成的完整回调 URL，仅勾选 Push events，并填写相同的 Secret。WeKnora 不调用 GitLab Admin API，不会创建或管理项目 Hook；MR、Issue、Pipeline 事件不在范围内。
+
+后端权威回调路径为 `/api/v1/gitlab/webhooks/push`。API 返回相对路径，界面用当前站点 origin 和已有 API/base-path 配置组成绝对 URL。例如部署在 `https://example.test/weknora/` 时，复制的地址为 `https://example.test/weknora/api/v1/gitlab/webhooks/push`。该地址不会从任意 Host 或 X-Forwarded 请求头写入配置。
+
+GitLab Push Hook 由 `X-Gitlab-Event: Push Hook` 和 `X-Gitlab-Token` 认证。接收端只用 payload 的 project ID 与 `refs/heads/<branch>` 精确匹配当前活动、未暂停的 GitLab 源码数据源；payload 不能选择 workspace、数据源或知识库，也不能指定同步 SHA。Webhook ID、幂等键或事件 UUID用于投递去重；回调先将收据和既有源码同步协调器中的触发器原子持久化，再快速返回。Worker 随后读取当前已注册分支 HEAD。无有效入站收据时，界面保持“未验证”。
+
+定时对账仍保留：源码模式空 `sync_schedule` 默认每小时运行，也可用数据源同步频率配置调整。它处理 GitLab 批量推送或丢失 Hook 等未通知变化，不依赖事件 payload 的提交范围。连接测试分别显示已注册项目/分支的只读读取结果和入站收据状态；出站读取成功不会被当作入站可达性证明。实际 GitLab 主机到部署回调的公网/内网可达性、Hook 交付和版本兼容仍须在部署环境中核验。

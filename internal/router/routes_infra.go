@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Tencent/WeKnora/internal/handler"
+	"github.com/Tencent/WeKnora/internal/types"
 )
 
 // Models are tenant-wide infrastructure (LLM credentials, embeddings,
@@ -319,6 +320,9 @@ func RegisterDataSourceRoutes(
 
 		// Connection and resource management — Admin+
 		ds.POST("/:id/validate", g.Admin(), handler.ValidateConnection)
+		ds.GET("/:id/gitlab-webhook", g.Admin(), handler.GetGitLabWebhook)
+		ds.PUT("/:id/gitlab-webhook", g.Admin(), handler.UpdateGitLabWebhook)
+		ds.POST("/:id/gitlab-webhook/test", g.Admin(), handler.TestGitLabWebhook)
 		ds.GET("/:id/resources", g.Admin(), handler.ListAvailableResources)
 		ds.POST("/:id/resource-ancestors", g.Admin(), handler.ResolveResourceAncestors)
 		ds.POST("/:id/source-preview", g.Admin(), handler.PreviewSource)
@@ -332,6 +336,16 @@ func RegisterDataSourceRoutes(
 		ds.GET("/:id/logs", g.Viewer(), handler.GetSyncLogs)
 		ds.GET("/logs/:log_id", g.Viewer(), handler.GetSyncLog)
 	}
+}
+
+// RegisterGitLabWebhookRoutes mounts the shared-secret authenticated callback
+// before global WeKnora authentication. Project and tenant identity are
+// resolved exclusively from persisted active source configurations.
+func RegisterGitLabWebhookRoutes(r *gin.Engine, h *handler.DataSourceHandler) {
+	if h == nil {
+		return
+	}
+	r.POST(types.GitLabWebhookCallbackPath, h.ReceiveGitLabPush)
 }
 
 // RegisterWeDriveAgentRoutes exposes only self-authenticated Agent calls. The

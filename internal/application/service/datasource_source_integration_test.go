@@ -2453,6 +2453,9 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	sourceWikiOutboxMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000109_source_wiki_outbox_acceptance.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(sourceWikiOutboxMigration)).Error)
+	gitLabWebhookMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000110_source_gitlab_webhooks.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(gitLabWebhookMigration)).Error)
 	var parserAddress *url.URL
 	var parser *exec.Cmd
 	if externalParserURL != "" {

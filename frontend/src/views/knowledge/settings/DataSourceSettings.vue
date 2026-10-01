@@ -16,6 +16,7 @@ import DataSourceEditorDialog from './DataSourceEditorDialog.vue'
 import DataSourceSyncLogs from './DataSourceSyncLogs.vue'
 import { syncLogDisplayStatus } from './syncLogDisplay'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
+import GitLabWebhookDialog from './GitLabWebhookDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ kbId: string }>()
@@ -38,6 +39,8 @@ const logsDsId = ref('')
 const logsDsName = ref('')
 const logsDsType = ref('')
 const pollTimer = ref<number | null>(null)
+const gitLabWebhookVisible = ref(false)
+const gitLabWebhookDataSource = ref<DataSource | null>(null)
 
 function stopPolling() {
   if (pollTimer.value !== null) {
@@ -256,6 +259,11 @@ function isSyncRunning(ds: DataSource) {
   return ds.latest_sync_log?.status === 'running'
 }
 
+function openGitLabWebhook(ds: DataSource) {
+  gitLabWebhookDataSource.value = ds
+  gitLabWebhookVisible.value = true
+}
+
 function hasPendingSync(ds: DataSource) {
   return ds.latest_sync_log?.status === 'running' || ds.latest_sync_log?.status === 'queued'
 }
@@ -318,6 +326,12 @@ onBeforeUnmount(stopPolling)
                     <t-dropdown-menu>
                       <t-dropdown-item v-if="canManageDataSource && !isWeDriveDataSource(ds)" @click="openEdit(ds)">
                         <t-icon name="edit" /> {{ t('datasource.edit') }}
+                      </t-dropdown-item>
+                      <t-dropdown-item
+                        v-if="canManageDataSource && ds.type === 'gitlab' && isSourceMode(ds)"
+                        @click="openGitLabWebhook(ds)"
+                      >
+                        <t-icon name="link" /> {{ t('datasource.gitlabWebhook.manage') }}
                       </t-dropdown-item>
                       <t-dropdown-item v-else-if="canManageDataSource" @click="openWeDriveSync">
                         <t-icon name="setting" /> 在企业微信微盘同步中管理
@@ -435,6 +449,11 @@ onBeforeUnmount(stopPolling)
       :data-source-id="logsDsId"
       :data-source-name="logsDsName"
       :data-source-type="logsDsType"
+    />
+
+    <GitLabWebhookDialog
+      v-model:visible="gitLabWebhookVisible"
+      :data-source="gitLabWebhookDataSource"
     />
   </div>
 </template>
