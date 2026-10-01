@@ -93,3 +93,9 @@ T06 冻结 `309f1958` 双轴审查 Spec0、Standards硬0/判断2P3；根独立 P
 T12 `c87d56d5` 完成双轴：Standards硬0/判断2P3，Spec1P2（必需path头/最小正文不可能容纳于模型预算时，preview仍CanSync=true）。UTF16显式失败属于已批准合同，不报新finding。root两项真实HTTP、Go source、三项独立PG PASS30.298s；冻结树保持干净至验证结束。P2已交原对话先红后绿修复，不集成/关票，详见 `gitlab-code-wiki-rag-t12-c87d56d5-review.md`。只发布验收里程碑到GitHub，不写过程流水。
 
 最新游标：T20 `f240afa9-c9aa-4f0d-9d1d-2da1a28a568c:3`；T11 `6e63683c-2884-4658-ad68-24f56513ae9d:3`；T12 `8c8c4f1d-1fe3-4463-9e9f-07cba9ba876a:2`。专用 `weknora-source-batch-two-test` 因Docker中断曾退出，仅重新启动它且pg_isready通过；仍用127.0.0.1:57521/source_test，无旧凭据读取，共享应用不动。
+
+2026-10-01 再次继续：三个原执行对话均已处于 active，未重复启动或创建新对话。T11 已通过真实锁定 runtime 得到 Vue API facts 缺失的红测，继续 AST/关系实现；其早先环境缺依赖与测试语法错误已自行纠正，不能记产品回归。T20 继续复用持久串行同步队列，root 已答复回调合同：不新增全局 PUBLIC_API_BASE_URL；服务端给权威相对 callback path，UI/文档按既有 API base 与部署地址组成保留代理前缀的绝对 URL。出站只读项目/ref 连通和入站合法 Hook 接收分开展示，无真实入站交付显示未验证，不自动创建 GitLab Hook。
+
+T12 仍修复 c87d56d5 的唯一阻断 P2；root 进一步限定 preflight 只提前拒绝已确定不可行的必需路径头/最小正文预算，复用范围扫描，不将 preview 扩成全仓解析或 Embedding。等待针对性红绿、完整干净 SHA 后双轴复审；同一旧 SHA 不重审。三个后续任务仍分别 T20/#28、T11/#19、T12/#20，累计11/22，不因 active 或部分测试通过计完成。
+
+当前游标：T20 `f240afa9-c9aa-4f0d-9d1d-2da1a28a568c:14`；T11 `6e63683c-2884-4658-ad68-24f56513ae9d:18`；T12 `8c8c4f1d-1fe3-4463-9e9f-07cba9ba876a:8`。root HEAD fc574d4b 为仅本地审查文档提交，后续随实际验收推送，不为过程流水单独调用 GitHub。
