@@ -210,6 +210,85 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertEqual((call['receiver'], call['name'], call['target_name'], call['certainty'], call['dynamic']),
                          ('mapper', 'find', 'Mapper', 'uncertain', True))
 
+    def test_spring_method_sets_preserve_restriction_and_unknown_methods(self):
+        raw = (b'package demo; '
+               b'import org.springframework.web.bind.annotation.RequestMapping; '
+               b'import org.springframework.web.bind.annotation.RequestMethod; '
+               b'@RequestMapping(path="/multi", method={RequestMethod.GET,RequestMethod.POST}) '
+               b'class MultiController { } '
+               b'class AnyController { @RequestMapping("/any") Object any() { return null; } } '
+               b'class DynamicController { @RequestMapping(path="/dynamic", method=resolveMethods()) '
+               b'Object dynamic() { return null; } }')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/Mappings.java', 'language': 'java',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        mappings = {fact.get('owner_name') or fact['name']: fact for fact in result['facts']
+                    if fact['kind'] == 'spring_mapping'}
+        multi = mappings['MultiController']
+        self.assertEqual(multi['route_path'], '/multi')
+        self.assertEqual(multi['http_methods'], ['GET', 'POST'])
+        self.assertEqual(multi['http_method'], '')
+        self.assertTrue(multi['http_methods_specified'])
+        self.assertTrue(multi['http_methods_certain'])
+        self.assertEqual((multi['certainty'], multi['dynamic']), ('certain', False))
+        any_mapping = mappings['any']
+        self.assertEqual(any_mapping['route_path'], '/any')
+        self.assertFalse(any_mapping['http_methods_specified'])
+        dynamic = mappings['dynamic']
+        self.assertEqual(dynamic['route_path'], '/dynamic')
+        self.assertTrue(dynamic['http_methods_specified'])
+        self.assertFalse(dynamic['http_methods_certain'])
+        self.assertEqual((dynamic['certainty'], dynamic['dynamic']), ('uncertain', True))
+
+    def test_java_method_signatures_preserve_parameter_types_and_uncertainty(self):
+        raw = (b'package demo; public interface Contract { '
+               b'void run(int value); default void run(String value) {} '
+               b'void unresolved(MissingType value); void generic(java.util.List<String> value); '
+               b'void array(int[] values); void spread(String... values); }')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/Contract.java', 'language': 'java',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        methods = [fact for fact in result['facts']
+                   if fact['kind'] == 'java_method' and fact['namespace'] == 'demo.Contract']
+        int_run = next(fact for fact in methods if fact['name'] == 'run' and fact['parameter_types'] == ['int'])
+        self.assertTrue(int_run['signature_certain'])
+        self.assertFalse(int_run['is_default'])
+        default_run = next(fact for fact in methods if fact['name'] == 'run' and
+                           fact['parameter_types'] == ['java.lang.String'])
+        self.assertTrue(default_run['signature_certain'])
+        self.assertTrue(default_run['is_default'])
+        unresolved = next(fact for fact in methods if fact['name'] == 'unresolved')
+        self.assertEqual(unresolved['parameter_types'], ['MissingType'])
+        self.assertFalse(unresolved['signature_certain'])
+        generic = next(fact for fact in methods if fact['name'] == 'generic')
+        self.assertFalse(generic['signature_certain'])
+        array = next(fact for fact in methods if fact['name'] == 'array')
+        self.assertEqual(array['parameter_types'], ['int[]'])
+        self.assertTrue(array['signature_certain'])
+        spread = next(fact for fact in methods if fact['name'] == 'spread')
+        self.assertEqual(spread['parameter_types'], ['java.lang.String[]'])
+        self.assertTrue(spread['signature_certain'])
+
+    def test_spring_mapping_mixed_known_and_dynamic_methods_remain_uncertain(self):
+        raw = (b'import org.springframework.web.bind.annotation.RequestMapping; '
+               b'import org.springframework.web.bind.annotation.RequestMethod; '
+               b'class MixedController { @RequestMapping(path="/mixed", method={RequestMethod.GET, resolve()}) '
+               b'Object mixed() { return null; } }')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/MixedController.java', 'language': 'java',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        mapping = next(fact for fact in result['facts'] if fact['kind'] == 'spring_mapping')
+        self.assertEqual(mapping['route_path'], '/mixed')
+        self.assertTrue(mapping['http_methods_specified'])
+        self.assertFalse(mapping['http_methods_certain'])
+        self.assertEqual((mapping['certainty'], mapping['dynamic']), ('uncertain', True))
+
     def test_static_frontend_prefix_and_proxy_are_separate_evidence(self):
         prefix_raw = (b"const configure = () => process.env.NODE_ENV === 'production' "
                       b"? config.url = '/prod/api' + config.url "
@@ -239,6 +318,7 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertEqual(len(proxies), 1)
         self.assertEqual((proxies[0]['name'], proxies[0]['route_path'], proxies[0]['target_name'], proxies[0]['namespace']),
                          ('/api', '/api', '^/apiroot', ''))
+        self.assertEqual(proxies[0]['owner_name'], '.')
         span = proxies[0]['range']
         self.assertEqual(proxy_raw[span['start_byte']:span['end_byte']].decode(), proxies[0]['text'])
 

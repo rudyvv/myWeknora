@@ -184,6 +184,10 @@ test('non-structural source quality is not mislabeled as a syntax error', async 
 test('business flow fact and relation labels preserve route semantics and uncertainty', () => {
   assert.equal(sourceFactLabel({ kind: 'api_request', route_path: '/api/questionnaire/detail', http_method: 'GET' }),
     'GET /api/questionnaire/detail')
+  assert.equal(sourceFactLabel({ kind: 'spring_mapping', route_path: '/multi', http_methods: ['GET', 'POST'], http_methods_specified: true, http_methods_certain: true }),
+    'GET|POST /multi')
+  assert.equal(sourceFactLabel({ kind: 'spring_mapping', route_path: '/dynamic', http_methods_specified: true, http_methods_certain: false }),
+    'HTTP? /dynamic')
   assert.equal(sourceRelationKindLabel('method_call'), 'Java 调用 → 声明目标')
   assert.equal(sourceRelationKindLabel('unknown_relation'), 'unknown_relation')
 })

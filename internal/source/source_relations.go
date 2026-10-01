@@ -3,6 +3,8 @@ package source
 import (
 	"encoding/json"
 	"fmt"
+	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -25,10 +27,12 @@ type factOwner struct {
 }
 
 type sourceRouteEndpoint struct {
-	owner     factOwner
-	path      string
-	method    string
-	uncertain bool
+	owner            factOwner
+	path             string
+	methods          []string
+	methodRestricted bool
+	methodUncertain  bool
+	uncertain        bool
 }
 
 type sourceRequestRoute struct {
@@ -287,7 +291,7 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 	implementersByType := map[string][]factOwner{}
 	for _, declarations := range typeDeclarations {
 		for _, declaration := range declarations {
-			if declaration.fact.Certainty == "uncertain" {
+			if declaration.fact.Certainty == "uncertain" || declaration.fact.OwnerKind != "class" {
 				continue
 			}
 			for _, superType := range declaration.fact.SuperTypes {
@@ -382,22 +386,45 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 				continue
 			}
 			implementations := implementersByType[contract.fact.Namespace]
-			if len(implementations) == 0 {
-				continue
-			}
 			for _, method := range methodsByType[contract.fact.Namespace] {
-				var targets []factOwner
+				var namedCandidates []factOwner
 				for _, implementation := range implementations {
-					targets = append(targets, methods[relationLookupKey(implementation.fact.Namespace, method.fact.Name)]...)
+					namedCandidates = append(namedCandidates, methods[relationLookupKey(implementation.fact.Namespace, method.fact.Name)]...)
+				}
+				var exactCandidates []factOwner
+				var abstractExact bool
+				var unresolvedCandidate bool
+				for _, candidate := range namedCandidates {
+					if !method.fact.SignatureCertain || !candidate.fact.SignatureCertain {
+						unresolvedCandidate = true
+						continue
+					}
+					if !slices.Equal(method.fact.ParameterTypes, candidate.fact.ParameterTypes) {
+						continue
+					}
+					if candidate.fact.IsAbstract {
+						abstractExact = true
+						continue
+					}
+					exactCandidates = append(exactCandidates, candidate)
 				}
 				key := methodFactKey(method.fact)
-				if len(implementations) == 1 && len(targets) == 1 && len(typeDeclarations[contract.fact.Namespace]) == 1 {
+				if len(implementations) == 1 && len(exactCandidates) == 1 && len(typeDeclarations[contract.fact.Namespace]) == 1 && !unresolvedCandidate {
 					relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "implements_method",
-						method.member, method.fact, key, &targets[0], methodFactKey(targets[0].fact), "certain", ""))
+						method.member, method.fact, key, &exactCandidates[0], methodFactKey(exactCandidates[0].fact), "certain", ""))
+					continue
+				}
+				if method.fact.IsDefault && len(exactCandidates) == 0 && !abstractExact && !unresolvedCandidate {
 					continue
 				}
 				reason := "Java service method implementation is missing"
-				if len(implementations) > 1 || len(targets) > 1 || len(typeDeclarations[contract.fact.Namespace]) > 1 {
+				if !method.fact.SignatureCertain || unresolvedCandidate {
+					reason = "Java method parameter signature is unresolved"
+				} else if abstractExact {
+					reason = "Java service method has only an abstract declaration"
+				} else if len(namedCandidates) > 0 && len(exactCandidates) == 0 {
+					reason = "Java service method parameter signatures do not match"
+				} else if len(implementations) > 1 || len(exactCandidates) > 1 || len(typeDeclarations[contract.fact.Namespace]) > 1 {
 					reason = "Java service has multiple possible implementations"
 				}
 				relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "implements_method",
@@ -421,19 +448,28 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 		if fact.RoutePath == "" || fact.OwnerName == "" {
 			continue
 		}
+		methodSet, methodRestricted, methodUncertain := springMethodConstraint(fact)
 		prefixes := classRoutes[fact.Namespace]
 		if len(prefixes) == 0 {
-			endpoints = append(endpoints, sourceRouteEndpoint{mapping, normalizeSourceRoute(fact.RoutePath), fact.HTTPMethod,
-				fact.Dynamic || fact.Certainty == "uncertain"})
+			endpoints = append(endpoints, sourceRouteEndpoint{owner: mapping, path: normalizeSourceRoute(fact.RoutePath),
+				methods: methodSet, methodRestricted: methodRestricted, methodUncertain: methodUncertain,
+				uncertain: fact.Dynamic || fact.Certainty == "uncertain"})
 			continue
 		}
 		for _, prefix := range prefixes {
 			if prefix.fact.RoutePath == "" {
 				continue
 			}
-			endpoints = append(endpoints, sourceRouteEndpoint{mapping,
-				normalizeSourceRoute(joinSourceRoute(prefix.fact.RoutePath, fact.RoutePath)), fact.HTTPMethod,
-				prefix.fact.Dynamic || prefix.fact.Certainty == "uncertain" || fact.Dynamic || fact.Certainty == "uncertain"})
+			classMethods, classRestricted, classUncertain := springMethodConstraint(prefix.fact)
+			combinedMethods, combinedRestricted, combinedUncertain, hasMethods := combineSpringMethodConstraints(
+				classMethods, classRestricted, classUncertain, methodSet, methodRestricted, methodUncertain)
+			if !hasMethods {
+				continue
+			}
+			endpoints = append(endpoints, sourceRouteEndpoint{owner: mapping,
+				path:    normalizeSourceRoute(joinSourceRoute(prefix.fact.RoutePath, fact.RoutePath)),
+				methods: combinedMethods, methodRestricted: combinedRestricted, methodUncertain: combinedUncertain,
+				uncertain: prefix.fact.Dynamic || prefix.fact.Certainty == "uncertain" || fact.Dynamic || fact.Certainty == "uncertain"})
 		}
 	}
 	for _, request := range requests {
@@ -442,19 +478,28 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			continue
 		}
 		requestRoutes := []sourceRequestRoute{{path: normalizeSourceRoute(fact.RoutePath)}}
-		if len(apiPrefixes) > 0 || len(apiProxies) > 0 {
-			// A captured prefix or proxy means the request path must be resolved
-			// through both pieces of configuration. Never fall back to matching
-			// the unprefixed call literal when this evidence is incomplete.
+		var moduleProxies []factOwner
+		for _, proxy := range apiProxies {
+			root := proxy.fact.OwnerName
+			if root != "" && sourcePathWithin(request.member.Path, root) {
+				moduleProxies = append(moduleProxies, proxy)
+			}
+		}
+		if len(moduleProxies) > 0 {
+			// A proxy fact scopes frontend URL transforms to its containing module.
+			// Configurations in sibling applications must not rewrite this request.
 			requestRoutes = nil
 			for _, prefix := range apiPrefixes {
 				prefixFact := prefix.fact
 				if prefixFact.RoutePath == "" || prefixFact.Dynamic || !strings.HasPrefix(prefixFact.RoutePath, "/") {
 					continue
 				}
-				browserPath := normalizeSourceRoute(joinSourceRoute(prefixFact.RoutePath, fact.RoutePath))
-				for _, proxy := range apiProxies {
+				for _, proxy := range moduleProxies {
 					proxyFact := proxy.fact
+					if !sourcePathWithin(prefix.member.Path, proxyFact.OwnerName) {
+						continue
+					}
+					browserPath := normalizeSourceRoute(joinSourceRoute(prefixFact.RoutePath, fact.RoutePath))
 					rewritePrefix := strings.TrimPrefix(proxyFact.TargetName, "^")
 					if proxyFact.Dynamic || proxyFact.Certainty == "uncertain" || proxyFact.Name == "" ||
 						proxyFact.RoutePath == "" || rewritePrefix == "" || rewritePrefix != prefixFact.RoutePath ||
@@ -481,11 +526,11 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			for _, endpoint := range endpoints {
 				exactRoute := endpoint.path == requestRoute.path
 				legacySuffix := endpoint.path == normalizeSourceRoute(strings.TrimSuffix(requestRoute.path, ".do"))
-				if (!exactRoute && !legacySuffix) ||
-					(endpoint.method != "" && fact.HTTPMethod != "" && endpoint.method != fact.HTTPMethod) {
+				methodMatches, methodUncertain := springRouteMethodMatch(endpoint, fact.HTTPMethod)
+				if (!exactRoute && !legacySuffix) || !methodMatches {
 					continue
 				}
-				endpoint.uncertain = endpoint.uncertain || requestRoute.uncertain || (legacySuffix && !exactRoute)
+				endpoint.uncertain = endpoint.uncertain || requestRoute.uncertain || methodUncertain || (legacySuffix && !exactRoute)
 				candidates = append(candidates, endpoint)
 			}
 		}
@@ -510,6 +555,75 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 		}
 	}
 	return relations
+}
+
+func sourcePathWithin(filePath, directory string) bool {
+	cleanFile := path.Clean(strings.TrimPrefix(strings.ReplaceAll(filePath, "\\", "/"), "/"))
+	cleanDirectory := path.Clean(strings.TrimPrefix(strings.ReplaceAll(directory, "\\", "/"), "/"))
+	if cleanFile == "." || cleanDirectory == "." || cleanFile == ".." || cleanDirectory == ".." ||
+		strings.HasPrefix(cleanFile, "../") || strings.HasPrefix(cleanDirectory, "../") {
+		return false
+	}
+	return cleanFile == cleanDirectory || strings.HasPrefix(cleanFile, strings.TrimRight(cleanDirectory, "/")+"/")
+}
+
+func springMethodConstraint(fact types.ParsedSourceFact) ([]string, bool, bool) {
+	if fact.HTTPMethodsSpecified {
+		methods := append([]string(nil), fact.HTTPMethods...)
+		if len(methods) == 0 && fact.HTTPMethod != "" {
+			methods = []string{fact.HTTPMethod}
+		}
+		return methods, true, !fact.HTTPMethodsCertain
+	}
+	if fact.HTTPMethod != "" {
+		return []string{fact.HTTPMethod}, true, false
+	}
+	return nil, false, false
+}
+
+func combineSpringMethodConstraints(left []string, leftRestricted, leftUncertain bool,
+	right []string, rightRestricted, rightUncertain bool) ([]string, bool, bool, bool) {
+	if !leftRestricted {
+		return right, rightRestricted, rightUncertain, true
+	}
+	if !rightRestricted {
+		return left, leftRestricted, leftUncertain, true
+	}
+	if leftUncertain && rightUncertain {
+		return nil, true, true, true
+	}
+	if leftUncertain {
+		return right, true, true, true
+	}
+	if rightUncertain {
+		return left, true, true, true
+	}
+	allowed := make([]string, 0, len(left))
+	for _, method := range left {
+		if containsSourceMethod(right, method) {
+			allowed = append(allowed, method)
+		}
+	}
+	return allowed, true, false, len(allowed) > 0
+}
+
+func springRouteMethodMatch(endpoint sourceRouteEndpoint, requestMethod string) (bool, bool) {
+	if !endpoint.methodRestricted {
+		return true, false
+	}
+	if endpoint.methodUncertain || len(endpoint.methods) == 0 || requestMethod == "" {
+		return true, true
+	}
+	return containsSourceMethod(endpoint.methods, strings.ToUpper(requestMethod)), false
+}
+
+func containsSourceMethod(methods []string, expected string) bool {
+	for _, method := range methods {
+		if strings.EqualFold(method, expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveSnapshotJavaType(owner factOwner, fact types.ParsedSourceFact,
@@ -597,7 +711,8 @@ func uniqueRouteEndpoints(endpoints []sourceRouteEndpoint) []sourceRouteEndpoint
 	seen := make(map[string]int, len(endpoints))
 	unique := make([]sourceRouteEndpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
-		key := endpoint.owner.member.FileID + "\x00" + endpoint.owner.fact.Namespace + "\x00" + endpoint.owner.fact.OwnerName + "\x00" + endpoint.path + "\x00" + endpoint.method
+		key := endpoint.owner.member.FileID + "\x00" + endpoint.owner.fact.Namespace + "\x00" + endpoint.owner.fact.OwnerName + "\x00" + endpoint.path + "\x00" +
+			strings.Join(endpoint.methods, ",") + fmt.Sprint(endpoint.methodRestricted) + fmt.Sprint(endpoint.methodUncertain)
 		if index, exists := seen[key]; exists {
 			unique[index].uncertain = unique[index].uncertain || endpoint.uncertain
 			continue

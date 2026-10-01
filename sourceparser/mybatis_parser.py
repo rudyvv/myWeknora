@@ -28,6 +28,13 @@ INJECTION_ANNOTATIONS = {
     "javax.annotation.Resource", "jakarta.annotation.Resource",
     "javax.inject.Inject", "jakarta.inject.Inject",
 }
+JAVA_LANG_TYPES = {
+    "Appendable", "AutoCloseable", "Boolean", "Byte", "Character", "CharSequence", "Class", "ClassLoader",
+    "Cloneable", "Comparable", "Deprecated", "Double", "Enum", "Error", "Exception", "Float", "Integer",
+    "Iterable", "Long", "Math", "Number", "Object", "Override", "Process", "Record", "Runnable", "Runtime",
+    "RuntimeException", "Short", "String", "StringBuffer", "StringBuilder", "System", "Thread", "Throwable",
+    "Void",
+}
 
 
 class UnsafeMyBatisXML(ValueError):
@@ -251,7 +258,8 @@ def extract_java_facts(raw, tree, path):
     def base_type_node(node):
         if node is None:
             return None
-        if node.type in ("identifier", "type_identifier", "scoped_identifier", "scoped_type_identifier"):
+        if node.type in ("identifier", "type_identifier", "scoped_identifier", "scoped_type_identifier",
+                         "integral_type", "floating_point_type", "boolean_type"):
             return node
         # Generic and array types wrap the declared base type. Never use a
         # generic argument as the injected receiver's identity.
@@ -304,6 +312,65 @@ def extract_java_facts(raw, tree, path):
             return same_package, True
         return "", False
 
+    def parameter_signature(method_node):
+        parameters = method_node.child_by_field_name("parameters")
+        if parameters is None:
+            return [], False
+        parameter_types, signature_certain = [], True
+        primitives = {"boolean", "byte", "char", "short", "int", "long", "float", "double"}
+        for parameter in parameters.named_children:
+            type_node = parameter.child_by_field_name("type")
+            if type_node is None and parameter.type == "spread_parameter":
+                type_node = next((child for child in parameter.named_children if child.type != "variable_declarator"), None)
+            if type_node is None:
+                parameter_types.append("")
+                signature_certain = False
+                continue
+
+            raw_type = "".join(text(type_node).split())
+            base = base_type_node(type_node)
+            if base is None and type_node.type in ("integral_type", "floating_point_type", "boolean_type"):
+                base = type_node
+            if base is None:
+                parameter_types.append(raw_type)
+                signature_certain = False
+                continue
+
+            base_name = text(base)
+            if base.type in ("integral_type", "floating_point_type", "boolean_type") or base_name in primitives:
+                resolved, certain = base_name, True
+            elif "." in base_name:
+                resolved, certain = base_name, True
+            elif len(imports.get(base_name, [])) == 1:
+                resolved, certain = imports[base_name][0], True
+            elif imports.get(base_name):
+                resolved, certain = base_name, False
+            elif base_name in JAVA_LANG_TYPES:
+                resolved, certain = "java.lang." + base_name, True
+            else:
+                same_package = (package + "." if package else "") + base_name
+                if same_package in declared_fqns:
+                    resolved, certain = same_package, True
+                else:
+                    wildcard = sorted(set(imports.get("*", [])))
+                    source_candidates = [prefix + "." + base_name for prefix in wildcard
+                                         if prefix + "." + base_name in declared_fqns]
+                    if len(source_candidates) == 1:
+                        resolved, certain = source_candidates[0], True
+                    elif len(wildcard) == 1:
+                        resolved, certain = wildcard[0] + "." + base_name, True
+                    else:
+                        resolved, certain = base_name, False
+
+            suffix = raw_type[len(base_name):] if raw_type.startswith(base_name) else ""
+            if parameter.type == "spread_parameter":
+                suffix = "[]"
+            if "<" in suffix or "?" in suffix:
+                certain = False
+            parameter_types.append(resolved + suffix)
+            signature_certain = signature_certain and certain
+        return parameter_types, signature_certain
+
     def static_string_values(node, owner_type):
         if node is None:
             return None
@@ -346,19 +413,33 @@ def extract_java_facts(raw, tree, path):
         simple_name = annotation_name.rsplit(".", 1)[-1]
         fixed_method = SPRING_MAPPING_METHODS.get(simple_name)
         methods = [fixed_method] if fixed_method else []
+        method_declared = fixed_method is not None
         methods_certain = True
         for item in method_nodes:
+            method_declared = True
             value_node = item.child_by_field_name("value")
             if value_node is None:
                 methods_certain = False
                 continue
-            raw_method = text(value_node)
-            found = re.findall(r"(?:RequestMethod\s*\.\s*)?([A-Z]+)", raw_method)
-            if not found or any(value not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"} for value in found):
+            raw_method = text(value_node).strip()
+            if raw_method.startswith("{") or raw_method.endswith("}"):
+                if not (raw_method.startswith("{") and raw_method.endswith("}")):
+                    methods_certain = False
+                    continue
+                raw_method = raw_method[1:-1].strip()
+            allowed_methods = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}
+            found = []
+            for token in raw_method.split(","):
+                match = re.fullmatch(r"(?:RequestMethod\s*\.\s*)?(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE)", token.strip())
+                if match is None:
+                    found = []
+                    break
+                found.append(match.group(1))
+            if not found or any(value not in allowed_methods for value in found):
                 methods_certain = False
             else:
                 methods.extend(found)
-        return paths, sorted(set(methods)), paths_certain and methods_certain
+        return paths, sorted(set(methods)), paths_certain, methods_certain, method_declared
 
     # Preserve explicit Java imports and declared type hierarchy as syntax facts.
     stack = [root]
@@ -465,10 +546,15 @@ def extract_java_facts(raw, tree, path):
                 method_node = member.child_by_field_name("name")
                 method_name = text(method_node) if method_node is not None else ""
                 modifier_node = next((item for item in member.named_children if item.type == "modifiers"), None)
+                modifier_text = text(modifier_node) if modifier_node is not None else ""
                 annotations = [] if modifier_node is None else [item for item in modifier_node.named_children if item.type in ("annotation", "marker_annotation")]
                 if method_name:
+                    parameter_types, signature_certain = parameter_signature(member)
                     facts.append({"kind": "java_method", "name": method_name, "namespace": owner_name,
                                   "type_name": resolve_type_node(member.child_by_field_name("type"))[0],
+                                  "parameter_types": parameter_types, "signature_certain": signature_certain,
+                                  "is_abstract": bool(re.search(r"\babstract\b", modifier_text)),
+                                  "is_default": bool(re.search(r"\bdefault\b", modifier_text)),
                                   "owner_kind": member.type, "range": _source_range(raw, member.start_byte, member.end_byte, newlines),
                                   "text": "", "quality": "structural"})
                 for annotation in annotations:
@@ -478,7 +564,7 @@ def extract_java_facts(raw, tree, path):
                     canonical = annotation_fqn(annotation, SPRING_MAPPING_PREFIX)
                     if simple_annotation not in set(SPRING_MAPPING_METHODS) | {"RequestMapping"}:
                         continue
-                    paths, methods, certain = mapping_values(annotation, node)
+                    paths, methods, paths_certain, methods_certain, method_declared = mapping_values(annotation, node)
                     known = canonical == SPRING_MAPPING_PREFIX + simple_annotation
                     if not known:
                         diagnostics.append({"code": "spring_mapping_identity_unresolved",
@@ -486,11 +572,14 @@ def extract_java_facts(raw, tree, path):
                                             "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines)})
                     for route in paths:
                         facts.append({"kind": "spring_mapping", "name": method_name, "namespace": owner_name,
-                                      "route_path": route if certain else "", "statement_type": "method" if method_name else "type",
+                                      "route_path": route if paths_certain else "", "statement_type": "method" if method_name else "type",
                                       "owner_kind": "method" if method_name else "type", "owner_name": method_name,
-                                      "http_method": methods[0] if len(methods) == 1 else "",
-                                      "dynamic": not (certain and known),
-                                      "certainty": "certain" if certain and known else "uncertain",
+                                      "http_method": methods[0] if len(methods) == 1 and methods_certain else "",
+                                      "http_methods": methods if method_declared else [],
+                                      "http_methods_specified": method_declared,
+                                      "http_methods_certain": methods_certain,
+                                      "dynamic": not (paths_certain and methods_certain and known),
+                                      "certainty": "certain" if paths_certain and methods_certain and known else "uncertain",
                                       "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines),
                                       "text": text(annotation), "quality": "structural"})
         # Type-level mappings use the annotation on the class declaration.
@@ -503,7 +592,7 @@ def extract_java_facts(raw, tree, path):
             if simple_annotation not in set(SPRING_MAPPING_METHODS) | {"RequestMapping"}:
                 continue
             canonical = annotation_fqn(annotation, SPRING_MAPPING_PREFIX)
-            paths, methods, certain = mapping_values(annotation, node)
+            paths, methods, paths_certain, methods_certain, method_declared = mapping_values(annotation, node)
             known = canonical == SPRING_MAPPING_PREFIX + simple_annotation
             if not known:
                 diagnostics.append({"code": "spring_mapping_identity_unresolved",
@@ -511,9 +600,12 @@ def extract_java_facts(raw, tree, path):
                                     "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines)})
             for route in paths:
                 facts.append({"kind": "spring_mapping", "name": simple, "namespace": owner_name,
-                              "route_path": route if certain else "", "statement_type": "type", "owner_kind": "type",
-                              "http_method": methods[0] if len(methods) == 1 else "", "dynamic": not (certain and known),
-                              "certainty": "certain" if certain and known else "uncertain",
+                              "route_path": route if paths_certain else "", "statement_type": "type", "owner_kind": "type",
+                              "http_method": methods[0] if len(methods) == 1 and methods_certain else "",
+                              "http_methods": methods if method_declared else [],
+                              "http_methods_specified": method_declared, "http_methods_certain": methods_certain,
+                              "dynamic": not (paths_certain and methods_certain and known),
+                              "certainty": "certain" if paths_certain and methods_certain and known else "uncertain",
                               "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines),
                               "text": text(annotation), "quality": "structural"})
 

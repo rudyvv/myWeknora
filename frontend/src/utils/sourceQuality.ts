@@ -20,10 +20,22 @@ export interface SourceFactLabelFields {
   target_name?: string
   route_path?: string
   http_method?: string
+  http_methods?: string[]
+  http_methods_specified?: boolean
+  http_methods_certain?: boolean
+  parameter_types?: string[]
+  signature_certain?: boolean
+  is_abstract?: boolean
+  is_default?: boolean
 }
 
 export function sourceFactLabel(fact: SourceFactLabelFields): string {
-  if (fact.route_path) return `${fact.http_method || 'HTTP'} ${fact.route_path}`
+  if (fact.route_path) {
+    const methods = fact.http_methods_specified
+      ? fact.http_methods_certain && fact.http_methods?.length ? fact.http_methods.join('|') : 'HTTP?'
+      : fact.http_method || 'HTTP'
+    return `${methods} ${fact.route_path}`
+  }
   return fact.qualified_name || fact.method_name || fact.name || fact.statement_id || fact.target_name || fact.kind || ''
 }
 

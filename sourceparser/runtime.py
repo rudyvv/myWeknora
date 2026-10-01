@@ -248,10 +248,11 @@ def _shift_sfc_fragment(fragment, base, span):
     return shifted
 
 
-def _javascript_configuration_facts(raw, tree):
+def _javascript_configuration_facts(raw, tree, path):
     """Capture literal frontend request prefixes and proxy rewrites as evidence."""
     facts = []
     newlines = [index for index, byte in enumerate(raw) if byte == 10]
+    configuration_root = Path(path).parent.as_posix()
 
     def literal(node):
         if node is None or node.type not in ('string', 'template_string'):
@@ -348,7 +349,8 @@ def _javascript_configuration_facts(raw, tree):
                 facts.append({
                     'kind': 'api_proxy', 'name': context, 'route_path': target_path,
                     'target_name': rewrite_pattern, 'namespace': replacement,
-                    'owner_kind': 'dev_server_proxy', 'dynamic': not bool(target_path and rewrite_pattern and len(rewrite_pairs) == 1),
+                    'owner_kind': 'dev_server_proxy', 'owner_name': configuration_root,
+                    'dynamic': not bool(target_path and rewrite_pattern and len(rewrite_pairs) == 1),
                     'certainty': 'certain' if target_path and rewrite_pattern and len(rewrite_pairs) == 1 else 'uncertain',
                     'range': _source_span(newlines, start, end),
                     'text': raw[start:end].decode('utf-8'), 'quality': 'structural',
@@ -359,9 +361,9 @@ def _javascript_configuration_facts(raw, tree):
     return facts
 
 
-def _api_request_facts(raw, tree):
+def _api_request_facts(raw, tree, path):
     """Capture literal requests made through recognizable HTTP clients only."""
-    facts = _javascript_configuration_facts(raw, tree)
+    facts = _javascript_configuration_facts(raw, tree, path)
     methods = {'get': 'GET', 'post': 'POST', 'put': 'PUT', 'patch': 'PATCH',
                'delete': 'DELETE', 'head': 'HEAD', 'options': 'OPTIONS'}
     clients = {'$_HTTP', '$http', '$axios', 'axios', 'http'}
@@ -847,7 +849,7 @@ def parse_source(raw, max_bytes, parser_version, language, path):
     elif xml_result is not None:
         facts, diagnostics = xml_result['facts'], xml_result['diagnostics']
     elif language in ('javascript', 'typescript', 'tsx'):
-        facts = _api_request_facts(raw, tree)
+        facts = _api_request_facts(raw, tree, path)
     facts.sort(key=lambda fact: (fact['range']['start_byte'], fact['range']['end_byte'], fact['kind'], fact.get('name', '')))
     chunks = []
     cursor = 0

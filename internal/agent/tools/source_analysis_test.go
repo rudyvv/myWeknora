@@ -27,6 +27,11 @@ func TestSourceAnalysisFactSummariesKeepTypedEvidenceAndBoundPayload(t *testing.
 	require.True(t, fieldsTruncated)
 	require.LessOrEqual(t, utf8.RuneCountInString(longFacts[0]["name"].(string)), maxAgentSummaryRunes+1)
 	require.Len(t, longFacts[0]["include_refs"], maxAgentSummaryListItems)
+	signatureFacts, signatureTruncated := boundedFactSummaries(types.JSON(`[{"kind":"java_method","parameter_types":["int","java.lang.String"],"signature_certain":true,"is_abstract":false,"is_default":true}]`), 1)
+	require.False(t, signatureTruncated)
+	require.Equal(t, []interface{}{"int", "java.lang.String"}, signatureFacts[0]["parameter_types"])
+	require.Equal(t, true, signatureFacts[0]["signature_certain"])
+	require.Equal(t, true, signatureFacts[0]["is_default"])
 }
 
 func TestSourceAnalysisKeepsAuthorizedBusinessFlowFactsAndUncertainty(t *testing.T) {

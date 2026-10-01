@@ -8,8 +8,12 @@ import (
 )
 
 func relationFact(kind, name, namespace string, start, end int) types.ParsedSourceFact {
-	return types.ParsedSourceFact{Kind: kind, Name: name, Namespace: namespace, Quality: "structural",
+	fact := types.ParsedSourceFact{Kind: kind, Name: name, Namespace: namespace, Quality: "structural",
 		Range: types.SourceRange{StartByte: start, EndByte: end, StartLine: 1, EndLine: 1}}
+	if kind == "java_method" {
+		fact.SignatureCertain = true
+	}
+	return fact
 }
 
 func TestCorrelateBusinessFlowsAcrossRoutesInjectedServicesAndMapperStatements(t *testing.T) {
@@ -112,6 +116,7 @@ func TestCorrelateFrontendPrefixAndProxyOnlyProducesUncertainRouteCandidate(t *t
 	prefix.RoutePath, prefix.Certainty = "/apiroot", "uncertain"
 	proxy := relationFact("api_proxy", "/api", "", 1, 70)
 	proxy.RoutePath, proxy.TargetName, proxy.Namespace, proxy.Certainty = "/api", "^/apiroot", "", "certain"
+	proxy.OwnerName = "web/app"
 	controllerType := relationFact("java_type", "Controller", "demo.QuestionnaireController", 1, 5)
 	controllerType.OwnerKind = "class"
 	classMapping := relationFact("spring_mapping", "Controller", "demo.QuestionnaireController", 6, 15)
@@ -119,9 +124,9 @@ func TestCorrelateFrontendPrefixAndProxyOnlyProducesUncertainRouteCandidate(t *t
 	handler := relationFact("spring_mapping", "detail", "demo.QuestionnaireController", 16, 30)
 	handler.RoutePath, handler.OwnerKind, handler.OwnerName, handler.HTTPMethod = "/questionnaire/detail", "method", "detail", "GET"
 	members := []SourceRelationMember{
-		{Path: "web/detail.vue", FileID: "request-file", VersionID: "request-v1", Facts: []types.ParsedSourceFact{request}},
-		{Path: "web/interceptor.js", FileID: "prefix-file", VersionID: "prefix-v1", Facts: []types.ParsedSourceFact{prefix}},
-		{Path: "web/config.js", FileID: "proxy-file", VersionID: "proxy-v1", Facts: []types.ParsedSourceFact{proxy}},
+		{Path: "web/app/detail.vue", FileID: "request-file", VersionID: "request-v1", Facts: []types.ParsedSourceFact{request}},
+		{Path: "web/app/interceptor.js", FileID: "prefix-file", VersionID: "prefix-v1", Facts: []types.ParsedSourceFact{prefix}},
+		{Path: "web/app/config.js", FileID: "proxy-file", VersionID: "proxy-v1", Facts: []types.ParsedSourceFact{proxy}},
 		{Path: "server/QuestionnaireController.java", FileID: "controller-file", VersionID: "controller-v1", Facts: []types.ParsedSourceFact{controllerType, classMapping, handler}},
 	}
 	findRoute := func(values []SourceRelationMember) *types.SourceCodeRelation {
@@ -146,8 +151,10 @@ func TestCorrelateFrontendPrefixAndProxyOnlyProducesUncertainRouteCandidate(t *t
 	withoutProxy := append([]SourceRelationMember(nil), members[:2]...)
 	withoutProxy = append(withoutProxy, members[3])
 	withoutProxy[2].Facts = []types.ParsedSourceFact{controllerType, handler}
-	if relation := findRoute(withoutProxy); relation != nil {
-		t.Fatalf("request bypassed incomplete prefix/proxy evidence: %#v", relation)
+	if relation := findRoute(withoutProxy); relation != nil &&
+		(relation.Determinacy == "certain" || relation.ToFileID != "" || relation.ToVersionID != "" ||
+			relation.ResolutionReason != "legacy .do route suffix matching is not verified by source configuration") {
+		t.Fatalf("incomplete rewrite evidence became a navigable or config-derived route: %#v", relation)
 	}
 
 	mismatchedProxy := proxy
@@ -157,6 +164,205 @@ func TestCorrelateFrontendPrefixAndProxyOnlyProducesUncertainRouteCandidate(t *t
 	mismatched[3].Facts = []types.ParsedSourceFact{controllerType, handler}
 	if relation := findRoute(mismatched); relation != nil {
 		t.Fatalf("request bypassed mismatched prefix rewrite evidence: %#v", relation)
+	}
+}
+
+func TestCorrelateFrontendConfigurationOnlyAffectsRequestsInsideItsModule(t *testing.T) {
+	request := relationFact("api_request", "/detail", "", 1, 20)
+	request.RoutePath, request.HTTPMethod, request.Certainty = "/detail", "GET", "certain"
+	prefix := relationFact("api_prefix", "/api", "", 1, 20)
+	prefix.RoutePath, prefix.Certainty = "/api", "uncertain"
+	proxy := relationFact("api_proxy", "/api", "", 1, 80)
+	proxy.RoutePath, proxy.TargetName, proxy.Certainty = "/serviceB", "^/api", "certain"
+	controllerA := relationFact("spring_mapping", "handle", "demo.A", 1, 30)
+	controllerA.RoutePath, controllerA.OwnerName, controllerA.HTTPMethod = "/detail", "handle", "GET"
+	controllerB := relationFact("spring_mapping", "handle", "demo.B", 1, 30)
+	controllerB.RoutePath, controllerB.OwnerName, controllerB.HTTPMethod = "/serviceB/detail", "handle", "GET"
+	requestMember := SourceRelationMember{Path: "web/appA/request.js", FileID: "request-a", VersionID: "request-a-v1", Facts: []types.ParsedSourceFact{request}}
+	members := []SourceRelationMember{
+		requestMember,
+		{Path: "web/appB/client.js", FileID: "client-b", VersionID: "client-b-v1", Facts: []types.ParsedSourceFact{prefix}},
+		{Path: "web/appB/vue.config.js", FileID: "proxy-b", VersionID: "proxy-b-v1", Facts: []types.ParsedSourceFact{proxy}},
+		{Path: "server/A.java", FileID: "controller-a", VersionID: "controller-a-v1", Facts: []types.ParsedSourceFact{controllerA}},
+		{Path: "server/B.java", FileID: "controller-b", VersionID: "controller-b-v1", Facts: []types.ParsedSourceFact{controllerB}},
+	}
+	members[2].Facts[0].OwnerName = "web/appB"
+
+	assertAppARoute := func(got []types.SourceCodeRelation) {
+		t.Helper()
+		var appARoutes int
+		for _, relation := range got {
+			if relation.Kind != "http_route" || relation.FromFileID != requestMember.FileID {
+				continue
+			}
+			appARoutes++
+			if relation.Determinacy != "certain" || relation.ToFileID != "controller-a" || relation.ToVersionID != "controller-a-v1" {
+				t.Fatalf("unrelated module configuration changed app A route: %#v", relation)
+			}
+		}
+		if appARoutes != 1 {
+			t.Fatalf("expected exactly one certain app A route, got %d: %#v", appARoutes, got)
+		}
+	}
+
+	directOnly := []SourceRelationMember{members[0], members[3], members[4]}
+	assertAppARoute(CorrelateSourceFacts(1, "source", "snapshot", directOnly))
+	assertAppARoute(CorrelateSourceFacts(1, "source", "snapshot", members))
+}
+
+func TestCorrelateSpringMappingHonorsAllowedMethodSetsAndAnyMethod(t *testing.T) {
+	request := func(id, route, method string) SourceRelationMember {
+		fact := relationFact("api_request", route, "", 1, 20)
+		fact.RoutePath, fact.HTTPMethod, fact.Certainty = route, method, "certain"
+		return SourceRelationMember{Path: "web/" + id + ".js", FileID: id, VersionID: id + "-v1", Facts: []types.ParsedSourceFact{fact}}
+	}
+	multi := relationFact("spring_mapping", "multi", "demo.Controller", 1, 20)
+	multi.RoutePath, multi.OwnerKind, multi.OwnerName, multi.Certainty = "/multi", "method", "multi", "certain"
+	multi.HTTPMethods, multi.HTTPMethodsSpecified, multi.HTTPMethodsCertain = []string{"GET", "POST"}, true, true
+	any := relationFact("spring_mapping", "any", "demo.Controller", 21, 40)
+	any.RoutePath, any.OwnerKind, any.OwnerName, any.Certainty = "/any", "method", "any", "certain"
+	dynamic := relationFact("spring_mapping", "dynamic", "demo.Controller", 41, 60)
+	dynamic.RoutePath, dynamic.OwnerKind, dynamic.OwnerName = "/dynamic", "method", "dynamic"
+	dynamic.HTTPMethodsSpecified, dynamic.HTTPMethodsCertain = true, false
+	dynamic.Dynamic, dynamic.Certainty = true, "uncertain"
+	class := relationFact("spring_mapping", "Controller", "demo.OtherController", 61, 80)
+	class.RoutePath, class.OwnerKind, class.StatementType, class.Certainty = "/api", "type", "type", "certain"
+	class.HTTPMethods, class.HTTPMethodsSpecified, class.HTTPMethodsCertain = []string{"GET"}, true, true
+	method := relationFact("spring_mapping", "create", "demo.OtherController", 81, 100)
+	method.RoutePath, method.OwnerKind, method.OwnerName, method.Certainty = "/create", "method", "create", "certain"
+	method.HTTPMethods, method.HTTPMethodsSpecified, method.HTTPMethodsCertain = []string{"POST"}, true, true
+	controller := SourceRelationMember{Path: "server/Controller.java", FileID: "controller", VersionID: "controller-v1", Facts: []types.ParsedSourceFact{multi, any, dynamic}}
+	otherController := SourceRelationMember{Path: "server/OtherController.java", FileID: "other-controller", VersionID: "other-controller-v1", Facts: []types.ParsedSourceFact{class, method}}
+	requests := []SourceRelationMember{
+		request("multi-get", "/multi", "GET"), request("multi-post", "/multi", "POST"), request("multi-delete", "/multi", "DELETE"),
+		request("any-get", "/any", "GET"), request("any-delete", "/any", "DELETE"),
+		request("dynamic-delete", "/dynamic", "DELETE"), request("class-method-conflict-get", "/api/create", "GET"),
+		request("class-method-conflict-post", "/api/create", "POST"),
+	}
+	members := append(requests, controller, otherController)
+	var byRequest = map[string]types.SourceCodeRelation{}
+	for _, relation := range CorrelateSourceFacts(1, "source", "snapshot", members) {
+		if relation.Kind == "http_route" {
+			byRequest[relation.FromFileID] = relation
+		}
+	}
+	for _, id := range []string{"multi-get", "multi-post", "any-get", "any-delete"} {
+		if relation, ok := byRequest[id]; !ok || relation.Determinacy != "certain" || relation.ToFileID != "controller" {
+			t.Fatalf("allowed or unrestricted Spring method did not resolve for %s: %#v", id, relation)
+		}
+	}
+	if relation, ok := byRequest["multi-delete"]; ok && relation.Determinacy == "certain" {
+		t.Fatalf("DELETE matched an endpoint restricted to GET/POST: %#v", relation)
+	}
+	if relation, ok := byRequest["dynamic-delete"]; !ok || relation.Determinacy != "uncertain" || relation.ToFileID != "" || relation.ToVersionID != "" {
+		t.Fatalf("unknown allowed methods became certain or lost their candidate: %#v", relation)
+	}
+	for _, id := range []string{"class-method-conflict-get", "class-method-conflict-post"} {
+		if relation, ok := byRequest[id]; ok && relation.Determinacy == "certain" {
+			t.Fatalf("class-level GET and method-level POST constraints were not intersected (%s): %#v", id, relation)
+		}
+	}
+}
+
+func TestCorrelateJavaImplementationsRequireMatchingCertainSignatures(t *testing.T) {
+	contract := SourceRelationMember{Path: "src/Contract.java", FileID: "contract", VersionID: "contract-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Contract", "demo.Contract", 1, 10),
+		relationFact("java_method", "run", "demo.Contract", 11, 20),
+		relationFact("java_method", "run", "demo.Contract", 21, 30),
+		relationFact("java_method", "execute", "demo.Contract", 31, 40),
+		relationFact("java_method", "match", "demo.Contract", 41, 50),
+		relationFact("java_method", "defaultOnly", "demo.Contract", 51, 60),
+	}}
+	contract.Facts[0].OwnerKind = "interface"
+	contract.Facts[1].ParameterTypes = []string{"int"}
+	contract.Facts[2].ParameterTypes, contract.Facts[2].IsDefault = []string{"java.lang.String"}, true
+	contract.Facts[3].ParameterTypes = []string{"int"}
+	contract.Facts[4].ParameterTypes, contract.Facts[4].SignatureCertain = []string{"Unknown"}, false
+	contract.Facts[5].ParameterTypes, contract.Facts[5].IsDefault = []string{"java.lang.String"}, true
+	implementation := SourceRelationMember{Path: "src/AbstractWorker.java", FileID: "abstract-worker", VersionID: "abstract-worker-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "AbstractWorker", "demo.AbstractWorker", 1, 10),
+		relationFact("java_method", "run", "demo.AbstractWorker", 11, 20),
+		relationFact("java_method", "execute", "demo.AbstractWorker", 21, 30),
+		relationFact("java_method", "match", "demo.AbstractWorker", 31, 40),
+		relationFact("java_method", "defaultOnly", "demo.AbstractWorker", 41, 50),
+	}}
+	implementation.Facts[0].OwnerKind, implementation.Facts[0].SuperTypes = "class", []string{"demo.Contract"}
+	implementation.Facts[1].ParameterTypes = []string{"java.lang.String"}
+	implementation.Facts[2].ParameterTypes, implementation.Facts[2].IsAbstract = []string{"int"}, true
+	implementation.Facts[3].ParameterTypes, implementation.Facts[3].SignatureCertain = []string{"Unknown"}, false
+	implementation.Facts[4].ParameterTypes = []string{"int"}
+	missing := SourceRelationMember{Path: "src/Missing.java", FileID: "missing-contract", VersionID: "missing-contract-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Missing", "demo.Missing", 1, 10),
+		relationFact("java_method", "execute", "demo.Missing", 11, 20),
+	}}
+	missing.Facts[0].OwnerKind = "interface"
+	parent := SourceRelationMember{Path: "src/Parent.java", FileID: "parent-contract", VersionID: "parent-contract-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Parent", "demo.Parent", 1, 10),
+		relationFact("java_method", "execute", "demo.Parent", 11, 20),
+	}}
+	parent.Facts[0].OwnerKind = "interface"
+	parent.Facts[1].ParameterTypes = []string{"int"}
+	child := SourceRelationMember{Path: "src/Child.java", FileID: "child-contract", VersionID: "child-contract-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Child", "demo.Child", 1, 10),
+		relationFact("java_method", "execute", "demo.Child", 11, 20),
+	}}
+	child.Facts[0].OwnerKind, child.Facts[0].SuperTypes = "interface", []string{"demo.Parent"}
+	child.Facts[1].ParameterTypes = []string{"int"}
+	validContract := SourceRelationMember{Path: "src/Store.java", FileID: "store-contract", VersionID: "store-contract-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Store", "demo.Store", 1, 10),
+		relationFact("java_method", "save", "demo.Store", 11, 20),
+	}}
+	validContract.Facts[0].OwnerKind = "interface"
+	validContract.Facts[1].ParameterTypes = []string{"java.lang.String"}
+	validImplementation := SourceRelationMember{Path: "src/StoreImpl.java", FileID: "store-impl", VersionID: "store-impl-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "StoreImpl", "demo.StoreImpl", 1, 10),
+		relationFact("java_method", "save", "demo.StoreImpl", 11, 20),
+	}}
+	validImplementation.Facts[0].OwnerKind, validImplementation.Facts[0].SuperTypes = "class", []string{"demo.Store"}
+	validImplementation.Facts[1].ParameterTypes = []string{"java.lang.String"}
+
+	mapper := SourceRelationMember{Path: "src/Mapper.java", FileID: "mapper", VersionID: "mapper-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Mapper", "demo.Mapper", 1, 10),
+		relationFact("java_method", "find", "demo.Mapper", 11, 20),
+		relationFact("java_method", "find", "demo.Mapper", 21, 30),
+	}}
+	mapper.Facts[0].OwnerKind = "interface"
+	mapper.Facts[1].ParameterTypes = []string{"int"}
+	mapper.Facts[2].ParameterTypes = []string{"java.lang.String"}
+	caller := SourceRelationMember{Path: "src/Caller.java", FileID: "caller", VersionID: "caller-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Caller", "demo.Caller", 1, 10),
+		relationFact("java_injection", "mapper", "demo.Caller", 11, 20),
+		relationFact("java_method_call", "find", "demo.Caller", 21, 30),
+	}}
+	caller.Facts[1].TypeName = "demo.Mapper"
+	caller.Facts[2].TypeName, caller.Facts[2].Receiver, caller.Facts[2].MethodName = "demo.Mapper", "mapper", "invoke"
+
+	var byFromKey = map[string][]types.SourceCodeRelation{}
+	for _, relation := range CorrelateSourceFacts(1, "source", "snapshot",
+		[]SourceRelationMember{contract, implementation, missing, parent, child, validContract, validImplementation, mapper, caller}) {
+		if relation.Kind == "implements_method" || relation.Kind == "method_call" {
+			byFromKey[relation.FromKey] = append(byFromKey[relation.FromKey], relation)
+		}
+	}
+	runRelations := byFromKey["demo.Contract#run"]
+	if len(runRelations) != 2 || runRelations[0].Determinacy != "uncertain" || runRelations[0].ToFileID != "" || runRelations[0].ToVersionID != "" || runRelations[0].ResolutionReason == "" ||
+		runRelations[1].Determinacy != "certain" || runRelations[1].ToFileID != "abstract-worker" {
+		t.Fatalf("overloaded contract did not distinguish mismatched and exact signatures: %#v", runRelations)
+	}
+	for _, key := range []string{"demo.Contract#execute", "demo.Contract#match", "demo.Missing#execute", "demo.Parent#execute"} {
+		relations := byFromKey[key]
+		if len(relations) != 1 || relations[0].Determinacy != "uncertain" || relations[0].ToFileID != "" || relations[0].ToVersionID != "" || relations[0].ResolutionReason == "" {
+			t.Fatalf("abstract, missing, or unresolved signature became navigable (%s): %#v", key, relations)
+		}
+	}
+	if relations := byFromKey["demo.Contract#defaultOnly"]; len(relations) != 0 {
+		t.Fatalf("unoverridden default interface method was reported as missing: %#v", relations)
+	}
+	if relations := byFromKey["demo.Store#save"]; len(relations) != 1 || relations[0].Determinacy != "certain" || relations[0].ToFileID != "store-impl" || relations[0].ToVersionID != "store-impl-v1" {
+		t.Fatalf("unique matching method signature did not resolve: %#v", relations)
+	}
+	if relations := byFromKey["demo.Caller#invoke -> mapper.find"]; len(relations) != 1 || relations[0].Determinacy != "uncertain" || relations[0].ToFileID != "" || relations[0].ToVersionID != "" {
+		t.Fatalf("call to an overloaded method became navigable without argument types: %#v", relations)
 	}
 }
 
