@@ -28,6 +28,8 @@ var (
 	ErrFetchFailed               = errors.New("failed to fetch items from source")
 	ErrResourceNotFound          = errors.New("resource not found in source system")
 	ErrSourcePipelineUnavailable = errors.New("source ingestion pipeline is not available")
+	ErrGitLabWebhookUnauthorized = errors.New("GitLab webhook delivery is not authorized")
+	ErrGitLabWebhookUnavailable  = errors.New("GitLab webhook persistence is unavailable")
 
 	// Knowledge base errors
 	ErrKnowledgeBaseNotFound = errors.New("knowledge base not found")

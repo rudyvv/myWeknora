@@ -150,6 +150,20 @@ func (r *DataSourceRepository) FindActive(ctx context.Context) ([]*types.DataSou
 	return dataSources, nil
 }
 
+// FindErrorGitLabSources retrieves GitLab sources whose last sync failed.
+// Callers must still validate source mode and credentials before scheduling.
+func (r *DataSourceRepository) FindErrorGitLabSources(ctx context.Context) ([]*types.DataSource, error) {
+	var dataSources []*types.DataSource
+	if err := r.db.WithContext(ctx).
+		Where("status = ? AND type = ?", types.DataSourceStatusError, types.ConnectorTypeGitLab).
+		Where("deleted_at IS NULL").
+		Order("created_at DESC").
+		Find(&dataSources).Error; err != nil {
+		return nil, err
+	}
+	return dataSources, nil
+}
+
 // SyncLogRepository provides data access for sync logs
 type SyncLogRepository struct {
 	db *gorm.DB

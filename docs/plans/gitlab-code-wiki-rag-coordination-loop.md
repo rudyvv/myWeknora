@@ -120,3 +120,7 @@ T12 仍修复 c87d56d5 的唯一阻断 P2；root 进一步限定 preflight 只�
 
 用户明确额度恢复后，root紧凑核对T20/T11/T13均因usage-limit failed，不把它们算完成；已分别恢复原三个对话Luna/xhigh当前现场，不重复分支/对话或已过测试。T20八个dirty修复文件保留，已报邻接验证通过待clean新SHA；T11仍546bd413待具体3返修，worker错误启动重复review已明确纠正，正式Sol/high双轴root负责；T13十二个dirty/新文件保留，正在migration111 json/jsonb真实PG失败修复。继续独立57521、固定cache/锁定parser，credentials仅进程。累计12/22不变，根所有上一轮测试会话已收取。
 恢复后紧凑确认三者均active：T20 a0da71ed-ed49-406c-bef8-5e9d34149090:4；T11 72cc410b-07c6-49fe-bf0c-1014db92a623:4；T13 d26eae24-5fd6-4de0-acb6-eae9b78a346f:2。T11已明确执行红绿返修、不重派额度失败的重复双轴；暂无新cleanSHA READY，待新结果，不重播旧finding。
+
+2026-10-01 新恢复验收：T20 干净 f0e4aa87 已完成两个独立 Sol/high 轴：Standards 硬0/判断3P3，Spec0。root 六项真实PG（含旧两个反例）通过61.380s；无冲突合并已验收T12后三项PG通过44.432s、实际handler/管理route、前端vue-tsc与callback两项通过。见 t20-f0e4aa87-review.md，允许集成发布/关闭#28，累计将为13/22。T18/#26原依赖#22与#12均已核对CLOSED；验收发布后在原T06对话接续，从此轮已验收集成提交建分支，先给root现有修订/保护引用的接口提案再执行，勿提前修改T15/T16生成。
+
+T13 干净8cfd15cc全票双轴完：Standards硬0/判断2P3，Spec2P2；实际PG反例FAIL19.11s证明snake_case回填规范化谓词1→0、新MyBatis result_map/sql_fragment namespace#ID缺失而回填存在。原exact path/真实GIN及回填计数PASS17.51s，混合文档范围PASS9.98s；scope/queryplan本轮parser同步超时未计PASS。见t13-8cfd15cc-review.md，两项必修已直接派回同一Luna/xhigh，不集成/关#21。T11返修接受层已报告green且正冻结，须等完整SHA、真实链证据及root正式审查，不按进度算完成。当前游标T20 a0da71ed-ed49-406c-bef8-5e9d34149090:5；T11 72cc410b-07c6-49fe-bf0c-1014db92a623:7；T13 d26eae24-5fd6-4de0-acb6-eae9b78a346f:3。只发布验收里程碑，工作对话双向通信不需用户人工转告。

@@ -1,4 +1,6 @@
 import { get, post, put, del } from '../../utils/request'
+import { getApiBaseUrl } from '../../utils/api-base'
+import { buildApiCallbackUrl } from '../../utils/callbackUrl'
 
 // --- Types ---
 
@@ -203,4 +205,45 @@ export async function putDataSourceCredentials(
 
 export async function deleteDataSourceCredentials(id: string): Promise<void> {
   await del(`/api/v1/datasource/${id}/credentials/credentials`)
+}
+
+export interface GitLabWebhookStatus {
+  enabled: boolean
+  configured: boolean
+  callback_path: string
+  last_received_at?: string | null
+  last_event_id?: string
+}
+
+export interface GitLabWebhookTestResult {
+  gitlab_access_status: 'connected' | 'failed'
+  gitlab_access_error?: string
+  project_id: string
+  branch: string
+  current_commit_sha?: string
+  inbound_status: 'verified' | 'unverified'
+  webhook: GitLabWebhookStatus
+  sync_schedule: string
+}
+
+export function getGitLabWebhook(id: string) {
+  return get(`/api/v1/datasource/${id}/gitlab-webhook`)
+}
+
+export function updateGitLabWebhook(
+  id: string,
+  update: { enabled: boolean; secret?: string; clear_secret?: boolean },
+) {
+  return put(`/api/v1/datasource/${id}/gitlab-webhook`, update)
+}
+
+export function testGitLabWebhook(id: string) {
+  return post(`/api/v1/datasource/${id}/gitlab-webhook/test`, {})
+}
+
+// The backend returns only a relative callback path. Compose it in the browser
+// so the configured API base path/reverse-proxy prefix is preserved, without
+// trusting request Host or forwarded headers.
+export function absoluteGitLabWebhookUrl(callbackPath: string): string {
+  return buildApiCallbackUrl(callbackPath, getApiBaseUrl(), window.location.origin)
 }

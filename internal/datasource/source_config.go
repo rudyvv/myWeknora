@@ -116,3 +116,32 @@ func ParseSourceSettings(config *types.DataSourceConfig) (*SourceSettings, strin
 	canonical, _ := json.Marshal(settings)
 	return &settings, fmt.Sprintf("v1:%x", sha256.Sum256(canonical)), nil
 }
+
+// GitLabSourceReconciliationEligible reports whether a GitLab source has the
+// persisted binding and credentials needed for push-triggered or scheduled
+// reconciliation. Error status is recoverable; paused, deleted, and ordinary
+// document sources are not.
+func GitLabSourceReconciliationEligible(ds *types.DataSource) bool {
+	if ds == nil || ds.Type != types.ConnectorTypeGitLab ||
+		(ds.Status != types.DataSourceStatusActive && ds.Status != types.DataSourceStatusError) ||
+		strings.TrimSpace(ds.KnowledgeBaseID) == "" {
+		return false
+	}
+	config, err := ds.ParseConfig()
+	if err != nil || config == nil {
+		return false
+	}
+	mode, err := ContentMode(config)
+	if err != nil || mode != ContentModeSource {
+		return false
+	}
+	baseURL, _ := config.Credentials["base_url"].(string)
+	accessToken, _ := config.Credentials["access_token"].(string)
+	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(accessToken) == "" {
+		return false
+	}
+	settings, _, err := ParseSourceSettings(config)
+	return err == nil && len(settings.Projects) == 1 &&
+		strings.TrimSpace(settings.Projects[0].ProjectID) != "" &&
+		strings.TrimSpace(settings.Projects[0].Ref) != ""
+}

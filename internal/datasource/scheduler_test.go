@@ -76,6 +76,18 @@ func (r *fakeDataSourceRepo) FindActive(_ context.Context) ([]*types.DataSource,
 	return result, nil
 }
 
+func (r *fakeDataSourceRepo) FindErrorGitLabSources(_ context.Context) ([]*types.DataSource, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var result []*types.DataSource
+	for _, ds := range r.dataSources {
+		if ds.Status == types.DataSourceStatusError && ds.Type == types.ConnectorTypeGitLab {
+			result = append(result, ds)
+		}
+	}
+	return result, nil
+}
+
 // fakeSyncLogRepo is an in-memory SyncLogRepository.
 type fakeSyncLogRepo struct {
 	mu   sync.Mutex

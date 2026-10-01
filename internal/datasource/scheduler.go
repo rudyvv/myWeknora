@@ -62,6 +62,17 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load active data sources: %w", err)
 	}
+	if errorSourceRepo, ok := s.dsRepo.(interfaces.ErrorGitLabSourceRepository); ok {
+		errorSources, findErr := errorSourceRepo.FindErrorGitLabSources(ctx)
+		if findErr != nil {
+			return fmt.Errorf("load errored GitLab sources: %w", findErr)
+		}
+		for _, ds := range errorSources {
+			if GitLabSourceReconciliationEligible(ds) {
+				dataSources = append(dataSources, ds)
+			}
+		}
+	}
 
 	for _, ds := range dataSources {
 		schedule, _ := scheduledSync(ds)
@@ -93,7 +104,9 @@ func (s *Scheduler) Stop() {
 // AddOrUpdate registers (or re-registers) a cron entry for the given data source.
 func (s *Scheduler) AddOrUpdate(ds *types.DataSource) error {
 	schedule, sourceMode := scheduledSync(ds)
-	if ds.Status == types.DataSourceStatusActive && sourceMode {
+	active := ds != nil && ds.Status == types.DataSourceStatusActive
+	errorSource := ds != nil && ds.Status == types.DataSourceStatusError && sourceMode && GitLabSourceReconciliationEligible(ds)
+	if (active || errorSource) && sourceMode {
 		if err := s.recoverQueuedSourceRuns(context.Background(), ds); err != nil {
 			logger.Errorf(context.Background(), "[Scheduler] failed to recover source triggers for ds=%s: %v", ds.ID, err)
 		}
@@ -106,7 +119,7 @@ func (s *Scheduler) AddOrUpdate(ds *types.DataSource) error {
 		delete(s.entries, ds.ID)
 	}
 
-	if ds.Status != types.DataSourceStatusActive || schedule == "" {
+	if (!active && !errorSource) || schedule == "" {
 		return nil
 	}
 
@@ -146,7 +159,7 @@ func (s *Scheduler) addEntryLocked(ds *types.DataSource) error {
 	return nil
 }
 
-const defaultSourceSyncSchedule = "0 0 * * * *"
+const DefaultSourceSyncSchedule = "0 0 * * * *"
 
 // scheduledSync keeps the historical opt-in scheduling behavior for document
 // sources while giving source-mode repositories the agreed hourly default.
@@ -163,7 +176,7 @@ func scheduledSync(ds *types.DataSource) (string, bool) {
 		return ds.SyncSchedule, false
 	}
 	if ds.SyncSchedule == "" {
-		return defaultSourceSyncSchedule, true
+		return DefaultSourceSyncSchedule, true
 	}
 	return ds.SyncSchedule, true
 }
@@ -215,6 +228,18 @@ func (s *Scheduler) reconcileSourceTriggers(ctx context.Context) {
 	if err != nil {
 		logger.Errorf(ctx, "[Scheduler] failed to list sources for trigger reconciliation: %v", err)
 		return
+	}
+	if errorSourceRepo, ok := s.dsRepo.(interfaces.ErrorGitLabSourceRepository); ok {
+		errorSources, findErr := errorSourceRepo.FindErrorGitLabSources(ctx)
+		if findErr != nil {
+			logger.Errorf(ctx, "[Scheduler] failed to list errored GitLab sources for trigger reconciliation: %v", findErr)
+			return
+		}
+		for _, ds := range errorSources {
+			if GitLabSourceReconciliationEligible(ds) {
+				dataSources = append(dataSources, ds)
+			}
+		}
 	}
 	s.recoverSourceTriggers(ctx, dataSources)
 }
@@ -274,11 +299,12 @@ func (s *Scheduler) triggerSync(dataSourceID string, tenantID uint64) {
 	ctx := context.Background()
 
 	ds, err := s.dsRepo.FindByID(ctx, dataSourceID)
-	if err != nil || ds == nil || ds.Status != types.DataSourceStatusActive {
+	_, sourceMode := scheduledSync(ds)
+	errorSource := ds != nil && ds.Status == types.DataSourceStatusError && sourceMode && GitLabSourceReconciliationEligible(ds)
+	if err != nil || ds == nil || (ds.Status != types.DataSourceStatusActive && !errorSource) {
 		logger.Infof(ctx, "[Scheduler] skipping sync for ds=%s (not active or not found)", dataSourceID)
 		return
 	}
-	_, sourceMode := scheduledSync(ds)
 	if sourceMode {
 		if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
 			syncLog := &types.SyncLog{DataSourceID: dataSourceID, TenantID: tenantID, Status: types.SyncLogStatusQueued, StartedAt: time.Now().UTC()}
