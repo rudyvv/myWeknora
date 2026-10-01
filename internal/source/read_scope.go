@@ -109,6 +109,17 @@ func HasReadScope(ctx context.Context) bool {
 	return ok
 }
 
+// ReadLeaseID returns the server-created durable lease carried by ctx. It is
+// intended for repository code that must attach an exact resource pin to the
+// same lease that performs the authorized read.
+func ReadLeaseID(ctx context.Context) (string, bool) {
+	scope, ok := ctx.Value(readScopeKey{}).(*readScope)
+	if !ok || scope.leaseID == "" {
+		return "", false
+	}
+	return scope.leaseID, true
+}
+
 func HasPinnedSources(ctx context.Context) bool {
 	scope, ok := ctx.Value(readScopeKey{}).(*readScope)
 	return ok && scope.hasSources

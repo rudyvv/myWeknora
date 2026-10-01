@@ -11,13 +11,18 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Every technical projection uses the same predicate before ranking/pagination,
 // including directory entries, neighbour summaries and historical bodies.
 func (r *wikiPageRepository) readDB(ctx context.Context, table string) *gorm.DB {
-	db := r.db.WithContext(ctx)
-	if !r.sourceWiki {
+	return readWikiPageDB(ctx, r.db, r.sourceWiki, table)
+}
+
+func readWikiPageDB(ctx context.Context, base *gorm.DB, sourceWiki bool, table string) *gorm.DB {
+	db := base.WithContext(ctx)
+	if !sourceWiki {
 		return db
 	}
 	if err := source.ValidateReadScope(ctx); err != nil {
@@ -37,7 +42,8 @@ func (r *wikiPageRepository) readDB(ctx context.Context, table string) *gorm.DB 
  JOIN source_snapshots ss ON ss.id=wr.snapshot_id AND ss.state='published'
  JOIN source_files sf ON sf.id=wr.source_file_id AND sf.tenant_id=` + table + `.tenant_id AND sf.knowledge_base_id=` + table + `.knowledge_base_id AND sf.data_source_id=ss.data_source_id
  WHERE ` + owner + ` AND wr.evidence_id=we->>'id' AND wr.source_file_id=we->>'knowledge_id'
- AND wr.file_version_id=we->>'file_version_id' AND wr.snapshot_id=we->>'snapshot_id'
+		 AND wr.file_version_id=we->>'file_version_id' AND wr.snapshot_id=we->>'snapshot_id'
+	 AND wr.path=we->>'path' AND wr.commit_sha=we->>'commit_sha'
  AND sf.data_source_id=we->>'data_source_id' AND sv.sha256=we->>'sha256' AND ss.commit_sha=we->>'commit_sha'
  AND encode(sha256(sv.content),'hex')=sv.sha256
  AND encode(sha256(substring(sv.content from (we->'range'->>'start_byte')::int+1 for GREATEST(0,(we->'range'->>'end_byte')::int-(we->'range'->>'start_byte')::int))),'hex')=we->>'text_sha256'
@@ -65,6 +71,103 @@ func (r *wikiPageRepository) readDB(ctx context.Context, table string) *gorm.DB 
 	return db.Where("(" + ordinary + ") OR (" + condition + ")")
 }
 
+func pinSourceWikiEvidenceOwner(tx *gorm.DB, ctx context.Context, leaseID, pageID string, revisionID *string, version int) error {
+	if leaseID == "" || pageID == "" || version <= 0 {
+		return nil
+	}
+	owner := "wr.page_id=? AND wr.revision_id IS NULL"
+	args := []any{leaseID, leaseID, pageID}
+	if revisionID != nil {
+		owner = "wr.page_id=? AND wr.revision_id=?"
+		args = append(args, *revisionID)
+	}
+	args = append(args, version)
+	return tx.Exec(`INSERT INTO source_read_wiki_evidence_refs
+		(lease_id,page_id,revision_id,version,evidence_id,source_file_id,file_version_id,snapshot_id,path,commit_sha)
+		SELECT ?,wr.page_id,wr.revision_id,wr.version,wr.evidence_id,wr.source_file_id,wr.file_version_id,wr.snapshot_id,wr.path,wr.commit_sha
+		FROM source_wiki_evidence_refs wr
+		JOIN source_file_versions sv ON sv.id=wr.file_version_id AND sv.source_file_id=wr.source_file_id AND sv.snapshot_id=wr.snapshot_id
+		JOIN source_files sf ON sf.id=wr.source_file_id
+		JOIN source_read_leases rl ON rl.id=? AND rl.expires_at>now()
+		WHERE `+owner+` AND wr.version=? AND `+source.SourcePermissionSQL(ctx, "sf.data_source_id", "sf.id")+`
+		ON CONFLICT (lease_id,page_id,version,evidence_id) DO NOTHING`,
+		args...).Error
+}
+
+func enqueueSourceSnapshotGCCandidate(tx *gorm.DB, snapshotID string) error {
+	if snapshotID == "" {
+		return nil
+	}
+	return tx.Exec(`INSERT INTO source_snapshot_gc_candidates(snapshot_id)
+		VALUES (?) ON CONFLICT(snapshot_id) DO UPDATE
+		SET next_attempt_at=LEAST(source_snapshot_gc_candidates.next_attempt_at,now()),last_error=''`, snapshotID).Error
+}
+
+func enqueueWikiEvidenceGCCandidates(tx *gorm.DB, refs *gorm.DB) error {
+	var snapshotIDs []string
+	if err := refs.Distinct().Pluck("snapshot_id", &snapshotIDs).Error; err != nil {
+		return err
+	}
+	for _, snapshotID := range snapshotIDs {
+		if err := enqueueSourceSnapshotGCCandidate(tx, snapshotID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func registerSourceWikiAttemptEvidence(tx *gorm.DB, attemptID string, evidence []types.SourceWikiEvidence) error {
+	if attemptID == "" || len(evidence) == 0 {
+		return fmt.Errorf("source Wiki attempt evidence owner is incomplete")
+	}
+	for _, item := range evidence {
+		result := tx.Exec(`INSERT INTO source_wiki_attempt_evidence_refs
+			(attempt_id,source_file_id,file_version_id,snapshot_id)
+			SELECT ?,sv.source_file_id,sv.id,sv.snapshot_id
+			FROM source_file_versions sv
+			JOIN source_files sf ON sf.id=sv.source_file_id
+			JOIN source_snapshots ss ON ss.id=sv.snapshot_id AND ss.state='published'
+			JOIN source_snapshot_members sm ON sm.snapshot_id=ss.id AND sm.source_file_id=sf.id AND sm.file_version_id=sv.id AND sm.status='parsed'
+			WHERE sv.id=? AND sv.source_file_id=? AND sv.snapshot_id=? AND sv.sha256=?
+			AND sf.data_source_id=? AND ss.commit_sha=? AND sm.path=?
+			ON CONFLICT (attempt_id,file_version_id) DO NOTHING`,
+			attemptID, item.FileVersionID, item.KnowledgeID, item.SnapshotID, item.SHA256, item.DataSourceID, item.CommitSHA, item.Path)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			var exists int64
+			if err := tx.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=? AND file_version_id=? AND source_file_id=? AND snapshot_id=?", attemptID, item.FileVersionID, item.KnowledgeID, item.SnapshotID).Count(&exists).Error; err != nil {
+				return err
+			}
+			if exists != 1 {
+				return fmt.Errorf("source Wiki attempt evidence version is no longer a published exact match")
+			}
+		}
+	}
+	return nil
+}
+
+// RegisterSourceWikiAttemptEvidence pins the exact published file versions
+// selected for a running generation attempt. Call inside the attempt update
+// transaction before any model call.
+func RegisterSourceWikiAttemptEvidence(tx *gorm.DB, attemptID string, evidence []types.SourceWikiEvidence) error {
+	return registerSourceWikiAttemptEvidence(tx, attemptID, evidence)
+}
+
+func releaseSourceWikiAttemptEvidence(tx *gorm.DB, attemptID string) error {
+	if attemptID == "" {
+		return nil
+	}
+	return tx.Exec("DELETE FROM source_wiki_attempt_evidence_refs WHERE attempt_id=?", attemptID).Error
+}
+
+// ReleaseSourceWikiAttemptEvidence releases exact raw-version owners after a
+// terminal attempt transition, in the same transaction as that transition.
+func ReleaseSourceWikiAttemptEvidence(tx *gorm.DB, attemptID string) error {
+	return releaseSourceWikiAttemptEvidence(tx, attemptID)
+}
+
 func registerSourceWikiEvidence(db *gorm.DB, page *types.WikiPage, revision *types.WikiPageRevision) error {
 	if page.SourceProvenance == nil {
 		return nil
@@ -74,7 +177,7 @@ func registerSourceWikiEvidence(db *gorm.DB, page *types.WikiPage, revision *typ
 		revisionID = &revision.ID
 	}
 	for _, e := range page.SourceProvenance.Evidence {
-		ref := types.SourceWikiEvidenceRef{ID: uuid.NewString(), PageID: page.ID, RevisionID: revisionID, Version: page.Version, EvidenceID: e.ID, SourceFileID: e.KnowledgeID, FileVersionID: e.FileVersionID, SnapshotID: e.SnapshotID}
+		ref := types.SourceWikiEvidenceRef{ID: uuid.NewString(), PageID: page.ID, RevisionID: revisionID, Version: page.Version, EvidenceID: e.ID, SourceFileID: e.KnowledgeID, FileVersionID: e.FileVersionID, SnapshotID: e.SnapshotID, Path: e.Path, CommitSHA: e.CommitSHA}
 		if err := db.Create(&ref).Error; err != nil {
 			return err
 		}
@@ -88,40 +191,52 @@ func ReadSourceWikiEvidence(ctx context.Context, db *gorm.DB, pageID string, rev
 	if err := source.ValidateReadScope(ctx); err != nil {
 		return nil, err
 	}
-	q := db.WithContext(ctx).Table("source_wiki_evidence_refs wr").
-		Select("sf.id AS knowledge_id, sf.data_source_id, ss.id AS snapshot_id, ss.project_id, ss.commit_sha, ss.repository_url, sv.id AS file_version_id, sv.sha256, sv.encoding, sv.quality, sv.parser_version, sv.content AS raw_content, sv.symbols, octet_length(sv.content) AS file_size, sm.path").
-		Joins("JOIN source_file_versions sv ON sv.id=wr.file_version_id AND sv.source_file_id=wr.source_file_id AND sv.snapshot_id=wr.snapshot_id").
-		Joins("JOIN source_files sf ON sf.id=wr.source_file_id").
-		Joins("JOIN source_snapshots ss ON ss.id=wr.snapshot_id AND ss.data_source_id=sf.data_source_id AND ss.tenant_id=sf.tenant_id AND ss.knowledge_base_id=sf.knowledge_base_id AND ss.state='published'").
-		Joins("JOIN source_snapshot_members sm ON sm.snapshot_id=ss.id AND sm.source_file_id=sf.id AND sm.file_version_id=sv.id AND sm.status='parsed'").
-		Joins("JOIN data_sources ds ON ds.id=sf.data_source_id AND ds.deleted_at IS NULL AND ds.config->'settings'->>'content_mode'='source'").
-		Where("wr.page_id=? AND wr.version=? AND wr.evidence_id=? AND sv.id=? AND sf.id=?", pageID, version, e.ID, e.FileVersionID, e.KnowledgeID).
-		Where(source.SourcePermissionSQL(ctx, "sf.data_source_id", "sf.id"))
-	if revisionID == nil {
-		q = q.Where("wr.revision_id IS NULL")
-	} else {
-		q = q.Where("wr.revision_id=?", *revisionID)
-	}
 	var file types.SourceFileView
-	if err := q.Take(&file).Error; err != nil {
+	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		leaseID, ok := source.ReadLeaseID(ctx)
+		if !ok {
+			return fmt.Errorf("source evidence read requires a durable lease")
+		}
+		if err := pinSourceWikiEvidenceOwner(tx, ctx, leaseID, pageID, revisionID, version); err != nil {
+			return err
+		}
+		q := tx.Table("source_read_wiki_evidence_refs wr").
+			Select("sf.id AS knowledge_id, sf.data_source_id, ss.id AS snapshot_id, ss.project_id, ss.commit_sha, ss.repository_url, sv.id AS file_version_id, sv.sha256, sv.encoding, sv.quality, sv.parser_version, sv.content AS raw_content, sv.symbols, octet_length(sv.content) AS file_size, wr.path AS path").
+			Joins("JOIN source_file_versions sv ON sv.id=wr.file_version_id AND sv.source_file_id=wr.source_file_id AND sv.snapshot_id=wr.snapshot_id").
+			Joins("JOIN source_read_leases rl ON rl.id=wr.lease_id AND rl.expires_at>now()").
+			Joins("JOIN source_files sf ON sf.id=wr.source_file_id").
+			Joins("JOIN source_snapshots ss ON ss.id=wr.snapshot_id AND ss.data_source_id=sf.data_source_id AND ss.tenant_id=sf.tenant_id AND ss.knowledge_base_id=sf.knowledge_base_id AND ss.state='published'").
+			Joins("JOIN data_sources ds ON ds.id=sf.data_source_id AND ds.deleted_at IS NULL AND ds.config->'settings'->>'content_mode'='source'").
+			Where("wr.lease_id=? AND wr.page_id=? AND wr.version=? AND wr.evidence_id=? AND sv.id=? AND sf.id=?", leaseID, pageID, version, e.ID, e.FileVersionID, e.KnowledgeID).
+			Where(source.SourcePermissionSQL(ctx, "sf.data_source_id", "sf.id"))
+		if revisionID == nil {
+			q = q.Where("wr.revision_id IS NULL")
+		} else {
+			q = q.Where("wr.revision_id=?", *revisionID)
+		}
+		if err := q.Clauses(clause.Locking{Strength: "SHARE", Table: clause.Table{Name: "sv"}}).Take(&file).Error; err != nil {
+			return err
+		}
+		hash := sha256.Sum256(file.RawContent)
+		if hex.EncodeToString(hash[:]) != file.SHA256 || file.SHA256 != e.SHA256 || file.CommitSHA != e.CommitSHA || file.SnapshotID != e.SnapshotID || file.Path != e.Path || file.DataSourceID != e.DataSourceID {
+			return fmt.Errorf("registered evidence provenance mismatch")
+		}
+		if e.Range.StartByte < 0 || e.Range.EndByte > len(file.RawContent) || e.Range.EndByte <= e.Range.StartByte {
+			return fmt.Errorf("registered evidence range mismatch")
+		}
+		raw := file.RawContent[e.Range.StartByte:e.Range.EndByte]
+		hash = sha256.Sum256(raw)
+		if hex.EncodeToString(hash[:]) != e.TextSHA256 || e.Range.StartLine != 1+strings.Count(string(file.RawContent[:e.Range.StartByte]), "\n") || e.Range.EndLine != 1+strings.Count(string(file.RawContent[:e.Range.EndByte-1]), "\n") {
+			return fmt.Errorf("registered evidence coordinates mismatch")
+		}
+		if err := enrichSFCReferences(ctx, tx, &file); err != nil {
+			return err
+		}
+		file.Content = string(file.RawContent)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	hash := sha256.Sum256(file.RawContent)
-	if hex.EncodeToString(hash[:]) != file.SHA256 || file.SHA256 != e.SHA256 || file.CommitSHA != e.CommitSHA || file.SnapshotID != e.SnapshotID || file.Path != e.Path || file.DataSourceID != e.DataSourceID {
-		return nil, fmt.Errorf("registered evidence provenance mismatch")
-	}
-	if e.Range.StartByte < 0 || e.Range.EndByte > len(file.RawContent) || e.Range.EndByte <= e.Range.StartByte {
-		return nil, fmt.Errorf("registered evidence range mismatch")
-	}
-	raw := file.RawContent[e.Range.StartByte:e.Range.EndByte]
-	hash = sha256.Sum256(raw)
-	if hex.EncodeToString(hash[:]) != e.TextSHA256 || e.Range.StartLine != 1+strings.Count(string(file.RawContent[:e.Range.StartByte]), "\n") || e.Range.EndLine != 1+strings.Count(string(file.RawContent[:e.Range.EndByte-1]), "\n") {
-		return nil, fmt.Errorf("registered evidence coordinates mismatch")
-	}
-	if err := enrichSFCReferences(ctx, db, &file); err != nil {
-		return nil, err
-	}
-	file.Content = string(file.RawContent)
 	return &file, nil
 }
 

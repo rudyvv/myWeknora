@@ -2759,7 +2759,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	db, err := gorm.Open(pgdriver.Open(address.String()), &gorm.Config{Logger: silentLogger})
 	require.NoError(t, err)
 	t.Cleanup(func() { sqlDB, _ := db.DB(); _ = sqlDB.Close() })
-	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Model{}, &types.DataSource{}, &types.SyncLog{}, &types.TaskPendingOp{}, &types.SourceWikiAttempt{}, &types.KnowledgeTag{}, &types.KnowledgeTagRelation{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}))
+	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Model{}, &types.DataSource{}, &types.SyncLog{}, &types.TaskPendingOp{}, &types.SourceWikiAttempt{}, &types.KnowledgeTag{}, &types.KnowledgeTagRelation{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}, &types.WikiFolder{}, &types.WikiPage{}, &types.WikiPageRevision{}))
 	require.NoError(t, db.Exec(`CREATE TABLE embeddings (
 		id BIGSERIAL PRIMARY KEY, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
 		source_id TEXT NOT NULL, source_type INTEGER NOT NULL, chunk_id TEXT, knowledge_id TEXT,
@@ -2776,6 +2776,12 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	leaseMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000103_source_read_leases.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(leaseMigration)).Error)
+	wikiMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000105_source_wiki.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(wikiMigration)).Error)
+	wikiRetentionMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000112_source_wiki_revision_retention.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(wikiRetentionMigration)).Error)
 	incrementalMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000104_source_incremental_artifacts.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(incrementalMigration)).Error)

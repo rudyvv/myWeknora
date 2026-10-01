@@ -32,6 +32,9 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000105_source_wiki.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.db.Exec(string(migration)).Error)
+	retentionMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000112_source_wiki_revision_retention.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(retentionMigration)).Error)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Messages []struct {
@@ -134,6 +137,330 @@ func TestSourceWikiCurrentAnswersStopAfterPublicationAndRevisionsKeepTheirOwnEvi
 	historical, err = generator.ReadEvidence(f.ctx, f.kb.ID, page.Slug, 0, "e001")
 	require.NoError(t, err)
 	require.Equal(t, oldSHA, historical.CommitSHA, "rollback restores the body evidence rather than current source evidence")
+}
+
+func TestSourceWikiRevisionLeasePinOutlivesPruneAndGCDropsOnlyOldIndex(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	req := types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"}
+	first, err := generator.GenerateModule(f.ctx, req)
+	require.NoError(t, err)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, first.Slug)
+	require.NoError(t, err)
+	var pins int64
+	require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=?", first.ID).Count(&pins).Error)
+	require.Zero(t, pins, "a ready attempt transfers protection to the page/revision owner")
+	oldEvidence := page.SourceProvenance.Evidence[0]
+	oldSnapshotID := oldEvidence.SnapshotID
+	var oldChunkIDs []string
+	require.NoError(t, f.db.Table("source_chunk_references").Where("snapshot_id=?", oldSnapshotID).Order("chunk_id").Pluck("chunk_id", &oldChunkIDs).Error)
+	require.NotEmpty(t, oldChunkIDs)
+	sharedOwner := &types.WikiPage{
+		ID: uuid.NewString(), TenantID: page.TenantID, KnowledgeBaseID: page.KnowledgeBaseID,
+		Slug: "concept/shared-evidence-owner", Title: "Shared evidence owner", PageType: types.WikiPageTypeConcept,
+		Status: types.WikiPageStatusPublished, Content: page.Content, Summary: page.Summary,
+		SourceRefs: append(types.StringArray(nil), page.SourceRefs...), ChunkRefs: append(types.StringArray(nil), page.ChunkRefs...),
+		PageMetadata: append(types.JSON(nil), page.PageMetadata...), SourceProvenance: page.SourceProvenance, Version: 1,
+	}
+	require.NoError(t, repository.NewWikiPageRepository(f.db).Create(f.ctx, sharedOwner))
+
+	f.advanceJava("new schedule")
+	syncSourceFixture(t, f)
+	second, err := generator.GenerateModule(f.ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, "ready", second.Status)
+
+	readCtx, release, err := wiki.(interfaces.WikiReadService).BeginWikiRead(f.ctx, types.SearchTargets{&types.SearchTarget{
+		Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID,
+	}})
+	require.NoError(t, err)
+	defer release()
+	revisions := repository.NewWikiPageRepository(f.db)
+	oldRevision, err := revisions.GetRevision(readCtx, f.kb.ID, page.ID, 1)
+	require.NoError(t, err)
+	require.Equal(t, oldEvidence.FileVersionID, oldRevision.SourceProvenance.Evidence[0].FileVersionID)
+
+	require.NoError(t, f.db.Table("source_read_wiki_evidence_refs").Where("file_version_id=?", oldEvidence.FileVersionID).Count(&pins).Error)
+	require.EqualValues(t, 1, pins, "the authorized history read must pin its exact raw version")
+
+	gc := repository.NewSourceSnapshotRepository(f.db)
+	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
+	require.NoError(t, err)
+
+	var oldIndex int64
+	require.NoError(t, f.db.Table("source_chunk_references").Where("snapshot_id=?", oldSnapshotID).Count(&oldIndex).Error)
+	require.Zero(t, oldIndex, "historical Wiki ownership must not retain the old retrieval index")
+	require.NoError(t, f.db.Table("source_snapshot_members").Where("snapshot_id=?", oldSnapshotID).Count(&oldIndex).Error)
+	require.Zero(t, oldIndex, "old file membership is not retained as a substitute for raw evidence ownership")
+	var oldArtifacts int64
+	require.NoError(t, f.db.Table("embeddings").Where("chunk_id IN ?", oldChunkIDs).Count(&oldArtifacts).Error)
+	require.Zero(t, oldArtifacts, "old embeddings are collected independently of retained evidence")
+	require.NoError(t, f.db.Unscoped().Table("chunks").Where("id IN ?", oldChunkIDs).Count(&oldArtifacts).Error)
+	require.Zero(t, oldArtifacts, "old chunks are collected independently of retained evidence")
+	var rawCount int64
+	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", oldEvidence.FileVersionID).Count(&rawCount).Error)
+	require.EqualValues(t, 1, rawCount, "the revision owner and active read pin preserve the raw version")
+
+	historical, err := generator.ReadEvidence(f.ctx, f.kb.ID, page.Slug, 1, oldEvidence.ID)
+	require.NoError(t, err, "historical raw reads must not depend on snapshot membership retained for indexing")
+	require.Equal(t, oldEvidence.SHA256, historical.SHA256)
+	require.Equal(t, oldEvidence.Path, historical.Path)
+	require.Equal(t, oldEvidence.CommitSHA, historical.CommitSHA)
+	require.Equal(t, string(historical.RawContent[oldEvidence.Range.StartByte:oldEvidence.Range.EndByte]), string(historical.RawContent), "the body evidence range remains anchored to exact old bytes")
+
+	type pruneResult struct{ err error }
+	type evidenceResult struct {
+		file *types.SourceFileView
+		err  error
+	}
+	start := make(chan struct{})
+	pruned := make(chan pruneResult, 1)
+	read := make(chan evidenceResult, 1)
+	go func() {
+		<-start
+		pruned <- pruneResult{err: revisions.PruneRevisions(f.ctx, types.WikiRevisionPruneRequest{
+			PageID: page.ID, HardKeepFromVersion: 2,
+		})}
+	}()
+	go func() {
+		<-start
+		readFile, readErr := repository.ReadSourceWikiEvidence(readCtx, f.db, oldRevision.PageID, &oldRevision.ID, oldRevision.Version, oldRevision.SourceProvenance.Evidence[0])
+		read <- evidenceResult{file: readFile, err: readErr}
+	}()
+	close(start)
+	readResult := <-read
+	require.NoError(t, readResult.err, "a read pin acquired before pruning keeps that exact body readable")
+	require.Equal(t, oldEvidence.SHA256, readResult.file.SHA256)
+	require.NoError(t, (<-pruned).err)
+	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", oldEvidence.FileVersionID).Count(&rawCount).Error)
+	require.EqualValues(t, 1, rawCount, "the lease pin must survive concurrent revision pruning")
+
+	release()
+	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", oldEvidence.FileVersionID).Count(&rawCount).Error)
+	require.EqualValues(t, 1, rawCount, "another page's evidence owner must keep the shared immutable version")
+
+	wikiRepo := repository.NewWikiPageRepository(f.db)
+	require.NoError(t, wikiRepo.DeleteByID(f.ctx, sharedOwner.ID))
+	require.NoError(t, wikiRepo.DeleteRevisionsByPage(f.ctx, sharedOwner.ID))
+	require.NoError(t, f.db.Exec("CREATE TABLE source_gc_test_blockers (version_id VARCHAR(36) REFERENCES source_file_versions(id))").Error)
+	require.NoError(t, f.db.Exec("INSERT INTO source_gc_test_blockers(version_id) VALUES (?)", oldEvidence.FileVersionID).Error)
+	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
+	require.Error(t, err, "an unexpected restrictive owner must fail closed")
+	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", oldEvidence.FileVersionID).Count(&rawCount).Error)
+	require.EqualValues(t, 1, rawCount, "a failed release does not delete protected bytes")
+	var attempts int
+	require.NoError(t, f.db.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", oldSnapshotID).Count(&pins).Error)
+	require.EqualValues(t, 1, pins, "the failed candidate remains queued for retry")
+	require.NoError(t, f.db.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", oldSnapshotID).Select("attempt_count").Scan(&attempts).Error)
+	require.Equal(t, 1, attempts)
+	require.NoError(t, f.db.Exec("DROP TABLE source_gc_test_blockers").Error)
+	require.NoError(t, f.db.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", oldSnapshotID).Update("next_attempt_at", time.Now().UTC().Add(-time.Second)).Error)
+	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", oldEvidence.FileVersionID).Count(&rawCount).Error)
+	require.Zero(t, rawCount, "the raw version becomes collectible after its final owner and lease pin release")
+	require.NoError(t, f.db.Table("source_snapshots").Where("id=?", oldSnapshotID).Count(&rawCount).Error)
+	require.Zero(t, rawCount, "orphan snapshot metadata is collected after the last exact raw owner releases")
+
+	require.NoError(t, wikiRepo.DeleteRevisionsByKnowledgeBaseID(f.ctx, f.kb.TenantID, f.kb.ID))
+	require.NoError(t, f.db.Table("source_wiki_evidence_refs").Joins("JOIN wiki_pages ON wiki_pages.id=source_wiki_evidence_refs.page_id").Where("wiki_pages.knowledge_base_id=?", f.kb.ID).Count(&rawCount).Error)
+	require.Zero(t, rawCount, "knowledge-base cleanup releases current evidence owners as well as revisions")
+}
+
+func TestSourceWikiRollbackRevalidatesRestoredEvidenceAgainstCurrentSnapshot(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"})
+	require.NoError(t, err)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.NoError(t, err)
+	originalRefs := append(types.StringArray(nil), page.SourceRefs...)
+	originalEvidenceVersion := page.SourceProvenance.Evidence[0].FileVersionID
+
+	edit := *page
+	edit.Content += "\nA temporary unverified edit.\n"
+	page, err = wiki.UpdatePage(f.ctx, &edit)
+	require.NoError(t, err)
+	require.Equal(t, "unverified", page.SourceProvenance.State)
+
+	page, err = wiki.RevertPageToVersion(f.ctx, f.kb.ID, page.Slug, 1)
+	require.NoError(t, err)
+	require.Equal(t, "ready", page.SourceProvenance.State, "a still-current validated revision remains suitable after rollback")
+	require.Equal(t, originalRefs, page.SourceRefs)
+	require.Equal(t, originalEvidenceVersion, page.SourceProvenance.Evidence[0].FileVersionID)
+	require.Equal(t, "getPushSchedule returns a schedule.", strings.TrimSpace(strings.SplitN(strings.TrimPrefix(page.Content, "# Scheduling module\n\n"), " [", 2)[0]))
+}
+
+func TestSourceWikiRunningAttemptPinsExactRawVersionAfterReadLeaseExpiry(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var block atomic.Bool
+	block.Store(true)
+	entered := make(chan struct{}, 1)
+	resume := make(chan struct{})
+	_, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if !qa && block.CompareAndSwap(true, false) {
+			entered <- struct{}{}
+			<-resume
+		}
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	done := make(chan *types.SourceWikiAttempt, 1)
+	failed := make(chan error, 1)
+	go func() {
+		attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+			KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+		})
+		done <- attempt
+		failed <- err
+	}()
+	t.Cleanup(func() {
+		select {
+		case resume <- struct{}{}:
+		default:
+		}
+	})
+	select {
+	case <-entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("generation did not reach the controlled model call")
+	}
+
+	var attempt types.SourceWikiAttempt
+	require.NoError(t, f.db.Where("status='running'").Take(&attempt).Error)
+	var pins int64
+	require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=? AND snapshot_id=?", attempt.ID, attempt.SnapshotID).Count(&pins).Error)
+	require.EqualValues(t, 1, pins, "the running attempt pins the selected immutable version before model calls")
+	var version types.SourceFileVersion
+	require.NoError(t, f.db.Table("source_file_versions").Where("snapshot_id=?", attempt.SnapshotID).Take(&version).Error)
+
+	f.advanceJava("new schedule")
+	syncSourceFixture(t, f)
+	var oldChunks []string
+	require.NoError(t, f.db.Table("source_chunk_references").Where("snapshot_id=?", attempt.SnapshotID).Pluck("chunk_id", &oldChunks).Error)
+	require.NotEmpty(t, oldChunks)
+	require.NoError(t, f.db.Exec(`UPDATE source_read_leases SET expires_at=now()-interval '1 second'
+		WHERE id IN (SELECT lease_id FROM source_read_wiki_scopes WHERE jsonb_exists(source_ids,?))`, f.ds.ID).Error)
+
+	gc := repository.NewSourceSnapshotRepository(f.db)
+	var err error
+	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", version.ID).Count(&pins).Error)
+	require.EqualValues(t, 1, pins, "the exact attempt owner survives ordinary read-lease expiry")
+	require.NoError(t, f.db.Table("source_chunk_references").Where("snapshot_id=?", attempt.SnapshotID).Count(&pins).Error)
+	require.Zero(t, pins, "attempt raw ownership does not keep the retired search index")
+	var artifactCount int64
+	require.NoError(t, f.db.Table("embeddings").Where("chunk_id IN ?", oldChunks).Count(&artifactCount).Error)
+	require.Zero(t, artifactCount)
+
+	resume <- struct{}{}
+	completed := <-done
+	require.NoError(t, <-failed)
+	require.Equal(t, "failed", completed.Status, "the expired read lease still wins on authorization")
+	require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=?", attempt.ID).Count(&pins).Error)
+	require.Zero(t, pins, "terminal attempt status releases its exact version owner")
+	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", version.ID).Count(&pins).Error)
+	require.Zero(t, pins, "the raw version is collected after terminal release")
+}
+
+func TestSourceWikiRevisionOwnersFollow50And200PostgresWindows(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.NoError(t, err)
+	repo := repository.NewWikiPageRepository(f.db)
+	addRevision := func(author string, label int) {
+		revision := &types.WikiPageRevision{
+			ID: uuid.NewString(), TenantID: page.TenantID, KnowledgeBaseID: page.KnowledgeBaseID,
+			PageID: page.ID, Slug: page.Slug, Version: page.Version, Title: page.Title,
+			PageType: page.PageType, Status: page.Status, Content: page.Content, Summary: page.Summary,
+			Aliases: append(types.StringArray(nil), page.Aliases...), SourceRefs: append(types.StringArray(nil), page.SourceRefs...),
+			ChunkRefs: append(types.StringArray(nil), page.ChunkRefs...), PageMetadata: append(types.JSON(nil), page.PageMetadata...),
+			SourceProvenance: page.SourceProvenance, EditSource: author, EditorID: page.LastEditorID,
+			EditedAt: page.UpdatedAt, CreatedAt: time.Now(),
+		}
+		next := *page
+		next.Version = page.Version
+		next.UpdatedAt = time.Now()
+		next.LastEditSource = author
+		require.NoError(t, repo.UpdateWithRevision(f.ctx, &next, revision), "snapshot version %d", label)
+		page = &next
+	}
+	for version := 1; version <= 204; version++ {
+		author := types.WikiEditSourcePipeline
+		if version == 1 {
+			author = types.WikiEditSourceUser
+		} else if version == 2 {
+			author = types.WikiEditSourceAgent
+		}
+		addRevision(author, version)
+	}
+	require.Equal(t, 205, page.Version)
+	require.NoError(t, repo.PruneRevisions(f.ctx, types.WikiRevisionPruneRequest{
+		PageID: page.ID, KeepFromVersion: page.Version - types.WikiMaxRevisionsPerPage,
+		PrunableSources: types.WikiPrunableEditSources,
+	}))
+
+	var kept int64
+	require.NoError(t, f.db.Model(&types.WikiPageRevision{}).Where("page_id=?", page.ID).Count(&kept).Error)
+	require.EqualValues(t, types.WikiMaxRevisionsPerPage+2, kept, "the soft window keeps recent pipeline revisions plus authored history")
+	var bounds struct{ MinVersion, MaxVersion int }
+	require.NoError(t, f.db.Model(&types.WikiPageRevision{}).Select("min(version) AS min_version,max(version) AS max_version").Where("page_id=?", page.ID).Scan(&bounds).Error)
+	require.Equal(t, 1, bounds.MinVersion, "the soft cap preserves old human revisions")
+	require.Equal(t, 204, bounds.MaxVersion)
+	var retainedOwners int64
+	require.NoError(t, f.db.Table("source_wiki_evidence_refs").Where("page_id=? AND revision_id IS NOT NULL", page.ID).Count(&retainedOwners).Error)
+	require.EqualValues(t, types.WikiMaxRevisionsPerPage+2, retainedOwners, "the soft prune releases only evicted automatic revision owners")
+
+	for version := 205; version <= 359; version++ {
+		addRevision(types.WikiEditSourceUser, version)
+	}
+	require.Equal(t, 360, page.Version)
+	require.NoError(t, repo.PruneRevisions(f.ctx, types.WikiRevisionPruneRequest{
+		PageID: page.ID, HardKeepFromVersion: page.Version - types.WikiMaxRevisionsHardCap,
+	}))
+	require.NoError(t, f.db.Model(&types.WikiPageRevision{}).Where("page_id=?", page.ID).Count(&kept).Error)
+	require.EqualValues(t, types.WikiMaxRevisionsHardCap, kept, "the hard ceiling bounds pages authored entirely by people")
+	require.NoError(t, f.db.Model(&types.WikiPageRevision{}).Select("min(version) AS min_version,max(version) AS max_version").Where("page_id=?", page.ID).Scan(&bounds).Error)
+	require.Equal(t, 160, bounds.MinVersion, "the hard cap prunes older human and agent revisions")
+	require.Equal(t, 359, bounds.MaxVersion)
+	require.NoError(t, f.db.Table("source_wiki_evidence_refs").Where("page_id=? AND revision_id IS NOT NULL", page.ID).Count(&retainedOwners).Error)
+	require.EqualValues(t, types.WikiMaxRevisionsHardCap, retainedOwners, "hard pruning releases the evicted exact-version owners")
+	var currentOwners int64
+	require.NoError(t, f.db.Table("source_wiki_evidence_refs").Where("page_id=? AND revision_id IS NULL", page.ID).Count(&currentOwners).Error)
+	require.EqualValues(t, 1, currentOwners, "the current page retains its independent evidence owner")
 }
 
 func TestSourceWikiRejectedEvidenceAndSemanticQAHaveBoundedManualRetries(t *testing.T) {

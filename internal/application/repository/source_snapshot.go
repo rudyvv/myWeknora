@@ -312,6 +312,11 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "data_source_id"}}, DoUpdates: clause.AssignmentColumns([]string{"snapshot_id"})}).Create(&publication).Error; err != nil {
 			return err
 		}
+		if previous.SnapshotID != "" && previous.SnapshotID != snapshot.ID {
+			if err := enqueueSourceSnapshotGCCandidate(tx, previous.SnapshotID); err != nil {
+				return err
+			}
+		}
 		now := time.Now().UTC()
 		if err := tx.Model(&types.SourceSnapshot{}).Where("id=? AND manifest_complete=true", snapshot.ID).Updates(map[string]any{"state": "published", "file_count": snapshot.FileCount, "chunk_count": snapshot.ChunkCount, "published_at": now, "processing_version": snapshot.ProcessingVersion, "embedding_version": snapshot.EmbeddingVersion, "parsed_count": snapshot.ParsedCount, "reused_file_count": snapshot.ReusedFileCount, "reused_chunk_count": snapshot.ReusedChunkCount, "embedded_chunk_count": snapshot.EmbeddedChunkCount, "reused_vector_count": snapshot.ReusedVectorCount}).Error; err != nil {
 			return err
@@ -657,4 +662,175 @@ func (r *sourceSnapshotRepository) GetStagedChunkIDs(ctx context.Context, snapsh
 		Where("cr.snapshot_id=? AND cr.file_version_id=?", snapshotID, fileVersionID).
 		Order("c.chunk_index ASC, c.id ASC").Pluck("cr.chunk_id", &ids).Error
 	return ids, err
+}
+
+// CollectRetiredSourceVersions removes a retired snapshot's search projection
+// independently from immutable file versions still owned by Wiki history or
+// an active evidence-read lease. Candidate claiming is short-lived so owner
+// release transactions never deadlock against a collector holding the queue
+// row while checking restrictive version foreign keys.
+func (r *sourceSnapshotRepository) CollectRetiredSourceVersions(ctx context.Context, limit int) (int, error) {
+	if r.db == nil || r.db.Dialector.Name() != "postgres" {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	processed := 0
+	for processed < limit {
+		token := uuid.NewString()
+		var snapshotID string
+		claimUntil := time.Now().UTC().Add(2 * time.Minute)
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("DELETE FROM source_read_leases WHERE expires_at<=now()").Error; err != nil {
+				return err
+			}
+			var candidate struct {
+				SnapshotID string `gorm:"column:snapshot_id"`
+			}
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+				Table("source_snapshot_gc_candidates").
+				Select("snapshot_id").
+				Where("next_attempt_at<=now() AND (claimed_until IS NULL OR claimed_until<=now())").
+				Order("next_attempt_at ASC,enqueued_at ASC,snapshot_id ASC").Take(&candidate).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			snapshotID = candidate.SnapshotID
+			return tx.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", snapshotID).
+				Updates(map[string]any{"claim_token": token, "claimed_until": claimUntil}).Error
+		})
+		if err != nil {
+			return processed, err
+		}
+		if snapshotID == "" {
+			break
+		}
+		processed++
+
+		err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var candidateCount int64
+			if err := tx.Table("source_snapshot_gc_candidates").Where("snapshot_id=? AND claim_token=?", snapshotID, token).Count(&candidateCount).Error; err != nil {
+				return err
+			}
+			if candidateCount == 0 {
+				return nil
+			}
+			var snapshot types.SourceSnapshot
+			if err := tx.Where("id=?", snapshotID).Take(&snapshot).Error; err != nil {
+				return err
+			}
+			// Publish and source reads serialize on the same source_publications
+			// row. The DataSource lock also covers first publication, when no
+			// publication row exists yet. Pausing/unbinding is not an owner release.
+			var ds types.DataSource
+			dsErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("id=? AND tenant_id=?", snapshot.DataSourceID, snapshot.TenantID).Take(&ds).Error
+			if dsErr != nil && !errors.Is(dsErr, gorm.ErrRecordNotFound) {
+				return dsErr
+			}
+			var publication types.SourcePublication
+			pubErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("data_source_id=?", snapshot.DataSourceID).Take(&publication).Error
+			if pubErr != nil && !errors.Is(pubErr, gorm.ErrRecordNotFound) {
+				return pubErr
+			}
+			var activeRead bool
+			if err := tx.Raw(`SELECT EXISTS(SELECT 1 FROM source_read_scopes rs
+				JOIN source_read_leases rl ON rl.id=rs.lease_id
+				WHERE rs.snapshot_id=? AND rl.expires_at>now())`, snapshotID).Scan(&activeRead).Error; err != nil {
+				return err
+			}
+			if publication.SnapshotID == snapshotID || activeRead {
+				return deferSourceSnapshotGC(tx, snapshotID, token, "")
+			}
+
+			var chunkIDs []string
+			if err := tx.Table("source_chunk_references").Where("snapshot_id=?", snapshotID).Order("chunk_id").Pluck("chunk_id", &chunkIDs).Error; err != nil {
+				return err
+			}
+			if len(chunkIDs) > 0 {
+				if err := tx.Exec("DELETE FROM embeddings WHERE chunk_id IN ?", chunkIDs).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", snapshot.TenantID, snapshot.DataSourceID, snapshotID).Delete(&types.SourceCodeRelation{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("snapshot_id=?", snapshotID).Delete(&types.SourceChunkReference{}).Error; err != nil {
+				return err
+			}
+			if len(chunkIDs) > 0 {
+				if err := tx.Unscoped().Where("id IN ?", chunkIDs).Delete(&types.Chunk{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Where("snapshot_id=?", snapshotID).Delete(&types.SourceSnapshotMember{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(`DELETE FROM source_file_versions sv
+				WHERE sv.snapshot_id=?
+				AND NOT EXISTS (SELECT 1 FROM source_wiki_evidence_refs wr WHERE wr.file_version_id=sv.id)
+				AND NOT EXISTS (SELECT 1 FROM source_read_wiki_evidence_refs rr WHERE rr.file_version_id=sv.id)
+				AND NOT EXISTS (SELECT 1 FROM source_wiki_attempt_evidence_refs ar WHERE ar.file_version_id=sv.id)
+				AND NOT EXISTS (SELECT 1 FROM source_snapshot_members sm WHERE sm.file_version_id=sv.id)
+				AND NOT EXISTS (SELECT 1 FROM source_chunk_references cr WHERE cr.file_version_id=sv.id)`, snapshotID).Error; err != nil {
+				return err
+			}
+			var remaining int64
+			if err := tx.Table("source_file_versions").Where("snapshot_id=?", snapshotID).Count(&remaining).Error; err != nil {
+				return err
+			}
+			if remaining > 0 {
+				// Every remaining raw version has a restrictive FK-backed owner.
+				// Owner release triggers re-enqueue this snapshot, so don't poll it.
+				return tx.Exec("DELETE FROM source_snapshot_gc_candidates WHERE snapshot_id=? AND claim_token=?", snapshotID, token).Error
+			}
+			deleted := tx.Exec(`DELETE FROM source_snapshots ss WHERE ss.id=?
+				AND NOT EXISTS (SELECT 1 FROM source_publications sp WHERE sp.snapshot_id=ss.id)
+				AND NOT EXISTS (SELECT 1 FROM source_read_scopes rs WHERE rs.snapshot_id=ss.id)
+				AND NOT EXISTS (SELECT 1 FROM source_snapshot_members sm WHERE sm.snapshot_id=ss.id)
+				AND NOT EXISTS (SELECT 1 FROM source_chunk_references cr WHERE cr.snapshot_id=ss.id)
+				AND NOT EXISTS (SELECT 1 FROM source_code_relations rel WHERE rel.snapshot_id=ss.id)`, snapshotID)
+			if deleted.Error != nil {
+				return deleted.Error
+			}
+			if deleted.RowsAffected == 0 {
+				var stillExists int64
+				if err := tx.Table("source_snapshots").Where("id=?", snapshotID).Count(&stillExists).Error; err != nil {
+					return err
+				}
+				if stillExists != 0 {
+					return fmt.Errorf("retired source snapshot still has an unrecognized retention owner")
+				}
+			}
+			return tx.Exec("DELETE FROM source_snapshot_gc_candidates WHERE snapshot_id=? AND claim_token=?", snapshotID, token).Error
+		})
+		if err != nil {
+			cleanup := context.WithoutCancel(ctx)
+			writeErr := r.db.WithContext(cleanup).Table("source_snapshot_gc_candidates").
+				Where("snapshot_id=? AND claim_token=?", snapshotID, token).
+				Updates(map[string]any{"claim_token": nil, "claimed_until": nil,
+					"attempt_count": gorm.Expr("attempt_count+1"), "last_error": "collection failed; retry scheduled",
+					"next_attempt_at": time.Now().UTC().Add(5 * time.Minute)}).Error
+			if writeErr != nil {
+				return processed, errors.Join(err, writeErr)
+			}
+			return processed, err
+		}
+	}
+	return processed, nil
+}
+
+func deferSourceSnapshotGC(tx *gorm.DB, snapshotID, token, message string) error {
+	return tx.Table("source_snapshot_gc_candidates").
+		Where("snapshot_id=? AND claim_token=?", snapshotID, token).
+		Updates(map[string]any{"claim_token": nil, "claimed_until": nil,
+			"next_attempt_at": time.Now().UTC().Add(time.Minute), "last_error": message}).Error
 }
