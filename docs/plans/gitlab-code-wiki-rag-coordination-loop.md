@@ -6,7 +6,7 @@
 
 | 执行对话 | thread ID | worktree / branch |
 | --- | --- | --- |
-| 原 T06，现 T20 Webhook 与定时校验 | 01a0ebfe-56df-7223-8644-ca717bd658bd | C:/Users/28211/.codex/worktrees/b0df/WeKnora；codex/t20-gitlab-webhook-reconciliation |
+| 原 T06，现 T18 修订证据与引用回收 | 01a0ebfe-56df-7223-8644-ca717bd658bd | C:/Users/28211/.codex/worktrees/b0df/WeKnora；codex/t18-revision-evidence-gc |
 | 原 T09，现 T11 业务调用链 | 01a0ebfe-8153-70e0-898e-2b7ffa91eaad | C:/Users/28211/.codex/worktrees/a8ea/WeKnora；codex/t11-business-chain |
 | 原 T10，现 T13 代码检索排序 | 01a0ebfe-da20-71d2-a963-fa965754b497 | C:/Users/28211/.codex/worktrees/2119/WeKnora；codex/t13-code-retrieval |
 
@@ -124,3 +124,5 @@ T12 仍修复 c87d56d5 的唯一阻断 P2；root 进一步限定 preflight 只�
 2026-10-01 新恢复验收：T20 干净 f0e4aa87 已完成两个独立 Sol/high 轴：Standards 硬0/判断3P3，Spec0。root 六项真实PG（含旧两个反例）通过61.380s；无冲突合并已验收T12后三项PG通过44.432s、实际handler/管理route、前端vue-tsc与callback两项通过。见 t20-f0e4aa87-review.md，允许集成发布/关闭#28，累计将为13/22。T18/#26原依赖#22与#12均已核对CLOSED；验收发布后在原T06对话接续，从此轮已验收集成提交建分支，先给root现有修订/保护引用的接口提案再执行，勿提前修改T15/T16生成。
 
 T13 干净8cfd15cc全票双轴完：Standards硬0/判断2P3，Spec2P2；实际PG反例FAIL19.11s证明snake_case回填规范化谓词1→0、新MyBatis result_map/sql_fragment namespace#ID缺失而回填存在。原exact path/真实GIN及回填计数PASS17.51s，混合文档范围PASS9.98s；scope/queryplan本轮parser同步超时未计PASS。见t13-8cfd15cc-review.md，两项必修已直接派回同一Luna/xhigh，不集成/关#21。T11返修接受层已报告green且正冻结，须等完整SHA、真实链证据及root正式审查，不按进度算完成。当前游标T20 a0da71ed-ed49-406c-bef8-5e9d34149090:5；T11 72cc410b-07c6-49fe-bf0c-1014db92a623:7；T13 d26eae24-5fd6-4de0-acb6-eae9b78a346f:3。只发布验收里程碑，工作对话双向通信不需用户人工转告。
+
+最新权威：T20 集成 `a1d11b956f2292290c70f08c1c18bdaa60ed8a39` 已 push；#28 实际 CLOSED，累计13/22。已向原T06执行对话送达 REVIEW_PASSED 后派发T18/#26，固定新起点同a1d11b95、分支codex/t18-revision-evidence-gc，候选migration112须先提案，T13的111保留。T18已active开始现有修订/保护owner接口映射；T13返修active；T11新干净a12b2f9b已见但尚待worker完整READY冻结确认和本地匿名真实链可复验脚本，不提前标验收。最近游标T18 a0da71ed-ed49-406c-bef8-5e9d34149090:6；T11 72cc410b-07c6-49fe-bf0c-1014db92a623:7；T13 d26eae24-5fd6-4de0-acb6-eae9b78a346f:4。root本轮所有测试会话已收取，没有遗留root测试或共享服务重启。
