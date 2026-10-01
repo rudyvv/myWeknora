@@ -423,9 +423,6 @@ func (s *wikiPageService) RevertPageToVersion(
 	target.PageType = rev.PageType
 	target.Status = rev.Status
 	target.Aliases = append(types.StringArray(nil), rev.Aliases...)
-	target.SourceRefs = append(types.StringArray(nil), rev.SourceRefs...)
-	target.ChunkRefs = append(types.StringArray(nil), rev.ChunkRefs...)
-	target.PageMetadata = append(types.JSON(nil), rev.PageMetadata...)
 	if rev.SourceProvenance != nil {
 		provenance := *rev.SourceProvenance
 		provenance.Evidence = append([]types.SourceWikiEvidence(nil), rev.SourceProvenance.Evidence...)
@@ -451,6 +448,9 @@ func (s *wikiPageService) RevertPageToVersion(
 		target.SourceProvenance = nil
 	}
 	if rev.SourceProvenance != nil || page.SourceProvenance != nil {
+		target.SourceRefs = append(types.StringArray(nil), rev.SourceRefs...)
+		target.ChunkRefs = append(types.StringArray(nil), rev.ChunkRefs...)
+		target.PageMetadata = append(types.JSON(nil), rev.PageMetadata...)
 		ctx = sourceWikiVerifiedWrite(ctx)
 	}
 

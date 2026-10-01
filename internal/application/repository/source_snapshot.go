@@ -683,17 +683,19 @@ func (r *sourceSnapshotRepository) CollectRetiredSourceVersions(ctx context.Cont
 	for processed < limit {
 		token := uuid.NewString()
 		var snapshotID string
+		var claimGeneration int64
 		claimUntil := time.Now().UTC().Add(2 * time.Minute)
 		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := tx.Exec("DELETE FROM source_read_leases WHERE expires_at<=now()").Error; err != nil {
 				return err
 			}
 			var candidate struct {
-				SnapshotID string `gorm:"column:snapshot_id"`
+				SnapshotID        string `gorm:"column:snapshot_id"`
+				EnqueueGeneration int64  `gorm:"column:enqueue_generation"`
 			}
 			err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 				Table("source_snapshot_gc_candidates").
-				Select("snapshot_id").
+				Select("snapshot_id, enqueue_generation").
 				Where("next_attempt_at<=now() AND (claimed_until IS NULL OR claimed_until<=now())").
 				Order("next_attempt_at ASC,enqueued_at ASC,snapshot_id ASC").Take(&candidate).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -703,6 +705,7 @@ func (r *sourceSnapshotRepository) CollectRetiredSourceVersions(ctx context.Cont
 				return err
 			}
 			snapshotID = candidate.SnapshotID
+			claimGeneration = candidate.EnqueueGeneration
 			return tx.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", snapshotID).
 				Updates(map[string]any{"claim_token": token, "claimed_until": claimUntil}).Error
 		})
@@ -788,9 +791,27 @@ func (r *sourceSnapshotRepository) CollectRetiredSourceVersions(ctx context.Cont
 				return err
 			}
 			if remaining > 0 {
-				// Every remaining raw version has a restrictive FK-backed owner.
-				// Owner release triggers re-enqueue this snapshot, so don't poll it.
-				return tx.Exec("DELETE FROM source_snapshot_gc_candidates WHERE snapshot_id=? AND claim_token=?", snapshotID, token).Error
+				// Keep an owner-blocked candidate dormant without polling it. The
+				// generation predicate wakes it if an owner release enqueued while
+				// this pass was collecting; a later enqueue atomically moves infinity
+				// back to now. This update is deliberately late in the transaction,
+				// after the datasource/publication locks and all owner checks, so an
+				// owner-release transaction never waits on the queue while GC waits
+				// for that owner's restrictive file-version reference.
+				deferred := tx.Table("source_snapshot_gc_candidates").
+					Where("snapshot_id=? AND claim_token=?", snapshotID, token).
+					Updates(map[string]any{
+						"claim_token":     nil,
+						"claimed_until":   nil,
+						"next_attempt_at": gorm.Expr("CASE WHEN enqueue_generation = ? THEN 'infinity'::timestamptz ELSE now() END", claimGeneration),
+					})
+				if deferred.Error != nil {
+					return deferred.Error
+				}
+				if deferred.RowsAffected != 1 {
+					return fmt.Errorf("retired source snapshot candidate disappeared while deferring retained raw versions")
+				}
+				return nil
 			}
 			deleted := tx.Exec(`DELETE FROM source_snapshots ss WHERE ss.id=?
 				AND NOT EXISTS (SELECT 1 FROM source_publications sp WHERE sp.snapshot_id=ss.id)

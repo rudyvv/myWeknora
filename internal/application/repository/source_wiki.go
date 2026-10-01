@@ -100,7 +100,9 @@ func enqueueSourceSnapshotGCCandidate(tx *gorm.DB, snapshotID string) error {
 	}
 	return tx.Exec(`INSERT INTO source_snapshot_gc_candidates(snapshot_id)
 		VALUES (?) ON CONFLICT(snapshot_id) DO UPDATE
-		SET next_attempt_at=LEAST(source_snapshot_gc_candidates.next_attempt_at,now()),last_error=''`, snapshotID).Error
+		SET next_attempt_at=LEAST(source_snapshot_gc_candidates.next_attempt_at,now()),
+			enqueue_generation=source_snapshot_gc_candidates.enqueue_generation+1,
+			last_error=''`, snapshotID).Error
 }
 
 func enqueueWikiEvidenceGCCandidates(tx *gorm.DB, refs *gorm.DB) error {

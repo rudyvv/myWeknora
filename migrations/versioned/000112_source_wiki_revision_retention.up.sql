@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS source_snapshot_gc_candidates (
     snapshot_id VARCHAR(36) PRIMARY KEY REFERENCES source_snapshots(id) ON DELETE CASCADE,
     enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    enqueue_generation BIGINT NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT '',
     claim_token VARCHAR(36),
@@ -87,6 +88,7 @@ BEGIN
     VALUES (OLD.snapshot_id)
     ON CONFLICT (snapshot_id) DO UPDATE
       SET next_attempt_at = LEAST(source_snapshot_gc_candidates.next_attempt_at, now()),
+          enqueue_generation = source_snapshot_gc_candidates.enqueue_generation + 1,
           last_error = '';
     RETURN OLD;
 END;
