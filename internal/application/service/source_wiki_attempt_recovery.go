@@ -128,8 +128,8 @@ func (r *SourceWikiAttemptRecovery) recoverBatch(ctx context.Context) error {
 }
 
 func (r *SourceWikiAttemptRecovery) recoverOne(parent context.Context, candidate types.SourceWikiAttempt) error {
-	if candidate.ID == "" || candidate.TenantID == 0 || candidate.KnowledgeBaseID == "" || candidate.SourceID == "" {
-		return fmt.Errorf("candidate lacks a complete admitted KB/source identity")
+	if candidate.ID == "" {
+		return fmt.Errorf("candidate lacks an attempt identity")
 	}
 	ctx := types.WithExecutionTenant(parent, candidate.TenantID)
 	var attempt types.SourceWikiAttempt
@@ -141,25 +141,41 @@ func (r *SourceWikiAttemptRecovery) recoverOne(parent context.Context, candidate
 		}
 		return err
 	}
+	ledger := repository.NewSourceWikiAttemptLedger(r.db)
+	now := time.Now()
+	if !now.Before(attempt.DeadlineAt) {
+		return ledger.FailRecoveryTarget(ctx, attempt, "attempt absolute time budget exhausted", now)
+	}
+	if attempt.KnowledgeBaseID == "" || attempt.TenantID == 0 {
+		return ledger.FailRecoveryTarget(ctx, attempt, "attempt KB/tenant binding is unavailable", now)
+	}
 	kb, err := r.kb.GetKnowledgeBaseByIDOnly(ctx, attempt.KnowledgeBaseID)
-	if err != nil || kb == nil || kb.ID != attempt.KnowledgeBaseID || kb.TenantID != attempt.TenantID {
-		return fmt.Errorf("attempt KB/tenant binding is unavailable")
+	if err != nil {
+		if errors.Is(err, repository.ErrKnowledgeBaseNotFound) {
+			return ledger.FailRecoveryTarget(ctx, attempt, "attempt KB/tenant binding is unavailable", now)
+		}
+		return err
+	}
+	if kb == nil || kb.ID != attempt.KnowledgeBaseID || kb.TenantID != attempt.TenantID {
+		return ledger.FailRecoveryTarget(ctx, attempt, "attempt KB/tenant binding is unavailable", now)
+	}
+	if attempt.SourceID == "" {
+		return ledger.FailRecoveryTarget(ctx, attempt, "attempt source/tenant binding is unavailable", now)
 	}
 	var sourceConfig types.DataSource
 	if err := r.db.WithContext(ctx).
 		Where("id=? AND tenant_id=? AND knowledge_base_id=?", attempt.SourceID, attempt.TenantID, attempt.KnowledgeBaseID).
 		First(&sourceConfig).Error; err != nil {
-		return fmt.Errorf("attempt source/tenant binding is unavailable")
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ledger.FailRecoveryTarget(ctx, attempt, "attempt source/tenant binding is unavailable", now)
+		}
+		return err
 	}
 	// The grant is minted only after both target rows were loaded from storage
 	// and their tenant/parent bindings matched the admitted attempt.
 	taskCtx, err := access.WithKBTaskWrite(ctx, kb, attempt.TenantID)
 	if err != nil {
 		return fmt.Errorf("attempt task-write grant rejected: %w", err)
-	}
-	ledger := repository.NewSourceWikiAttemptLedger(r.db)
-	if !time.Now().Before(attempt.DeadlineAt) {
-		return r.terminalize(taskCtx, ledger, attempt.ID, "attempt absolute time budget exhausted")
 	}
 	if !kb.IsWikiEnabled() {
 		return r.terminalize(taskCtx, ledger, attempt.ID, "Wiki feature is disabled")

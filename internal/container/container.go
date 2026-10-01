@@ -252,7 +252,6 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewWikiPageService))
 	must(container.Provide(service.NewSourceWikiService))
 	must(container.Provide(service.NewSourceWikiAttemptRecovery))
-	must(container.Invoke(startSourceWikiAttemptRecovery))
 	must(container.Provide(service.NewWikiIngestService, dig.Name("wikiIngest")))
 	must(container.Provide(service.NewWikiLintService))
 	must(container.Provide(service.NewEmbedChannelService))
@@ -497,7 +496,11 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// persistence succeeded immediately before trigger enqueue failed). Re-arm
 	// them only after the matching handlers are ready.
 	must(container.Invoke(recoverPendingWikiTasks))
-
+	// Resolving the recovery worker constructs SourceWikiService and its full
+	// KnowledgeBaseService dependency graph. Keep this last: ResourceCatalog,
+	// StorageBackendResolver, TenantStoreOwnership and the data-source scheduler
+	// are all registered only after the service providers above.
+	must(container.Invoke(startSourceWikiAttemptRecovery))
 	logger.Infof(ctx, "[Container] Container initialization completed successfully")
 	return container
 }

@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -213,9 +214,60 @@ func TestSourceWikiRecoveryStartRejectsCrossTenantAttemptBinding(t *testing.T) {
 	require.NoError(t, f.db.Model(&types.SourceWikiAttempt{}).Where("id=?", attempt.ID).Update("tenant_id", f.kb.TenantID+1).Error)
 	startTestSourceWikiRecovery(t, generator)
 	time.Sleep(100 * time.Millisecond)
-	unchanged, err := ledger.Get(f.ctx, attempt.ID)
+	isolated, err := ledger.Get(f.ctx, attempt.ID)
 	require.NoError(t, err)
-	require.Equal(t, "running", unchanged.Status)
-	require.Zero(t, unchanged.Epoch, "an unbound cross-tenant row is rejected before claim")
+	require.Equal(t, "failed", isolated.Status, "an unleased attempt with invalid tenant binding must be isolated instead of repeatedly occupying a scan batch")
+	require.Contains(t, isolated.Reason, "KB/tenant binding")
+	require.Zero(t, isolated.Epoch, "an unbound cross-tenant row is rejected before claim")
 	require.Zero(t, providerCalls.Load())
+}
+
+func TestSourceWikiRecoveryStartUnboundExpiredOwnersCannotStarveDueRecovery(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var providerCalls atomic.Int32
+	_, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		providerCalls.Add(1)
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return sourceWikiRecoveryDraft
+	})
+	svc := generator.(*sourceWikiService)
+	ledger := repository.NewSourceWikiAttemptLedger(f.db)
+	var staleIDs []string
+	for i := 0; i < sourceWikiRecoveryBatch; i++ {
+		modulePath := fmt.Sprintf("orphan-%d", i)
+		attempt, err := svc.loadOrCreateSourceWikiAttempt(f.ctx, ledger, f.kb, types.SourceWikiGenerateRequest{
+			KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: modulePath, Title: "Scheduling module",
+		}, modulePath)
+		require.NoError(t, err)
+		persistSourceWikiRecoveryQACheckpoint(t, f, generator, attempt, ledger)
+		past := time.Now().UTC().Add(-10 * time.Minute)
+		require.NoError(t, f.db.Model(&types.SourceWikiAttempt{}).Where("id = ?", attempt.ID).Updates(map[string]any{
+			"tenant_id": f.kb.TenantID + 1, "created_at": past, "deadline_at": past.Add(3 * time.Minute),
+			"lease_expires_at": past, "updated_at": past,
+		}).Error)
+		staleIDs = append(staleIDs, attempt.ID)
+	}
+	valid, err := svc.loadOrCreateSourceWikiAttempt(f.ctx, ledger, f.kb, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	}, "src")
+	require.NoError(t, err)
+
+	startTestSourceWikiRecovery(t, generator)
+	recovered := waitForSourceWikiAttempt(t, ledger, valid.ID, "ready")
+	require.Equal(t, valid.ID, recovered.ID, "unrecoverable front-of-queue rows must not starve a valid due attempt")
+	require.EqualValues(t, 2, providerCalls.Load(), "only the valid due attempt may dispatch provider calls")
+	for _, id := range staleIDs {
+		attempt, err := ledger.Get(f.ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, "failed", attempt.Status, "expired unbound attempt must be terminalized")
+		require.NotEmpty(t, attempt.Draft, "terminalization preserves the in-progress draft")
+		require.Zero(t, attempt.Calls, "terminalization preserves call counts")
+		require.Zero(t, attempt.Tokens, "terminalization preserves token counts")
+		var owners int64
+		require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id = ?", id).Count(&owners).Error)
+		require.Zero(t, owners, "expired unbound attempt must release its exact evidence owner")
+	}
 }

@@ -143,6 +143,54 @@ func (l *SourceWikiAttemptLedger) Claim(ctx context.Context, req types.SourceWik
 	return lease, nil
 }
 
+// FailRecoveryTarget terminalizes a due or irrecoverably unbound attempt
+// without granting execution access to its KB. It locks the exact persisted
+// identity and requires the scanned epoch/lease snapshot to remain current.
+func (l *SourceWikiAttemptLedger) FailRecoveryTarget(ctx context.Context, expected types.SourceWikiAttempt, reason string, now time.Time) error {
+	if l == nil || l.db == nil || expected.ID == "" || expected.Status != "running" || expected.DeadlineAt.IsZero() || reason == "" || now.IsZero() {
+		return fmt.Errorf("%w: recovery failure requires an attempt snapshot, reason and time", ErrSourceWikiAttemptInvalidState)
+	}
+	return l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var attempt types.SourceWikiAttempt
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND source_id = ? AND epoch = ? AND status = ?",
+				expected.ID, expected.TenantID, expected.KnowledgeBaseID, expected.SourceID, expected.Epoch, "running").
+			First(&attempt).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiAttemptFenced
+			}
+			return err
+		}
+		if attempt.LeaseOwner != expected.LeaseOwner || !sameAttemptLeaseExpiry(attempt.LeaseExpiresAt, expected.LeaseExpiresAt) ||
+			!attempt.DeadlineAt.Equal(expected.DeadlineAt) {
+			return ErrSourceWikiAttemptFenced
+		}
+		if now.Before(attempt.DeadlineAt) && attempt.LeaseOwner != "" && attempt.LeaseExpiresAt != nil && now.Before(*attempt.LeaseExpiresAt) {
+			return ErrSourceWikiAttemptLeased
+		}
+		if !now.Before(attempt.DeadlineAt) {
+			reason = "attempt absolute time budget exhausted"
+		}
+		if err := tx.Model(&attempt).Updates(map[string]any{
+			"status": "failed", "reason": reason,
+			"lease_owner": "", "lease_expires_at": nil, "updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		if err := markSourceWikiAttemptCallsUnknown(tx, attempt.ID, now); err != nil {
+			return err
+		}
+		return ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
+	})
+}
+
+func sameAttemptLeaseExpiry(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
+
 func (l *SourceWikiAttemptLedger) Renew(ctx context.Context, lease types.SourceWikiAttemptLease, now time.Time, leaseFor time.Duration) error {
 	if leaseFor <= 0 {
 		return fmt.Errorf("%w: lease duration must be positive", ErrSourceWikiAttemptInvalidState)
