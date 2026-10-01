@@ -99,6 +99,13 @@ type DataSourceRepository interface {
 	FindActive(ctx context.Context) ([]*types.DataSource, error)
 }
 
+// ErrorGitLabSourceRepository is an optional query used only by source
+// reconciliation; ordinary datasource repositories need not broaden their
+// active-source listing semantics.
+type ErrorGitLabSourceRepository interface {
+	FindErrorGitLabSources(ctx context.Context) ([]*types.DataSource, error)
+}
+
 // SyncLogRepository defines database access patterns for sync logs
 type SyncLogRepository interface {
 	// Create inserts a new sync log entry

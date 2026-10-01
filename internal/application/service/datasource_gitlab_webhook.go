@@ -176,6 +176,13 @@ func (s *DataSourceService) ReceiveGitLabPush(ctx context.Context, suppliedSecre
 	if err != nil {
 		return false, false, err
 	}
+	if errorSourceRepo, ok := s.dsRepo.(interfaces.ErrorGitLabSourceRepository); ok {
+		errorSources, findErr := errorSourceRepo.FindErrorGitLabSources(ctx)
+		if findErr != nil {
+			return false, false, findErr
+		}
+		active = append(active, errorSources...)
+	}
 	repo, err := s.gitLabWebhookRepository()
 	if err != nil {
 		return false, false, err
@@ -187,7 +194,8 @@ func (s *DataSourceService) ReceiveGitLabPush(ctx context.Context, suppliedSecre
 	}
 	matches := make([]authenticatedSource, 0, 1)
 	for _, candidate := range active {
-		if candidate == nil || candidate.Type != types.ConnectorTypeGitLab || candidate.Status != types.DataSourceStatusActive {
+		if candidate == nil || candidate.Type != types.ConnectorTypeGitLab ||
+			(candidate.Status != types.DataSourceStatusActive && !datasource.GitLabSourceReconciliationEligible(candidate)) {
 			continue
 		}
 		config, parseErr := candidate.ParseConfig()

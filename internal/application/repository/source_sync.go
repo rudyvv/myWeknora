@@ -368,6 +368,12 @@ func (r *SyncLogRepository) SetGitLabWebhookConfig(ctx context.Context, dataSour
 		} else if encryptedSecret != nil {
 			row.SecretCiphertext = *encryptedSecret
 		}
+		if update.ClearSecret || encryptedSecret != nil {
+			// A receipt proves delivery only for the secret that was current when
+			// it was accepted. Rotate/clear and its verification reset atomically.
+			row.LastReceivedAt = nil
+			row.LastEventID = ""
+		}
 		if update.Enabled != nil {
 			row.Enabled = *update.Enabled
 		}
@@ -391,6 +397,7 @@ func (r *SyncLogRepository) SetGitLabWebhookConfig(ctx context.Context, dataSour
 			Columns: []clause.Column{{Name: "data_source_id"}},
 			DoUpdates: clause.Assignments(map[string]interface{}{
 				"tenant_id": row.TenantID, "enabled": row.Enabled, "secret_ciphertext": row.SecretCiphertext,
+				"last_received_at": row.LastReceivedAt, "last_event_id": row.LastEventID,
 				"updated_at": time.Now().UTC(),
 			}),
 		}).Create(&row).Error
@@ -429,7 +436,8 @@ func (r *SyncLogRepository) RegisterGitLabPushTrigger(
 		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) || !sourceStateMatchesPersistedDataSource(state, current) {
 			return datasource.ErrGitLabWebhookUnauthorized
 		}
-		if current.Type != types.ConnectorTypeGitLab || current.Status != types.DataSourceStatusActive || !sourceModeEnabled(current) {
+		if current.Type != types.ConnectorTypeGitLab || !sourceModeEnabled(current) ||
+			(current.Status != types.DataSourceStatusActive && !datasource.GitLabSourceReconciliationEligible(current)) {
 			return datasource.ErrDataSourceNotActive
 		}
 		var webhook sourceGitLabWebhookConfigRow
