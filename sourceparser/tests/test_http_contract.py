@@ -244,9 +244,9 @@ class JavaHTTPContract(unittest.TestCase):
 
     def test_java_method_signatures_preserve_parameter_types_and_uncertainty(self):
         raw = (b'package demo; public interface Contract { '
-               b'void run(int value); default void run(String value) {} '
+               b'void run(int value); default void run(java.lang.String value) {} '
                b'void unresolved(MissingType value); void generic(java.util.List<String> value); '
-               b'void array(int[] values); void spread(String... values); }')
+               b'void array(int[] values); void spread(java.lang.String... values); }')
         status, result = self.request('/v1/parse', {
             'path': 'src/Contract.java', 'language': 'java',
             'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
@@ -272,6 +272,32 @@ class JavaHTTPContract(unittest.TestCase):
         spread = next(fact for fact in methods if fact['name'] == 'spread')
         self.assertEqual(spread['parameter_types'], ['java.lang.String[]'])
         self.assertTrue(spread['signature_certain'])
+
+    def test_java_same_package_type_shadows_implicit_java_lang_name(self):
+        shadowed_raw = (b'package demo; class String {} interface I { void run(String value); } '
+                        b'abstract class C implements I { public void run(java.lang.String value) {} }')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/ShadowedString.java', 'language': 'java',
+            'sha256': hashlib.sha256(shadowed_raw).hexdigest(), 'content_base64': base64.b64encode(shadowed_raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        methods = [fact for fact in result['facts'] if fact['kind'] == 'java_method']
+        interface_method = next(fact for fact in methods if fact['namespace'] == 'demo.I' and fact['name'] == 'run')
+        implementation_method = next(fact for fact in methods if fact['namespace'] == 'demo.C' and fact['name'] == 'run')
+        self.assertEqual(interface_method['parameter_types'], ['demo.String'])
+        self.assertTrue(interface_method['signature_certain'])
+        self.assertEqual(implementation_method['parameter_types'], ['java.lang.String'])
+        self.assertTrue(implementation_method['signature_certain'])
+
+        open_world_raw = b'package demo; interface OpenWorld { void run(String value); }'
+        status, result = self.request('/v1/parse', {
+            'path': 'src/OpenWorld.java', 'language': 'java',
+            'sha256': hashlib.sha256(open_world_raw).hexdigest(), 'content_base64': base64.b64encode(open_world_raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        open_world = next(fact for fact in result['facts'] if fact['kind'] == 'java_method' and fact['name'] == 'run')
+        self.assertEqual(open_world['parameter_types'], ['java.lang.String'])
+        self.assertFalse(open_world['signature_certain'], 'a different same-package type may shadow implicit java.lang')
 
     def test_spring_mapping_mixed_known_and_dynamic_methods_remain_uncertain(self):
         raw = (b'import org.springframework.web.bind.annotation.RequestMapping; '

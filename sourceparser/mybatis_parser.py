@@ -345,12 +345,15 @@ def extract_java_facts(raw, tree, path):
                 resolved, certain = imports[base_name][0], True
             elif imports.get(base_name):
                 resolved, certain = base_name, False
-            elif base_name in JAVA_LANG_TYPES:
-                resolved, certain = "java.lang." + base_name, True
             else:
                 same_package = (package + "." if package else "") + base_name
                 if same_package in declared_fqns:
                     resolved, certain = same_package, True
+                elif base_name in JAVA_LANG_TYPES:
+                    # A package or nested type can shadow an implicit java.lang
+                    # import. Without the full compilation-unit set, retain the
+                    # likely java.lang spelling but do not certify the signature.
+                    resolved, certain = "java.lang." + base_name, False
                 else:
                     wildcard = sorted(set(imports.get("*", [])))
                     source_candidates = [prefix + "." + base_name for prefix in wildcard
