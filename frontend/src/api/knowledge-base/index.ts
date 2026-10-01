@@ -7,7 +7,7 @@ export interface SourceFact {
   kind: string; name?: string; qualified_name?: string; signature?: string; namespace?: string; route_path?: string; http_method?: string; http_methods?: string[]; http_methods_specified?: boolean; http_methods_certain?: boolean; parameter_types?: string[]; signature_certain?: boolean; is_abstract?: boolean; is_default?: boolean; statement_type?: string; statement_id?: string;
   method_name?: string; receiver?: string; type_name?: string; result_map_refs?: string[]; include_refs?: string[];
   target_namespace?: string; target_name?: string; owner_kind?: string; owner_name?: string; reference_kind?: string; super_types?: string[]; dynamic?: boolean;
-  certainty?: string; quality: string; range: SourceRange; text?: string; sql?: string;
+  certainty?: string; reason?: string; quality: string; range: SourceRange; text?: string; sql?: string;
 }
 export interface SourceDiagnostic { code: string; message: string; range?: SourceRange }
 export interface SourceCodeRelation {

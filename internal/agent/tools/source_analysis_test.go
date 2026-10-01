@@ -48,6 +48,9 @@ func TestSourceAnalysisKeepsAuthorizedBusinessFlowFactsAndUncertainty(t *testing
 	require.Equal(t, "/api/questionnaire/detail", facts[0]["route_path"])
 	require.Equal(t, "GET", facts[0]["http_method"])
 	require.Equal(t, []interface{}{"demo.IQuestionnaireService"}, facts[1]["super_types"])
+	require.Equal(t, "java_supertype_reference", facts[2]["kind"])
+	require.Equal(t, "Contract", facts[2]["target_name"])
+	require.Equal(t, "Java supertype identity is unresolved across wildcard imports", facts[2]["reason"])
 	require.NotContains(t, facts[0], "text", "Agent source analysis carries compact facts, not raw parser source text")
 	relations := analysis["relations"].([]map[string]interface{})
 	require.Len(t, relations, 1)
@@ -69,7 +72,8 @@ func (k *businessFlowSourceAnalysisKnowledge) GetSourceFile(ctx context.Context,
 		Path: "src/web/QuestionnaireDetail.vue", RawContent: []byte("GET /api/questionnaire/detail"),
 		Facts: types.JSON(`[
 			{"kind":"api_request","route_path":"/api/questionnaire/detail","http_method":"GET","dynamic":false,"certainty":"certain","quality":"structural","range":{"start_byte":0,"end_byte":3,"start_line":1,"end_line":1},"text":"fixture source"},
-			{"kind":"java_type","name":"QuestionnaireServiceImpl","namespace":"demo.QuestionnaireServiceImpl","super_types":["demo.IQuestionnaireService"],"certainty":"certain","quality":"structural","range":{"start_byte":0,"end_byte":3,"start_line":1,"end_line":1}}
+			{"kind":"java_type","name":"QuestionnaireServiceImpl","namespace":"demo.QuestionnaireServiceImpl","super_types":["demo.IQuestionnaireService"],"certainty":"certain","quality":"structural","range":{"start_byte":0,"end_byte":3,"start_line":1,"end_line":1}},
+			{"kind":"java_supertype_reference","name":"Contract","namespace":"app.Worker","target_name":"Contract","reference_kind":"implements","certainty":"uncertain","reason":"Java supertype identity is unresolved across wildcard imports","quality":"structural","range":{"start_byte":0,"end_byte":3,"start_line":1,"end_line":1}}
 		]`),
 		Relations: []types.SourceCodeRelation{{
 			ID: "route-candidate", Kind: "http_route", FromFileID: id, FromVersionID: "vue-version",

@@ -257,6 +257,7 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 	methodsByType := map[string][]factOwner{}
 	injections := map[string][]factOwner{}
 	importsByFile := map[string][]string{}
+	var supertypeReferences []factOwner
 	var calls, mappings, requests, apiPrefixes, apiProxies []factOwner
 	for _, member := range members {
 		if member.FileID == "" || member.VersionID == "" {
@@ -267,6 +268,8 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			switch fact.Kind {
 			case "java_type":
 				typeDeclarations[fact.Namespace] = append(typeDeclarations[fact.Namespace], owner)
+			case "java_supertype_reference":
+				supertypeReferences = append(supertypeReferences, owner)
 			case "java_import":
 				key := sourceMemberVersionKey(member)
 				importsByFile[key] = append(importsByFile[key], fact.Name)
@@ -299,8 +302,38 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			}
 		}
 	}
-
 	var relations []types.SourceCodeRelation
+	for _, reference := range supertypeReferences {
+		if reference.fact.Certainty != "uncertain" || reference.fact.TargetName == "" {
+			continue
+		}
+		candidateNamespaces := map[string]bool{}
+		for _, declarations := range typeDeclarations {
+			for _, candidate := range declarations {
+				if javaSupertypeMayReference(reference, candidate.fact, importsByFile) {
+					candidateNamespaces[candidate.fact.Namespace] = true
+				}
+			}
+		}
+		fromKey := reference.fact.Namespace + " -> " + reference.fact.TargetName
+		reason := reference.fact.Reason
+		if reason == "" {
+			reason = "Java supertype identity is unresolved"
+		}
+		if len(candidateNamespaces) > 1 {
+			reason = "Java supertype name matches multiple imported types"
+		}
+		if len(candidateNamespaces) == 0 {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "type_supertype",
+				reference.member, reference.fact, fromKey, nil, reference.fact.TargetName, "uncertain", reason))
+			continue
+		}
+		for namespace := range candidateNamespaces {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "type_supertype",
+				reference.member, reference.fact, fromKey, nil, namespace, "uncertain", reason))
+		}
+	}
+
 	for _, injection := range flattenFactOwners(injections) {
 		fact := injection.fact
 		typeName, resolved := resolveSnapshotJavaType(injection, fact, typeDeclarations, importsByFile)
@@ -387,6 +420,48 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			}
 			implementations := implementersByType[contract.fact.Namespace]
 			for _, method := range methodsByType[contract.fact.Namespace] {
+				var unresolvedMethodCandidates []struct {
+					implementation factOwner
+					reference      factOwner
+				}
+				for _, reference := range supertypeReferences {
+					if reference.fact.ReferenceKind != "implements" || !javaSupertypeMayReference(reference, contract.fact, importsByFile) {
+						continue
+					}
+					for _, implementationType := range typeDeclarations[reference.fact.Namespace] {
+						if implementationType.member.FileID != reference.member.FileID || implementationType.member.VersionID != reference.member.VersionID || implementationType.fact.OwnerKind != "class" {
+							continue
+						}
+						for _, candidate := range methodsByType[implementationType.fact.Namespace] {
+							if candidate.member.FileID != implementationType.member.FileID || candidate.member.VersionID != implementationType.member.VersionID ||
+								candidate.fact.Name != method.fact.Name || candidate.fact.IsAbstract {
+								continue
+							}
+							if method.fact.SignatureCertain && candidate.fact.SignatureCertain &&
+								!slices.Equal(method.fact.ParameterTypes, candidate.fact.ParameterTypes) {
+								continue
+							}
+							unresolvedMethodCandidates = append(unresolvedMethodCandidates, struct {
+								implementation factOwner
+								reference      factOwner
+							}{candidate, reference})
+						}
+					}
+				}
+				if len(unresolvedMethodCandidates) > 0 {
+					for _, candidate := range unresolvedMethodCandidates {
+						reason := "Java implementation is only a candidate because its supertype identity is unresolved"
+						if !method.fact.SignatureCertain || !candidate.implementation.fact.SignatureCertain {
+							reason = "Java method parameter signature is unresolved"
+						} else if candidate.reference.fact.Reason != "" {
+							reason = "Java implementation candidate: " + candidate.reference.fact.Reason
+						}
+						relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "implements_method",
+							method.member, method.fact, methodFactKey(method.fact), nil,
+							methodFactKey(candidate.implementation.fact), "uncertain", reason))
+					}
+					continue
+				}
 				var namedCandidates []factOwner
 				for _, implementation := range implementations {
 					namedCandidates = append(namedCandidates, methods[relationLookupKey(implementation.fact.Namespace, method.fact.Name)]...)
@@ -737,6 +812,26 @@ func typeFactKey(fact types.ParsedSourceFact) string {
 
 func methodFactKey(fact types.ParsedSourceFact) string {
 	return fact.Namespace + "#" + fact.Name
+}
+
+func javaSupertypeMayReference(reference factOwner, target types.ParsedSourceFact, importsByFile map[string][]string) bool {
+	name := reference.fact.TargetName
+	if name == "" {
+		name = reference.fact.Name
+	}
+	if name == "" || name != target.Name || target.Namespace == "" {
+		return false
+	}
+	targetPackage := ""
+	if separator := strings.LastIndex(target.Namespace, "."); separator >= 0 {
+		targetPackage = target.Namespace[:separator]
+	}
+	for _, imported := range importsByFile[sourceMemberVersionKey(reference.member)] {
+		if imported == target.Namespace || targetPackage != "" && imported == targetPackage+".*" {
+			return true
+		}
+	}
+	return false
 }
 
 func springEndpointKey(fact types.ParsedSourceFact, route string) string {

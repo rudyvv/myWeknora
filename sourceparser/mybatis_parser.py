@@ -466,19 +466,37 @@ def extract_java_facts(raw, tree, path):
         if superclass is not None:
             base = base_type_node(superclass)
             if base is not None:
-                super_nodes.append(base)
+                super_nodes.append((base, "extends"))
         interfaces_node = node.child_by_field_name("interfaces") or node.child_by_field_name("super_interfaces")
         if interfaces_node is not None:
             for child in interfaces_node.named_children:
                 base = base_type_node(child)
                 if base is not None:
-                    super_nodes.append(base)
+                    super_nodes.append((base, "extends" if node.type == "interface_declaration" else "implements"))
         super_types = []
         hierarchy_certain = True
-        for super_node in super_nodes:
+        for super_node, reference_kind in super_nodes:
             name, certain = resolve_type_node(super_node)
             if name:
                 super_types.append(name)
+            if not certain:
+                declared_name = text(super_node)
+                explicit = imports.get(declared_name, [])
+                wildcard = sorted(set(imports.get("*", [])))
+                if explicit:
+                    reason = "Java supertype identity has conflicting explicit imports"
+                elif len(wildcard) > 1:
+                    reason = "Java supertype identity is unresolved across wildcard imports"
+                elif not package:
+                    reason = "Java supertype identity has no package or import context"
+                else:
+                    reason = "Java supertype identity could not be resolved from same-package or import declarations"
+                facts.append({"kind": "java_supertype_reference", "name": declared_name,
+                              "namespace": qualified, "target_name": declared_name,
+                              "owner_kind": "interface" if node.type == "interface_declaration" else "class",
+                              "reference_kind": reference_kind, "certainty": "uncertain", "reason": reason,
+                              "range": _source_range(raw, super_node.start_byte, super_node.end_byte, newlines),
+                              "text": declared_name, "quality": "structural"})
             hierarchy_certain = hierarchy_certain and certain
         name_node = node.child_by_field_name("name")
         range_node = name_node or node

@@ -91,7 +91,8 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 		}
 		allowedFacts := map[string]bool{
 			"java_mapper_method": true, "java_import": true, "java_type": true,
-			"java_injection": true, "java_method": true, "spring_mapping": true,
+			"java_supertype_reference": true,
+			"java_injection":           true, "java_method": true, "spring_mapping": true,
 			"java_method_call": true, "java_dynamic_dispatch": true, "api_request": true,
 			"api_prefix": true, "api_proxy": true,
 			"java_annotation_sql": true, "mybatis_mapper": true, "mybatis_statement": true,
@@ -102,6 +103,11 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 		for _, fact := range parsed.Facts {
 			if !allowedFacts[fact.Kind] || !validSourceRange(raw, fact.Range) || fact.Quality == "" {
 				return nil, fmt.Errorf("source parser returned invalid static fact coordinates")
+			}
+			if fact.Kind == "java_supertype_reference" && (fact.Name == "" || fact.TargetName != fact.Name || fact.Namespace == "" ||
+				fact.OwnerKind == "" || (fact.ReferenceKind != "extends" && fact.ReferenceKind != "implements") ||
+				fact.Certainty != "uncertain" || fact.Reason == "") {
+				return nil, fmt.Errorf("source parser returned an invalid unresolved Java supertype fact")
 			}
 			if fact.Text != "" && string(raw[fact.Range.StartByte:fact.Range.EndByte]) != fact.Text {
 				return nil, fmt.Errorf("source parser fact does not match original bytes")

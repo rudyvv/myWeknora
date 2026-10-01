@@ -23,6 +23,7 @@
           <span v-if="fact.range"> · L{{ fact.range.start_line }}–{{ fact.range.end_line }}</span>
           <span v-if="fact.dynamic"> · 动态 SQL</span>
           <span v-if="fact.certainty"> · {{ fact.certainty }}</span>
+          <span v-if="fact.reason"> · {{ fact.reason }}</span>
         </li></ul>
       </div>
       <div v-if="analysis.relations.length || analysis.relations_truncated">

@@ -198,6 +198,7 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
             <span v-if="fact.range"> · L{{ fact.range.start_line }}–{{ fact.range.end_line }}</span>
             <span v-if="fact.dynamic"> · 动态/未解析</span>
             <span v-if="fact.certainty"> · {{ fact.certainty === 'certain' ? '确定' : '不确定' }}</span>
+            <span v-if="fact.reason"> · {{ fact.reason }}</span>
             <span v-if="fact.super_types?.length"> · 父类型: {{ fact.super_types.join(', ') }}</span>
             <span v-if="fact.result_map_refs?.length"> · resultMap: {{ fact.result_map_refs.join(', ') }}</span>
             <span v-if="fact.include_refs?.length"> · include: {{ fact.include_refs.join(', ') }}</span>

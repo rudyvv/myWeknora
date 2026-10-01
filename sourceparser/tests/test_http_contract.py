@@ -210,6 +210,26 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertEqual((call['receiver'], call['name'], call['target_name'], call['certainty'], call['dynamic']),
                          ('mapper', 'find', 'Mapper', 'uncertain', True))
 
+    def test_unresolved_java_supertype_preserves_declared_name_reason_and_range(self):
+        raw = ('package app;\r\n// \u4e2d\u6587\r\nimport left.*;\r\nimport right.*;\r\n'
+               'class Worker implements Contract { }\r\n').encode('utf-8')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/app/Worker.java', 'language': 'java',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        references = [fact for fact in result['facts'] if fact['kind'] == 'java_supertype_reference']
+        self.assertEqual(len(references), 1)
+        reference = references[0]
+        self.assertEqual((reference['name'], reference['target_name'], reference['namespace']),
+                         ('Contract', 'Contract', 'app.Worker'))
+        self.assertEqual(reference['reference_kind'], 'implements')
+        self.assertEqual(reference['certainty'], 'uncertain')
+        self.assertEqual(reference['reason'], 'Java supertype identity is unresolved across wildcard imports')
+        span = reference['range']
+        self.assertEqual(raw[span['start_byte']:span['end_byte']], b'Contract')
+        self.assertEqual(reference['text'], 'Contract')
+
     def test_spring_method_sets_preserve_restriction_and_unknown_methods(self):
         raw = (b'package demo; '
                b'import org.springframework.web.bind.annotation.RequestMapping; '

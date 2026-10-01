@@ -86,6 +86,7 @@ type ParsedSourceFact struct {
 	SuperTypes           []string    `json:"super_types,omitempty"`
 	Dynamic              bool        `json:"dynamic,omitempty"`
 	Certainty            string      `json:"certainty,omitempty"`
+	Reason               string      `json:"reason,omitempty"`
 	Quality              string      `json:"quality"`
 	Range                SourceRange `json:"range"`
 	Text                 string      `json:"text,omitempty"`
