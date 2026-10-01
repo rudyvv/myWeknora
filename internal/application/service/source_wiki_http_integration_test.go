@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -137,4 +138,62 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, out.Code, out.Body.String())
 	out = invoke(http.MethodGet, "/source/evidence?slug="+url.QueryEscape(page.Slug)+"&evidence_id=e001&version=999", nil)
 	require.Equal(t, http.StatusNotFound, out.Code)
+}
+
+func TestSourceWikiBatchPreflightHTTPIsScopedAndDoesNotDispatch(t *testing.T) {
+	f := service.NewSourceIntegrationFixture(t)
+	f.Sync()
+	var providerCalls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		http.Error(w, "preflight must not dispatch", http.StatusInternalServerError)
+	}))
+	t.Cleanup(provider.Close)
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(migration)).Error)
+
+	models := service.NewModelService(repository.NewModelRepository(f.DB), repository.NewKnowledgeBaseRepository(f.DB), nil, nil, nil, nil)
+	model := &types.Model{
+		ID: uuid.NewString(), TenantID: 1, Name: "wiki-preflight-http", Type: types.ModelTypeKnowledgeQA,
+		Source: types.ModelSourceRemote, Status: types.ModelStatusActive,
+		Parameters: types.ModelParameters{BaseURL: provider.URL, Provider: "openai", InterfaceType: "openai", ContextWindow: 8192, MaxOutputTokens: 4096},
+	}
+	require.NoError(t, models.CreateModel(f.Ctx, model))
+	f.KB.SummaryModelID = model.ID
+	f.KB.IndexingStrategy.WikiEnabled = true
+	require.NoError(t, f.DB.Save(f.KB).Error)
+	wiki := service.NewWikiPageService(repository.NewWikiPageRepository(f.DB), nil, f.KBs, nil, nil)
+	generator := service.NewSourceWikiService(wiki, f.KBs, f.Knowledge, models, f.DB)
+	h := handler.NewWikiPageHandler(wiki, f.KBs, nil, nil, nil, generator)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(types.TenantIDContextKey.String(), uint64(1))
+		c.Request = c.Request.WithContext(f.Ctx)
+		c.Next()
+	})
+	group := r.Group("/api/v1/knowledgebase/:kb_id/wiki", h.WikiReadScope)
+	group.POST("/source/batches/preflight", h.PreflightSourceWikiBatch)
+	path := "/api/v1/knowledgebase/" + f.KB.ID + "/wiki/source/batches/preflight?source_id=" + url.QueryEscape(f.Source.ID)
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var result struct {
+		Data types.SourceWikiBatchPreflight `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+	require.True(t, result.Data.PreflightPassed)
+	require.False(t, result.Data.StartAvailable)
+	require.Equal(t, f.Source.ID, result.Data.SourceID)
+	require.Equal(t, types.SourceWikiBatchMaxInitialTopics, result.Data.MaxInitialTopics)
+	require.NotContains(t, response.Body.String(), "source_config_fingerprint")
+	require.NotContains(t, response.Body.String(), "model_settings_fingerprint")
+	var batchCount int64
+	require.NoError(t, f.DB.Model(&types.SourceWikiBatch{}).Where("source_id = ?", f.Source.ID).Count(&batchCount).Error)
+	require.Zero(t, batchCount)
+	require.Zero(t, providerCalls.Load())
 }

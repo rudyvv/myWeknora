@@ -10,6 +10,8 @@ const (
 	SourceWikiBatchMaxElapsed          = time.Hour
 	SourceWikiBatchMaxInitialTopics    = 40
 	SourceWikiBatchMaxCompletionTokens = 4096
+	SourceWikiBatchMinInputTokens      = 4096
+	SourceWikiBatchMaxCandidates       = 100000
 	SourceWikiBatchSkeletonMaxCalls    = 6
 	SourceWikiBatchSkeletonMaxTokens   = 120_000
 	SourceWikiBatchQAMaxCalls          = 12
@@ -138,4 +140,60 @@ type SourceWikiBatchReserveCallRequest struct {
 	ProviderPhase  string
 	ReservedTokens int
 	Now            time.Time
+}
+
+// SourceWikiBatchPreflightRequest may identify a terminal batch whose work is
+// being planned again. It never requests resumption or budget reuse.
+type SourceWikiBatchPreflightRequest struct {
+	RestartOfBatchID string `json:"restart_of_batch_id,omitempty"`
+}
+
+type SourceWikiBatchRestartReference struct {
+	ID             string `json:"id"`
+	Status         string `json:"status"`
+	SnapshotID     string `json:"snapshot_id"`
+	Phase          string `json:"phase"`
+	Cursor         int    `json:"cursor"`
+	CandidateCount int    `json:"candidate_count"`
+	InitialCount   int    `json:"initial_count"`
+	CallsReserved  int    `json:"calls_reserved"`
+	TokensReserved int    `json:"tokens_reserved"`
+}
+
+// SourceWikiBatchPreflight is a read-only server-side check and bounded plan
+// preview. It is deliberately not a batch row and cannot dispatch provider
+// calls. PlannedTopics and fingerprints are retained only for a future
+// accepted runner integration and are not serialized to clients.
+type SourceWikiBatchPreflight struct {
+	PreflightPassed          bool                             `json:"preflight_passed"`
+	StartAvailable           bool                             `json:"start_available"`
+	DispatchReason           string                           `json:"dispatch_reason,omitempty"`
+	SourceID                 string                           `json:"source_id"`
+	SnapshotID               string                           `json:"snapshot_id"`
+	CommitSHA                string                           `json:"commit_sha"`
+	PublishedAt              *time.Time                       `json:"published_at,omitempty"`
+	SourceUpdatedAt          time.Time                        `json:"source_updated_at"`
+	ModelID                  string                           `json:"model_id"`
+	ModelContextWindow       int                              `json:"model_context_window"`
+	ModelContextKnown        bool                             `json:"model_context_known"`
+	MaxCompletionTokens      int                              `json:"max_completion_tokens"`
+	CandidateCount           int                              `json:"candidate_count"`
+	InitialCount             int                              `json:"initial_count"`
+	ExpansionCount           int                              `json:"expansion_count"`
+	ModuleCount              int                              `json:"module_count"`
+	FlowCount                int                              `json:"flow_count"`
+	InitialTopics            []SourceWikiTopic                `json:"initial_topics"`
+	RestartFrom              *SourceWikiBatchRestartReference `json:"restart_from,omitempty"`
+	Warnings                 []string                         `json:"warnings,omitempty"`
+	MaxCalls                 int                              `json:"max_calls"`
+	MaxTokens                int                              `json:"max_tokens"`
+	MaxElapsedMS             int64                            `json:"max_elapsed_ms"`
+	MaxInitialTopics         int                              `json:"max_initial_topics"`
+	SkeletonMaxCalls         int                              `json:"skeleton_max_calls"`
+	SkeletonMaxTokens        int                              `json:"skeleton_max_tokens"`
+	QAMaxCalls               int                              `json:"qa_max_calls"`
+	QAMaxTokens              int                              `json:"qa_max_tokens"`
+	SourceConfigFingerprint  string                           `json:"-"`
+	ModelSettingsFingerprint string                           `json:"-"`
+	PlannedTopics            []SourceWikiTopic                `json:"-"`
 }

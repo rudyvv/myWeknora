@@ -20,6 +20,7 @@ var (
 	ErrSourceWikiBatchDeadline        = errors.New("source Wiki batch deadline exceeded")
 	ErrSourceWikiBatchBudgetExhausted = errors.New("source Wiki batch budget exhausted")
 	ErrSourceWikiBatchInvalidState    = errors.New("invalid source Wiki batch state")
+	ErrSourceWikiBatchAlreadyActive   = errors.New("a source Wiki batch is already active")
 )
 
 // SourceWikiBatchLedger owns the durable batch parent, stable topic coverage,
@@ -87,7 +88,7 @@ func (l *SourceWikiBatchLedger) SavePlan(ctx context.Context, batchID string, to
 			deadlineReached = true
 			return nil
 		}
-		if len(topics) == 0 || len(topics) > 100000 {
+		if len(topics) == 0 || len(topics) > types.SourceWikiBatchMaxCandidates {
 			return fmt.Errorf("%w: candidate plan size is outside the supported range", ErrSourceWikiBatchInvalidState)
 		}
 		planned, seen := 0, make(map[string]bool, len(topics))

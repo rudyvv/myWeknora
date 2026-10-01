@@ -379,9 +379,24 @@ export interface SourceWikiBatch {
  skeleton_tokens_reserved: number; qa_calls_reserved: number; qa_tokens_reserved: number;
  deadline_at: string; reason?: string; created_at: string; updated_at: string; finished_at?: string;
 }
+export interface SourceWikiBatchPreflight {
+ preflight_passed: boolean; start_available: boolean; dispatch_reason?: string;
+ source_id: string; snapshot_id: string; commit_sha: string; source_updated_at: string;
+ model_id: string; model_context_window: number; model_context_known: boolean; max_completion_tokens: number;
+ candidate_count: number; initial_count: number; expansion_count: number; module_count: number; flow_count: number;
+ initial_topics: Array<Pick<SourceWikiCoverageTopic, 'topic_key' | 'kind' | 'title' | 'priority' | 'status' | 'uncertain'> & { uncertainty_reasons?: string[] }>;
+ restart_from?: Pick<SourceWikiBatch, 'id' | 'status' | 'snapshot_id' | 'phase' | 'cursor' | 'candidate_count' | 'initial_count' | 'calls_reserved' | 'tokens_reserved'>;
+ warnings?: string[]; max_calls: number; max_tokens: number; max_elapsed_ms: number; max_initial_topics: number;
+ skeleton_max_calls: number; skeleton_max_tokens: number; qa_max_calls: number; qa_max_tokens: number;
+}
 export function listSourceWikiCoverage(kbId: string, sourceId: string) {
  const query = new URLSearchParams({ source_id: sourceId });
  return get(`/api/v1/knowledgebase/${kbId}/wiki/source/coverage?${query.toString()}`);
+}
+export function preflightSourceWikiBatch(kbId: string, sourceId: string, restartOfBatchId?: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return post(`/api/v1/knowledgebase/${kbId}/wiki/source/batches/preflight?${query.toString()}`,
+  restartOfBatchId ? { restart_of_batch_id: restartOfBatchId } : {}, { timeout: 190000 });
 }
 export function listSourceWikiBatches(kbId: string, sourceId: string) {
  const query = new URLSearchParams({ source_id: sourceId });

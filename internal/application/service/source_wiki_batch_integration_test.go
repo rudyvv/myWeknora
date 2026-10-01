@@ -3,11 +3,14 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -180,6 +183,91 @@ func TestSourceWikiBatchDeadlineRetainsChargesAndTopicOutcomes(t *testing.T) {
 	require.Equal(t, "draft", byCoverageTopic(t, coverage, "draft").Status)
 	require.Equal(t, "expansion", byCoverageTopic(t, coverage, "expansion").Status)
 	require.ErrorIs(t, ledger.UpdateTopic(f.ctx, batch.ID, "draft", "ready", "", "", publication.SnapshotID, batch.DeadlineAt), repository.ErrSourceWikiBatchInvalidState)
+}
+
+func TestSourceWikiBatchPreflightPinsPublishedInputsWithoutCreatingOrDispatching(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var providerCalls atomic.Int32
+	_, generator := newSourceWikiFixture(t, f, func(bool) string {
+		providerCalls.Add(1)
+		return `{}`
+	})
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+
+	model, err := f.modelService.GetModelByID(f.ctx, f.kb.SummaryModelID)
+	require.NoError(t, err)
+	model.Parameters.ContextWindow = 8192
+	model.Parameters.MaxOutputTokens = 3072
+	require.NoError(t, f.modelService.UpdateModel(f.ctx, model))
+
+	preflightService, ok := generator.(interface {
+		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
+	})
+	require.True(t, ok, "source Wiki exposes batch preflight through its public interface")
+	result, err := preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.NoError(t, err)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	require.True(t, result.PreflightPassed)
+	require.False(t, result.StartAvailable, "preflight must not imply the T17-backed dispatcher is available")
+	require.Equal(t, f.ds.ID, result.SourceID)
+	require.Equal(t, publication.SnapshotID, result.SnapshotID)
+	require.Equal(t, 8192, result.ModelContextWindow)
+	require.True(t, result.ModelContextKnown)
+	require.Equal(t, 3072, result.MaxCompletionTokens, "preflight caps completion to the configured model output limit")
+	require.Equal(t, 2, result.CandidateCount, "the bounded fixture has the system and service module topics")
+	require.Equal(t, 2, result.InitialCount)
+	require.Equal(t, 1, result.ModuleCount)
+	require.Len(t, result.InitialTopics, 2)
+	require.Equal(t, "system", result.InitialTopics[0].TopicKey)
+	require.LessOrEqual(t, len(result.InitialTopics), types.SourceWikiBatchMaxInitialTopics)
+	require.NotEmpty(t, result.SourceConfigFingerprint)
+	require.NotEmpty(t, result.ModelSettingsFingerprint)
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "source_config_fingerprint")
+	require.NotContains(t, string(encoded), "model_settings_fingerprint")
+	var batchCount int64
+	require.NoError(t, f.db.Model(&types.SourceWikiBatch{}).Where("source_id = ?", f.ds.ID).Count(&batchCount).Error)
+	require.Zero(t, batchCount, "preflight does not leave an abandoned queued or running batch")
+	require.Zero(t, providerCalls.Load(), "preflight reads model configuration but never calls the provider")
+
+	unauthorized := context.WithValue(f.ctx, types.KBGrantsContextKey, nil)
+	_, err = preflightService.PreflightSourceWikiBatch(unauthorized, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.Error(t, err, "service-side KB write authorization remains required even if an HTTP route is miswired")
+
+	model.Parameters.ContextWindow = 7000
+	require.NoError(t, f.modelService.UpdateModel(f.ctx, model))
+	_, err = preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.Error(t, err, "known contexts that cannot fit the bounded prompt and completion are rejected")
+	model.Parameters.ContextWindow = 0
+	require.NoError(t, f.modelService.UpdateModel(f.ctx, model))
+	unknownContext, err := preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.NoError(t, err)
+	require.False(t, unknownContext.ModelContextKnown)
+	require.NotEmpty(t, unknownContext.Warnings)
+
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	previous := newSourceWikiTestBatch(f, publication.SnapshotID, time.Now().UTC().Truncate(time.Millisecond))
+	require.NoError(t, ledger.Create(f.ctx, previous))
+	_, err = preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiBatchAlreadyActive)
+	failedAt := previous.CreatedAt.Add(time.Second)
+	require.NoError(t, ledger.UpdateProgress(f.ctx, previous.ID, "finished", "failed", "", "provider budget exhausted", 0, failedAt))
+	restarted, err := preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID,
+		types.SourceWikiBatchPreflightRequest{RestartOfBatchID: previous.ID})
+	require.NoError(t, err)
+	require.NotNil(t, restarted.RestartFrom)
+	require.Equal(t, previous.ID, restarted.RestartFrom.ID)
+	require.Equal(t, "failed", restarted.RestartFrom.Status)
+	require.Equal(t, 0, restarted.RestartFrom.Cursor)
+	var persistedPrevious types.SourceWikiBatch
+	require.NoError(t, f.db.Where("id = ?", previous.ID).Take(&persistedPrevious).Error)
+	require.Equal(t, "failed", persistedPrevious.Status, "restart planning never resets or resumes the prior budget")
+	require.Zero(t, providerCalls.Load())
 }
 
 func byCoverageTopic(t *testing.T, topics []types.SourceWikiCoverageTopic, key string) types.SourceWikiCoverageTopic {

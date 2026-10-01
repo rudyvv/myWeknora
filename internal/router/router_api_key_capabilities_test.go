@@ -329,6 +329,21 @@ func TestKnowledgeReadRoutesDeclareRetrieveCapability(t *testing.T) {
 	}
 }
 
+func TestSourceWikiBatchPreflightRouteDeclaresIngestCapability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	g := &rbacGuards{}
+	v1 := gin.New().Group("/api/v1")
+	RegisterWikiPageRoutes(v1, &handler.WikiPageHandler{}, g)
+
+	policy := mustLookupAPIKeyPolicy(t, g, http.MethodPost, "/api/v1/knowledgebase/:kb_id/wiki/source/batches/preflight")
+	if !policy.RequireFullAccess {
+		t.Fatal("policy should require full access without a matching capability")
+	}
+	if !policyHasCapability(policy, types.APIKeyCapabilityIngest) {
+		t.Fatalf("policy capabilities = %#v, want ingest", policy.Capabilities)
+	}
+}
+
 func TestTenantInfrastructureRoutesDeclareSpecificCapabilities(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	g := &rbacGuards{}
