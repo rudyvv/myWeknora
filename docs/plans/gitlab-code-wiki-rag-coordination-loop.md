@@ -162,3 +162,9 @@ T11原60代码审查已过，但实际Flow A发现多wildcard时implements原始
 T18现有dirty接口根只读核对RegisterSourceWikiAttemptEvidence(tx,attemptID,evidence)、ReleaseSourceWikiAttemptEvidence(tx,attemptID)，exact owner与同attempt ID衔接；T17不复制未审112或no-op，先独立实现ledger，source_wiki.go最终pin接入等根验收T18后统一保留两边意图，T17固定reviewbasef040e5e8不变。T18报告聚焦验证完成后额外aggregate既有SQLite header失败；根要求收取结果/明确限制后冻结，不装无关依赖或重复全库。T11新Flow B controller→annotatedMapper→XML certain链及Flow A implementation后端继续只读闭包，尚无完整READY。
 
 最新游标：T18 `82e187da-afe3-4f59-9c78-3b4417471064:11`；T11 `ede37483-473c-44e0-92a2-6b249170c218:11`；T17 `12e65bc3-bae2-46ea-aadc-5cd9312d2227:9`（这是提案final，后续root已批准继续，不重复当新实现READY）。累计14/22保持，本轮只合同动作不发GitHub过程。
+
+2026-10-01 T18 新完整干净冻结 974a0c40f4281a4fd2630067668bbaad84d472ed，批准base a1d11b95，独立Sol/high双轴完成：Standards硬0/判断1P3；Spec2P2。根四真实PG历史pin/旧index退出/attempt lease超期/50-200/源码回滚全部PASS42.703s，普通Wiki回滚实际overlay反例FAIL4.159s（nil/nil页面无条件恢复旧引用）。Spec另核对collector remaining计数与候选DELETE之间的last-owner触发器UPSERT lost-wakeup可达竞态；根本轮未声称屏障实测，已要求worker真实PG红绿验证及锁序检查。两必修已派回同一原T06 Luna/xhigh当前T18，不集成/关#26/派下一票。详见t18-974a0c40-review.md；同冻结不重复正式审查。所有根测试会话已收取，缺SQLite头宽编译不扩大修复。
+
+T11 已从紧凑完成快照主动收到AUDIT_READY，60f2b0a1仍干净，真实A/B审计不能冒充全链确定。Flow A Java AST有implements但多wildcard时producer丢声明；根已批准最小保留原始名称/范围/uncertainty理由，并贯通真实消费、禁止snapshot唯一升certain，新增真实HTTP→Go红绿。Flow B实际Controller直接Mapper不虚构Service；动态SQL/代理等真实不确定允许如实展示。要求A已知implementation→Mapper/XML/table事实独立枚举，不因前跳uncertain省略后端；两个Vue解析失败须明确实际原因/定位最小producer缺陷。当前票继续，不停提案、不全仓冷扫、不对外发布私有源码。正式双轴仍root Sol/high。
+
+最新事件游标T18 82e187da-afe3-4f59-9c78-3b4417471064:13（冻结ACK后根已发两必修新turn）；T11 ede37483-473c-44e0-92a2-6b249170c218:13（AUDIT_READY后根已批准最小修复新turn）；T17 12e65bc3-bae2-46ea-aadc-5cd9312d2227:12 active113 ledger实现，无新SHA。累计14/22保持，审查/合同只本地记录，下次验收里程碑再发布GitHub。
