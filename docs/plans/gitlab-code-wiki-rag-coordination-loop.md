@@ -168,3 +168,5 @@ T18现有dirty接口根只读核对RegisterSourceWikiAttemptEvidence(tx,attemptI
 T11 已从紧凑完成快照主动收到AUDIT_READY，60f2b0a1仍干净，真实A/B审计不能冒充全链确定。Flow A Java AST有implements但多wildcard时producer丢声明；根已批准最小保留原始名称/范围/uncertainty理由，并贯通真实消费、禁止snapshot唯一升certain，新增真实HTTP→Go红绿。Flow B实际Controller直接Mapper不虚构Service；动态SQL/代理等真实不确定允许如实展示。要求A已知implementation→Mapper/XML/table事实独立枚举，不因前跳uncertain省略后端；两个Vue解析失败须明确实际原因/定位最小producer缺陷。当前票继续，不停提案、不全仓冷扫、不对外发布私有源码。正式双轴仍root Sol/high。
 
 最新事件游标T18 82e187da-afe3-4f59-9c78-3b4417471064:13（冻结ACK后根已发两必修新turn）；T11 ede37483-473c-44e0-92a2-6b249170c218:13（AUDIT_READY后根已批准最小修复新turn）；T17 12e65bc3-bae2-46ea-aadc-5cd9312d2227:12 active113 ledger实现，无新SHA。累计14/22保持，审查/合同只本地记录，下次验收里程碑再发布GitHub。
+
+2026-10-01 heartbeat13:45实际解阻：T11 worker报告沙箱Node os.userInfo/外部依赖目录拒绝，根用现有捆绑node直接在当前dirty树跑SourceCodeView.test.ts，3/3实际PASS约2.49s，无shim/安装/共享依赖修改。此仅环境解阻，不冒充新冻结验收；已通知原Luna停止排查无关环境继续两链/Vue原因。T18当前GC屏障修复测试停滞，根只读发现trigger仅匹配UPDATE不会截获旧DELETE，已要求旧974红测/新绿测同屏障、记录wait_event/blocking pids区分fixture与产品锁序、cleanup有界，不延长超时伪绿。T17 deadline ledger绿、runner继续active，无新READY。最新游标T18 :17/T11 :17/T17 :16（沿各现有turn前缀），累计14/22保持，不发GitHub过程。
