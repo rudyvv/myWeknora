@@ -119,6 +119,11 @@ type EmbeddingParameters struct {
 	Dimension                 int  `yaml:"dimension"                   json:"dimension"`
 	TruncatePromptTokens      int  `yaml:"truncate_prompt_tokens"      json:"truncate_prompt_tokens"`
 	SupportsDimensionOverride bool `yaml:"supports_dimension_override" json:"supports_dimension_override"`
+	// Tokenizer and MaxInputTokens describe the embedding model's exact local
+	// tokenizer encoding and hard per-input limit for source indexing. Ordinary
+	// document indexing does not consume these optional source-profile fields.
+	Tokenizer      string `yaml:"tokenizer,omitempty"       json:"tokenizer,omitempty"`
+	MaxInputTokens int    `yaml:"max_input_tokens,omitempty" json:"max_input_tokens,omitempty"`
 }
 
 type ModelParameters struct {

@@ -183,6 +183,8 @@ class ScriptHTTPContract(unittest.TestCase):
         expected = set(lock.get('grammars', {'java': lock}))
         if 'java' in expected:
             expected.add('mybatis-xml')
+        if expected:
+            expected.add('text')
         if 'vue' in health['languages']:
             expected.add('vue')
         expected = sorted(expected)
@@ -225,7 +227,7 @@ class ScriptHTTPContract(unittest.TestCase):
             (four_language / 'grammar.lock.json').write_text(json.dumps(four_language_lock), encoding='utf-8')
             status, health = health_for(four_language)
             self.assertEqual(status, 200, health)
-            expected_languages = ['java', 'javascript', 'mybatis-xml', 'tsx', 'typescript']
+            expected_languages = ['java', 'javascript', 'mybatis-xml', 'text', 'tsx', 'typescript']
             if 'vue' in health['languages']:
                 expected_languages.append('vue')
                 expected_languages.sort()
@@ -239,7 +241,7 @@ class ScriptHTTPContract(unittest.TestCase):
             (destination / 'grammar.lock.json').write_text(json.dumps(legacy), encoding='utf-8')
             status, health = health_for(destination)
             self.assertEqual(status, 200, health)
-            self.assertEqual(health['languages'], ['java', 'mybatis-xml'])
+            self.assertEqual(health['languages'], ['java', 'mybatis-xml', 'text'])
             changed = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             changed['grammars'] = {'javascript': dict(lock['grammars']['javascript'])}
             grammar = destination / changed['grammars']['javascript']['grammar']

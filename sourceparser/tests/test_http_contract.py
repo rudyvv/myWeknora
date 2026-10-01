@@ -71,6 +71,57 @@ class JavaHTTPContract(unittest.TestCase):
             self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
         self.assertEqual(result['chunks'][0]['range']['start_line'], 1)
 
+    def test_template_text_fallback_preserves_complete_original_slices(self):
+        raw = ('<main>\r\n  <h1>预约 {{ customer.name }}</h1>\r\n'
+               '  <#if customer.active>欢迎回来</#if>\r\n</main>\r\n').encode()
+        status, health = self.request('/health')
+        self.assertEqual(status, 200)
+        self.assertIn('text', health['languages'])
+        status, result = self.request('/v1/parse', {
+            'path': 'src/main/templates/dashboard.ftl', 'language': 'text',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+            'chunk_max_bytes': 64,
+        })
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['quality'], 'text_fallback')
+        self.assertEqual([d['code'] for d in result['diagnostics']], ['text_fallback'])
+        self.assertEqual(result['symbols'], [])
+        self.assertEqual(result['facts'], [])
+        self.assertTrue(result['chunks'])
+        self.assertLessEqual(max(len(c['content'].encode()) for c in result['chunks']), 64)
+        self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
+        for chunk in result['chunks']:
+            span = chunk['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
+            self.assertEqual(chunk['quality'], 'text_fallback')
+            self.assertEqual(chunk['context'], [])
+
+    def test_dockerfile_uses_text_fallback_route(self):
+        raw = b'FROM scratch\nLABEL title="demo"\n'
+        status, result = self.request('/v1/parse', {
+            'path': 'Dockerfile', 'language': 'text', 'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': 64,
+        })
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['quality'], 'text_fallback')
+
+    def test_oversized_comment_is_retained_with_visible_partial_quality(self):
+        raw = ('class LargeComment {\r\n  // ' + 'comment_marker ' * 1200
+               + '\r\n  String run() { return "after_comment"; }\r\n}\r\n').encode()
+        status, result = self.request('/v1/parse', {
+            'path': 'LargeComment.java', 'language': 'java', 'sha256': hashlib.sha256(raw).hexdigest(),
+            'content_base64': base64.b64encode(raw).decode(), 'chunk_max_bytes': 128,
+        })
+        self.assertEqual(status, 200, result)
+        self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
+        self.assertEqual(result['quality'], 'partial')
+        self.assertTrue(any(d['code'] == 'oversized_unstructured_region' for d in result['diagnostics']))
+        degraded = [chunk for chunk in result['chunks'] if chunk['quality'] == 'partial']
+        self.assertTrue(degraded)
+        for chunk in degraded:
+            span = chunk['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
+
     def test_oversized_unicode_structure_keeps_exact_separate_context(self):
         raw = ('class Large { public String getPushSchedule() { return "' + '中文' * 1000 + '"; } }').encode()
         status, result = self.request('/v1/parse', {
@@ -372,6 +423,71 @@ class JavaHTTPContract(unittest.TestCase):
         self.assertIn('id="second"', statement_chunks[1]['content'])
         self.assertNotIn('id="first"', statement_chunks[1]['content'])
         self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
+
+    def test_oversized_mybatis_statement_splits_at_xml_and_sql_boundaries(self):
+        terms = ['tenant_id = #{tenantId}'] + [
+            f"field_{index:03d} = 'value with spaces {index:03d}'" for index in range(40)
+        ]
+        sql = 'SELECT id FROM reservation WHERE ' + ' AND '.join(terms)
+        raw = f'<mapper namespace="demo.M"><select id="wide">{sql}</select></mapper>'.encode()
+        status, result = self.request('/v1/parse', {
+            'path': 'src/mapper.xml', 'language': 'mybatis-xml',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+            'chunk_max_bytes': 64,
+        })
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['quality'], 'partial')
+        statement = next(f for f in result['facts'] if f['kind'] == 'mybatis_statement')
+        diagnostic = next(d for d in result['diagnostics'] if d['code'] == 'oversized_mybatis_statement')
+        self.assertEqual(diagnostic['range'], statement['range'])
+        self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
+        chunks = result['chunks']
+        for chunk in chunks:
+            span = chunk['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])
+        statement_chunks = [chunk for chunk in chunks
+                            if chunk['range']['start_byte'] < statement['range']['end_byte']
+                            and chunk['range']['end_byte'] > statement['range']['start_byte']]
+        self.assertGreater(len(statement_chunks), 1)
+        self.assertTrue(all(chunk['quality'] == 'partial' for chunk in statement_chunks))
+
+        select_open_start = raw.index(b'<select')
+        select_open_end = raw.index(b'>', select_open_start) + 1
+        select_close_start = raw.index(b'</select>')
+        select_close_end = select_close_start + len(b'</select>')
+        sql_start, sql_end = raw.index(sql.encode()), raw.index(sql.encode()) + len(sql.encode())
+        placeholder = b'#{tenantId}'
+        placeholder_start = raw.index(placeholder)
+        boundaries = [chunk['range']['start_byte'] for chunk in chunks[1:]]
+        for boundary in boundaries:
+            self.assertFalse(select_open_start < boundary < select_open_end, 'split inside an XML start tag')
+            self.assertFalse(select_close_start < boundary < select_close_end, 'split inside an XML end tag')
+            if sql_start < boundary < sql_end:
+                self.assertFalse(raw[boundary - 1:boundary].isalnum() and raw[boundary:boundary + 1].isalnum(),
+                                 'split inside an SQL word')
+                self.assertFalse(placeholder_start < boundary < placeholder_start + len(placeholder),
+                                 'split inside a MyBatis bind parameter')
+                for index in range(40):
+                    quoted_value = f"'value with spaces {index:03d}'".encode()
+                    literal_start = raw.index(quoted_value)
+                    self.assertFalse(literal_start < boundary < literal_start + len(quoted_value),
+                                     'split inside an SQL string literal')
+
+    def test_unbreakable_mybatis_sql_token_is_retained_with_a_partial_diagnostic(self):
+        token = 'identifier_' + 'x' * 180
+        raw = f'<mapper namespace="demo.M"><select id="wide">SELECT {token} FROM reservation</select></mapper>'.encode()
+        status, result = self.request('/v1/parse', {
+            'path': 'src/mapper.xml', 'language': 'mybatis-xml',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+            'chunk_max_bytes': 64,
+        })
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['quality'], 'partial')
+        self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
+        diagnostic = next(d for d in result['diagnostics'] if d['code'] == 'oversized_mybatis_token')
+        token_start = raw.index(token.encode())
+        self.assertEqual(raw[diagnostic['range']['start_byte']:diagnostic['range']['end_byte']], token.encode())
+        self.assertEqual(diagnostic['range']['start_byte'], token_start)
 
     def test_dynamic_or_duplicated_sql_fragments_are_not_certain(self):
         raw = (b'<mapper namespace="demo.M"><sql id="frag"><if test="enabled">SELECT * FROM orders</if></sql>'

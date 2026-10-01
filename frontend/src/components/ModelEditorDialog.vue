@@ -358,6 +358,25 @@
           </div>
         </div>
 
+        <div v-if="activeModelType === 'embedding'" class="form-item">
+          <label class="form-label">{{ $t('model.editor.sourceTokenizerLabel') }}</label>
+          <t-select v-model="formData.tokenizer" clearable :placeholder="$t('model.editor.sourceTokenizerPlaceholder')">
+            <t-option value="cl100k_base" label="cl100k_base" />
+            <t-option value="o200k_base" label="o200k_base" />
+            <t-option value="p50k_base" label="p50k_base" />
+            <t-option value="p50k_edit" label="p50k_edit" />
+            <t-option value="r50k_base" label="r50k_base" />
+          </t-select>
+          <p class="form-desc">{{ $t('model.editor.sourceTokenizerDesc') }}</p>
+        </div>
+
+        <div v-if="activeModelType === 'embedding'" class="form-item">
+          <label class="form-label">{{ $t('model.editor.sourceMaxInputTokensLabel') }}</label>
+          <t-input v-model.number="formData.maxInputTokens" type="number" :min="17" :max="10000000"
+            :placeholder="$t('model.editor.sourceMaxInputTokensPlaceholder')" />
+          <p class="form-desc">{{ $t('model.editor.sourceMaxInputTokensDesc') }}</p>
+        </div>
+
         <!-- Chat / VLM: context window. Agent compaction sizes itself from this. -->
         <div v-if="activeModelType === 'chat' || activeModelType === 'vllm'" class="form-item">
           <label class="form-label">{{ $t('model.editor.contextWindowLabel') }}</label>
@@ -459,6 +478,8 @@ interface ModelFormData {
   apiKey?: string
   dimension?: number
   supportsDimensionOverride?: boolean
+  tokenizer?: string
+  maxInputTokens?: number
   interfaceType?: 'ollama' | 'openai'
   isDefault: boolean
   supportsVision?: boolean
@@ -950,6 +971,8 @@ const formData = ref<ModelFormData>({
   apiKey: '',
   dimension: undefined,
   supportsDimensionOverride: false,
+  tokenizer: undefined,
+  maxInputTokens: undefined,
   interfaceType: 'ollama',
   isDefault: false,
   supportsVision: false,
@@ -1211,6 +1234,8 @@ const resetForm = () => {
     apiKey: '',
     dimension: undefined, // 默认不填，让用户手动输入或通过检测按钮获取
     supportsDimensionOverride: false,
+    tokenizer: undefined,
+    maxInputTokens: undefined,
     interfaceType: undefined,
     isDefault: false,
     supportsVision: false,

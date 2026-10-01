@@ -19,6 +19,12 @@ import tree_sitter_language_pack as pack
 PACK_VERSION = '1.19.0'
 LANGUAGES = ('java', 'javascript', 'typescript', 'tsx', 'python')
 RULES_VERSIONS = {'java': 10, 'javascript': 3, 'typescript': 3, 'tsx': 3, 'python': 4}
+TEXT_EXTENSIONS = (
+    '.html', '.htm', '.jsp', '.jspx', '.tag', '.tagx', '.ftl', '.ftlh', '.vm',
+    '.css', '.scss', '.sass', '.less', '.styl', '.yaml', '.yml', '.json', '.toml',
+    '.properties', '.ini', '.conf', '.cfg', '.env', '.sql', '.sh', '.bash',
+    '.md', '.txt',
+)
 BUNDLES = {
     'linux-x86_64': '86995c25a95d59a1235276c8bdfc5156f7ffb1db1d53653c9e58a60e92d4346e',
     'linux-aarch64': '4e0cf38459547f10fd2c0f33c783a9c92e744baf2c591453d59233d15d0ab2de',
@@ -102,7 +108,8 @@ def runtime_version(versions):
     """One stable process version binds the verified runtimes and extraction rules."""
     if not versions:
         return ''
-    processing = {'grammars': versions, 'sqlglot': version('sqlglot'), 'xml_rules': 'mybatis-expat-rules-2'}
+    processing = {'grammars': versions, 'sqlglot': version('sqlglot'), 'xml_rules': 'mybatis-expat-rules-2',
+                  'xml_chunk_rules': 1, 'text_fallback_rules': 1}
     fingerprint = hashlib.sha256(json.dumps(processing, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     rules_version = max((RULES_VERSIONS[language] for language in versions if language in RULES_VERSIONS), default=1)
     return 'source-pack-' + PACK_VERSION + '-rules-' + str(rules_version) + '-' + fingerprint[:32]
@@ -513,6 +520,175 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     return {'parser_version': parser_version, 'sha256': digest, 'byte_length': len(raw),
             'encoding': 'utf-8-bom' if raw.startswith(b'\xef\xbb\xbf') else 'utf-8',
             'quality': quality, 'symbols': symbols, 'chunks': chunks}
+def is_text_fallback_path(path):
+    basename = Path(path).name.lower()
+    return (basename in ('dockerfile', 'containerfile') or basename.startswith(('dockerfile.', 'containerfile.'))
+            or Path(path).suffix.lower() in TEXT_EXTENSIONS)
+
+
+def _bounded_text_ranges(raw, maximum):
+    ranges = []
+    start = 0
+    while start < len(raw):
+        cut = min(len(raw), start + maximum)
+        if cut < len(raw):
+            while cut > start and raw[cut] & 0xC0 == 0x80:
+                cut -= 1
+            if cut <= start:
+                cut = min(len(raw), start + maximum)
+                while cut < len(raw) and raw[cut] & 0xC0 == 0x80:
+                    cut += 1
+            newline = raw.rfind(b'\n', start, cut)
+            if newline >= start + maximum // 2:
+                cut = newline + 1
+        if cut <= start:
+            raise RuntimeError('text fallback could not make forward progress')
+        ranges.append((start, cut))
+        start = cut
+    return ranges
+
+
+def _xml_markup_end(raw, start, end):
+    if raw.startswith(b'<!--', start):
+        close = raw.find(b'-->', start + 4, end)
+        return close + 3 if close >= 0 else end
+    if raw.startswith(b'<?', start):
+        close = raw.find(b'?>', start + 2, end)
+        return close + 2 if close >= 0 else end
+    quote = None
+    for index in range(start, end):
+        byte = raw[index]
+        if quote is not None:
+            if byte == quote:
+                quote = None
+        elif byte in (ord("'"), ord('"')):
+            quote = byte
+        elif byte == ord('>'):
+            return index + 1
+    return end
+
+
+def _sql_text_boundaries(raw, start, end):
+    """Yield safe source cuts between SQL tokens in one XML text region."""
+    index, quote, block_comment, line_comment = start, None, False, False
+    while index < end:
+        byte = raw[index]
+        if line_comment:
+            if byte == 10:
+                line_comment = False
+                yield index + 1
+            index += 1
+            continue
+        if block_comment:
+            if raw.startswith(b'*/', index, end):
+                block_comment = False
+                index += 2
+                yield index
+            else:
+                index += 1
+            continue
+        if quote is not None:
+            if byte == ord('\\') and index + 1 < end:
+                index += 2
+            elif byte == quote:
+                if index + 1 < end and raw[index + 1] == quote:
+                    index += 2
+                else:
+                    quote = None
+                    index += 1
+            else:
+                index += 1
+            continue
+        if raw.startswith(b'/*', index, end):
+            block_comment = True
+            index += 2
+        elif raw.startswith(b'--', index, end):
+            line_comment = True
+            index += 2
+        elif raw.startswith((b'#{', b'${'), index, end):
+            close = raw.find(b'}', index + 2, end)
+            index = close + 1 if close >= 0 else end
+        elif byte == ord('#'):
+            line_comment = True
+            index += 1
+        elif byte in (ord("'"), ord('"'), ord('`')):
+            quote = byte
+            index += 1
+        elif byte == ord('&'):
+            close = raw.find(b';', index + 1, end)
+            index = close + 1 if close >= 0 else index + 1
+        elif byte in b' \t\r\n\f\v':
+            index += 1
+            yield index
+        else:
+            index += 1
+
+
+def _xml_sql_boundaries(raw, start, end):
+    """Yield cuts between complete XML markup and SQL lexical tokens."""
+    yield start
+    index, in_cdata = start, False
+    while index < end:
+        if not in_cdata and raw.startswith(b'<![CDATA[', index, end):
+            yield index
+            index += len(b'<![CDATA[')
+            yield index
+            in_cdata = True
+            continue
+        if in_cdata and raw.startswith(b']]>', index, end):
+            yield index
+            index += len(b']]>')
+            yield index
+            in_cdata = False
+            continue
+        if not in_cdata and raw[index] == ord('<'):
+            yield index
+            index = _xml_markup_end(raw, index, end)
+            yield index
+            continue
+        text_end = index
+        while text_end < end:
+            if in_cdata and raw.startswith(b']]>', text_end, end):
+                break
+            if not in_cdata and raw[text_end] == ord('<'):
+                break
+            text_end += 1
+        yield from _sql_text_boundaries(raw, index, text_end)
+        index = text_end
+    yield end
+
+
+def _split_xml_sql_region(raw, start, end, maximum):
+    if maximum <= 0:
+        raise ValueError('XML/SQL chunk budget must be positive')
+    boundaries = iter(_xml_sql_boundaries(raw, start, end))
+    next_boundary = next(boundaries, None)
+    chunks, forced_cuts, cursor, last_boundary = [], [], start, start
+    while cursor < end:
+        limit = min(end, cursor + maximum)
+        while limit > cursor and limit < end and raw[limit] & 0xC0 == 0x80:
+            limit -= 1
+        if limit <= cursor:
+            limit = min(end, cursor + maximum)
+            while limit < end and raw[limit] & 0xC0 == 0x80:
+                limit += 1
+        last_safe = None
+        while next_boundary is not None and next_boundary <= limit:
+            if next_boundary > cursor:
+                last_safe = next_boundary
+            if next_boundary > last_boundary:
+                last_boundary = next_boundary
+            next_boundary = next(boundaries, None)
+        if last_safe is None:
+            cut = limit
+            forced_cuts.append((last_boundary, next_boundary if next_boundary is not None else end))
+        else:
+            cut = last_safe
+        if cut <= cursor:
+            raise RuntimeError('XML/SQL chunker could not make forward progress')
+        chunks.append((cursor, cut))
+        cursor = cut
+    return chunks, forced_cuts
 
 
 def parse_source(raw, max_bytes, parser_version, language, path):
@@ -526,6 +702,17 @@ def parse_source(raw, max_bytes, parser_version, language, path):
         start = symbol['signature_range']['start_byte']
         prefix = raw[start:min(symbol['signature_range']['end_byte'], start + 512)].decode('utf-8', errors='ignore')
         return {'text': prefix, 'range': span(start, start + len(prefix.encode()))}
+    if language == 'text':
+        if not is_text_fallback_path(path):
+            raise ValueError('text fallback path is not supported')
+        chunks = [{'content': raw[start:end].decode('utf-8'), 'range': span(start, end),
+                   'quality': 'text_fallback', 'symbols': [], 'context': []}
+                  for start, end in _bounded_text_ranges(raw, max_bytes)]
+        return {'parser_version': parser_version, 'sha256': hashlib.sha256(raw).hexdigest(),
+                'byte_length': len(raw), 'encoding': 'utf-8-bom' if raw.startswith(b'\xef\xbb\xbf') else 'utf-8',
+                'quality': 'text_fallback', 'symbols': [], 'chunks': chunks, 'facts': [],
+                'diagnostics': [{'code': 'text_fallback',
+                                 'message': 'No structural grammar is applied; source is indexed as bounded text'}]}
     xml_result = parse_mybatis_xml(raw) if language == 'mybatis-xml' else None
     chunk_language = 'java' if language == 'mybatis-xml' else language
     parsed = pack.process(text, pack.ProcessConfig(
@@ -688,16 +875,38 @@ def parse_source(raw, max_bytes, parser_version, language, path):
     cursor = 0
     chunk_ranges = [(chunk.start_byte, chunk.end_byte) for chunk in parsed.chunks]
     expected_chunk_content = {(chunk.start_byte, chunk.end_byte): chunk.content for chunk in parsed.chunks}
+    expected_chunk_metadata = {(chunk.start_byte, chunk.end_byte): chunk.metadata for chunk in parsed.chunks}
+    oversized_xml_comments = []
     if xml_result is not None and xml_result['quality'] == 'structural':
-        regions = sorted((fact['range']['start_byte'], fact['range']['end_byte']) for fact in facts
+        comment_cursor = 0
+        while True:
+            comment_start = raw.find(b'<!--', comment_cursor)
+            if comment_start < 0:
+                break
+            comment_close = raw.find(b'-->', comment_start + 4)
+            if comment_close < 0:
+                break
+            comment_end = comment_close + 3
+            if comment_end - comment_start > max_bytes:
+                oversized_xml_comments.append((comment_start, comment_end))
+                diagnostics.append({
+                    'code': 'oversized_comment_region',
+                    'message': 'An oversized XML comment is retained as bounded original text',
+                    'range': span(comment_start, comment_end),
+                })
+            comment_cursor = comment_end
+    if xml_result is not None and xml_result['quality'] == 'structural':
+        regions = sorted((fact['range']['start_byte'], fact['range']['end_byte'], fact['kind']) for fact in facts
                          if fact['kind'] in ('mybatis_statement', 'mybatis_sql_fragment', 'mybatis_result_map'))
         non_overlapping = []
-        for start, end in regions:
+        for start, end, kind in regions:
             if non_overlapping and start < non_overlapping[-1][1]:
-                non_overlapping[-1] = (non_overlapping[-1][0], max(end, non_overlapping[-1][1]))
+                previous_start, previous_end, previous_kinds = non_overlapping[-1]
+                non_overlapping[-1] = (previous_start, max(end, previous_end), previous_kinds | {kind})
             else:
-                non_overlapping.append((start, end))
+                non_overlapping.append((start, end, {kind}))
         chunk_ranges = []
+        oversized_mybatis_chunks = set()
         def append_bounded(start, end):
             while start < end:
                 cut = min(end, start + max_bytes)
@@ -710,15 +919,39 @@ def parse_source(raw, max_bytes, parser_version, language, path):
                 chunk_ranges.append((start, cut))
                 start = cut
         region_cursor = 0
-        for region_start, region_end in non_overlapping:
+        for region_start, region_end, kinds in non_overlapping:
             append_bounded(region_cursor, region_start)
-            append_bounded(region_start, region_end)
+            if region_end - region_start > max_bytes:
+                region_chunks, forced_cuts = _split_xml_sql_region(raw, region_start, region_end, max_bytes)
+                chunk_ranges.extend(region_chunks)
+                oversized_mybatis_chunks.update(region_chunks)
+                code = 'oversized_mybatis_statement' if 'mybatis_statement' in kinds else 'oversized_mybatis_region'
+                diagnostics.append({
+                    'code': code,
+                    'message': 'An oversized MyBatis structure was split at XML and SQL boundaries; its bounded chunks are partial',
+                    'range': span(region_start, region_end),
+                })
+                for token_start, token_end in set(forced_cuts):
+                    while token_start < token_end and raw[token_start] in b' \t\r\n\f\v':
+                        token_start += 1
+                    while token_end > token_start and raw[token_end - 1] in b' \t\r\n\f\v':
+                        token_end -= 1
+                    diagnostics.append({
+                        'code': 'oversized_mybatis_token',
+                        'message': 'A single XML or SQL lexical unit exceeded the chunk budget and required a bounded partial split',
+                        'range': span(token_start, token_end),
+                    })
+            else:
+                append_bounded(region_start, region_end)
             region_cursor = region_end
         append_bounded(region_cursor, len(raw))
+    else:
+        oversized_mybatis_chunks = set()
 
     fact_starts = [fact['range']['start_byte'] for fact in facts]
     fact_ends = [fact['range']['end_byte'] for fact in facts]
     fact_cursor, active_facts, active_fact_ends = 0, set(), []
+    partial_region, degraded, xml_comment_cursor = None, False, 0
     for start, end in chunk_ranges:
         expected = raw[start:end].decode('utf-8') if xml_result is not None and xml_result['quality'] == 'structural' else expected_chunk_content.get((start, end))
         if start != cursor or end <= start or end > len(raw) or expected is None or raw[start:end].decode('utf-8') != expected:
@@ -734,8 +967,35 @@ def parse_source(raw, max_bytes, parser_version, language, path):
             _, expired = heapq.heappop(active_fact_ends)
             active_facts.discard(expired)
         overlapping_facts = [facts[index] for index in sorted(active_facts)]
+        chunk_metadata = expected_chunk_metadata.get((start, end))
+        chunk_quality = quality
+        oversized_unstructured = (chunk_metadata is not None and not chunk_metadata.node_types
+                                  and end - start >= max_bytes)
+        while (xml_comment_cursor < len(oversized_xml_comments)
+               and oversized_xml_comments[xml_comment_cursor][1] <= start):
+            xml_comment_cursor += 1
+        oversized_xml_comment = (xml_comment_cursor < len(oversized_xml_comments)
+                                 and oversized_xml_comments[xml_comment_cursor][0] < end
+                                 and oversized_xml_comments[xml_comment_cursor][1] > start)
+        oversized_mybatis_region = (start, end) in oversized_mybatis_chunks
+        if oversized_unstructured or oversized_xml_comment or oversized_mybatis_region:
+            chunk_quality = 'partial'
+            degraded = True
+        if oversized_unstructured:
+            if partial_region is not None and partial_region['range']['end_byte'] == start:
+                partial_region['range']['end_byte'] = end
+                partial_region['range']['end_line'] = span(start, end)['end_line']
+            else:
+                partial_region = {
+                    'code': 'oversized_unstructured_region',
+                    'message': 'An oversized source region could not be divided at a recognized syntax boundary; retained as bounded original text',
+                    'range': span(start, end),
+                }
+                diagnostics.append(partial_region)
+        else:
+            partial_region = None
         chunks.append({
-            'content': content, 'range': span(start, end), 'quality': quality,
+            'content': content, 'range': span(start, end), 'quality': chunk_quality,
             'symbols': ([s['qualified_name'] for s in symbols if s['range']['start_byte'] < end and s['range']['end_byte'] > start]
                         + [((fact.get('namespace', '') + '.') if fact.get('namespace') else '')
                            + fact.get('name', fact.get('statement_type', fact['kind']))
@@ -743,6 +1003,8 @@ def parse_source(raw, max_bytes, parser_version, language, path):
             'context': [context(s) for s in symbols
                         if s['range']['start_byte'] <= start and s['range']['end_byte'] >= end][-2:],
         })
+    if degraded and quality == 'structural':
+        quality = 'partial'
     if cursor != len(raw):
         raise RuntimeError('chunker did not cover the entire original file')
     return {'parser_version': parser_version, 'sha256': hashlib.sha256(raw).hexdigest(),

@@ -27,10 +27,11 @@ import (
 
 func TestSourceParseArtifactKeyChangesWithParserVersionAndIsDeterministic(t *testing.T) {
 	raw := []byte("from pkg.booking import helper\n")
-	oldRulesKey := sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-3-old", "settings-v1")
-	newRulesKey := sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1")
+	oldRulesKey := sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-3-old", "settings-v1", "cl100k_base:8192")
+	newRulesKey := sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1", "cl100k_base:8192")
 	require.NotEqual(t, oldRulesKey, newRulesKey)
-	require.Equal(t, newRulesKey, sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1"))
+	require.Equal(t, newRulesKey, sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1", "cl100k_base:8192"))
+	require.NotEqual(t, newRulesKey, sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1", "o200k_base:8192"))
 }
 
 func TestUpdateDataSourceRejectsSourceModeWithoutSpecifiedBranch(t *testing.T) {
@@ -301,7 +302,9 @@ func TestPreviewSourceUsesFixedCommitAndReportsActualFileAvailability(t *testing
 	t.Cleanup(parser.Close)
 	t.Setenv("SOURCE_PARSER_URL", parser.URL)
 	model := &types.Model{ID: kb.EmbeddingModelID, TenantID: 2, Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive,
-		Parameters: types.ModelParameters{EmbeddingParameters: types.EmbeddingParameters{Dimension: 3}}}
+		Parameters: types.ModelParameters{EmbeddingParameters: types.EmbeddingParameters{
+			Dimension: 3, Tokenizer: "cl100k_base", MaxInputTokens: 8192,
+		}}}
 	svc.sourceModels = sourcePreviewModels{model: model}
 	database.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"vector", "bm25"}).AddRow(true, true))
 	preview, err = svc.PreviewSource(ctx, stored.ID, nil)

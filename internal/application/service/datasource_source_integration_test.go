@@ -37,6 +37,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/require"
+	"github.com/tiktoken-go/tokenizer"
 	pgdriver "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -1508,8 +1509,10 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	legacyFingerprint := sha256.Sum256(legacyVersionsJSON)
 	legacyParserVersion := fmt.Sprintf("source-pack-%s-rules-3-%x", parserLock.PackVersion, legacyFingerprint[:16])
 	require.NotEqual(t, parserVersion, legacyParserVersion)
-	legacyArtifactKey := sourceParseArtifactKey("src/reservation.py", raw, legacyParserVersion, rulesVersion)
-	currentArtifactKey := sourceParseArtifactKey("src/reservation.py", raw, parserVersion, rulesVersion)
+	indexProfile, err := source.NewIndexProfile(types.EmbeddingParameters{Tokenizer: "cl100k_base", MaxInputTokens: 8192})
+	require.NoError(t, err)
+	legacyArtifactKey := sourceParseArtifactKey("src/reservation.py", raw, legacyParserVersion, rulesVersion, indexProfile.Identity)
+	currentArtifactKey := sourceParseArtifactKey("src/reservation.py", raw, parserVersion, rulesVersion, indexProfile.Identity)
 	require.NotEqual(t, legacyArtifactKey, currentArtifactKey, "Python extraction-rule changes must invalidate same-SHA parse artifacts")
 	stale, err := source.ParseFile(f.ctx, os.Getenv("SOURCE_PARSER_URL"), "src/reservation.py", raw)
 	require.NoError(t, err)
@@ -1538,7 +1541,7 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
 	require.NoError(t, err)
 	require.True(t, preview.CanSync)
-	require.Contains(t, preview.Checks, types.SourcePreviewCheck{Name: "parser", Ready: true, Message: "source mode requires a healthy, versioned parser with every selected language grammar"})
+	require.Contains(t, preview.Checks, types.SourcePreviewCheck{Name: "parser", Ready: true, Message: "source mode requires a healthy, versioned parser with every selected grammar or text fallback route"})
 	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
 	require.NoError(t, err)
 	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
@@ -1627,6 +1630,153 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	require.Equal(t, f.sha, pinnedDegraded.CommitSHA)
 	require.Equal(t, degradedView.FileVersionID, pinnedDegraded.FileVersionID)
 	require.Equal(t, "syntax_error", pinnedDegraded.Quality)
+}
+
+func TestSourceLargeJavaMapperAndTextFallbackPublishCompleteBoundedChunks(t *testing.T) {
+	var java strings.Builder
+	java.WriteString("package stress;\r\npublic class HugeService {\r\n  public String buildLargeMarker() {\r\n")
+	java.WriteString("    // oversized_comment_marker " + strings.Repeat("comment_padding_t12 ", 250) + "\r\n")
+	for i := 0; i < 1400; i++ {
+		fmt.Fprintf(&java, "    String part%04d = \"java_part_%04d\"; // 中文保留\r\n", i, i)
+	}
+	java.WriteString("    return \"java_oversized_tail_1399\";\r\n  }\r\n}\r\n")
+	javaRaw := []byte(java.String())
+
+	var mapper strings.Builder
+	mapper.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<mapper namespace=\"stress.HugeMapper\">\r\n<select id=\"hugeQuery\">SELECT 1\r\n<!-- original mapper comment stays covered: ")
+	for i := 0; i < 1800; i++ {
+		fmt.Fprintf(&mapper, "mapper_padding_%04d_中文 ", i)
+	}
+	mapper.WriteString("--></select>\r\n</mapper>\r\n")
+	mapperRaw := []byte(mapper.String())
+	templateRaw := []byte("<h1>ftl_fallback_marker_t12 {{ customer.name }}</h1>\r\n<#if customer.active>欢迎回来</#if>\r\n")
+	configRaw := []byte("service:\r\n  marker: config_text_marker_t12\r\n  title: 预约\r\n")
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"src/HugeService.java":        javaRaw,
+		"src/mapper/HugeMapper.xml":   mapperRaw,
+		"src/templates/dashboard.ftl": templateRaw,
+		"src/config/application.yml":  configRaw,
+	})
+	f.embeddingForText = func(text string) []float32 {
+		if strings.Contains(text, "ftl_fallback_marker_t12") {
+			return []float32{0, 1, 0}
+		}
+		return []float32{1, 0, 0}
+	}
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+	var model types.Model
+	require.NoError(t, f.db.Where("id=?", f.kb.EmbeddingModelID).Take(&model).Error)
+	profile, err := source.NewIndexProfile(model.Parameters.EmbeddingParameters)
+	require.NoError(t, err)
+	codec, err := tokenizer.Get(profile.Tokenizer)
+	require.NoError(t, err)
+
+	for _, fixture := range []struct {
+		path string
+		raw  []byte
+	}{
+		{"src/HugeService.java", javaRaw},
+		{"src/mapper/HugeMapper.xml", mapperRaw},
+		{"src/templates/dashboard.ftl", templateRaw},
+		{"src/config/application.yml", configRaw},
+	} {
+		var file types.SourceFile
+		require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, fixture.path).Take(&file).Error)
+		view, readErr := f.knowledge.GetSourceFile(f.ctx, file.ID)
+		require.NoError(t, readErr)
+		require.Equal(t, string(fixture.raw), view.Content, "published code reading must preserve original bytes: %s", fixture.path)
+		var chunks []types.Chunk
+		require.NoError(t, f.db.Where("knowledge_id=?", file.ID).Order("chunk_index ASC").Find(&chunks).Error)
+		require.NotEmpty(t, chunks)
+		cursor := 0
+		for _, chunk := range chunks {
+			var metadata struct {
+				Source types.SourceEvidence `json:"source"`
+			}
+			require.NoError(t, json.Unmarshal(chunk.Metadata, &metadata))
+			span := metadata.Source.Range
+			require.Equal(t, cursor, span.StartByte, "chunk coverage gap or overlap in %s", fixture.path)
+			require.Greater(t, span.EndByte, span.StartByte)
+			require.Equal(t, string(fixture.raw[span.StartByte:span.EndByte]), chunk.Content)
+			derived := source.SourceIndexText(fixture.path, types.ParsedSourceChunk{
+				Content: chunk.Content, Symbols: metadata.Source.Symbols, Context: metadata.Source.Context,
+			})
+			header, _, encodeErr := codec.Encode(source.SourceIndexHeader(fixture.path, types.ParsedSourceChunk{
+				Symbols: metadata.Source.Symbols, Context: metadata.Source.Context,
+			}))
+			require.NoError(t, encodeErr)
+			body, _, encodeErr := codec.Encode(chunk.Content)
+			require.NoError(t, encodeErr)
+			complete, _, encodeErr := codec.Encode(derived)
+			require.NoError(t, encodeErr)
+			require.LessOrEqual(t, len(header), profile.MaxTokens, "index header exceeds model budget for %s", fixture.path)
+			require.LessOrEqual(t, len(body), profile.MaxTokens, "source body exceeds model budget for %s", fixture.path)
+			require.LessOrEqual(t, len(complete), profile.MaxTokens, "complete derived index text exceeds model budget for %s", fixture.path)
+			cursor = span.EndByte
+		}
+		require.Equal(t, len(fixture.raw), cursor, "all original bytes must be covered in %s", fixture.path)
+		if strings.HasSuffix(fixture.path, ".ftl") || strings.HasSuffix(fixture.path, ".yml") {
+			require.Equal(t, "text_fallback", view.Quality, "text-only source quality must be visible to the source-file UI")
+			var diagnostics []types.ParsedSourceDiagnostic
+			require.NoError(t, json.Unmarshal(view.Diagnostics, &diagnostics))
+			require.Contains(t, diagnostics, types.ParsedSourceDiagnostic{Code: "text_fallback", Message: "No structural grammar is applied; source is indexed as bounded text"})
+		} else if fixture.path == "src/HugeService.java" {
+			require.Equal(t, "partial", view.Quality, "the oversized comment degradation must be visible in source quality")
+			var diagnostics []types.ParsedSourceDiagnostic
+			require.NoError(t, json.Unmarshal(view.Diagnostics, &diagnostics))
+			found := false
+			for _, diagnostic := range diagnostics {
+				if diagnostic.Code == "oversized_unstructured_region" {
+					found = true
+					break
+				}
+			}
+			require.True(t, found, "the original-source quality view must include the oversized comment diagnostic")
+		} else if fixture.path == "src/mapper/HugeMapper.xml" {
+			require.Equal(t, "partial", view.Quality, "the oversized XML comment degradation must be visible")
+			var diagnostics []types.ParsedSourceDiagnostic
+			require.NoError(t, json.Unmarshal(view.Diagnostics, &diagnostics))
+			found := false
+			for _, diagnostic := range diagnostics {
+				if diagnostic.Code == "oversized_comment_region" {
+					found = true
+					break
+				}
+			}
+			require.True(t, found, "the mapper version must include an oversized-comment diagnostic")
+		}
+	}
+
+	for _, route := range []struct {
+		name   string
+		params types.SearchParams
+	}{
+		{name: "keyword", params: types.SearchParams{QueryText: "ftl_fallback_marker_t12", MatchCount: 300, DisableVectorMatch: true}},
+		{name: "vector", params: types.SearchParams{QueryText: "ftl_fallback_marker_t12", MatchCount: 300, DisableKeywordsMatch: true}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			hits, searchErr := f.kbs.HybridSearch(f.ctx, f.kb.ID, route.params)
+			require.NoError(t, searchErr)
+			found := false
+			for _, hit := range hits {
+				var metadata struct {
+					Source types.SourceEvidence `json:"source"`
+				}
+				if json.Unmarshal(hit.ChunkMetadata, &metadata) == nil && metadata.Source.Path == "src/templates/dashboard.ftl" && strings.Contains(hit.Content, "ftl_fallback_marker_t12") {
+					found = true
+					break
+				}
+			}
+			require.True(t, found, "the text-fallback template should be searchable through the %s index", route.name)
+		})
+	}
 }
 
 func TestSourceMyBatisMapperXMLFactsRelationsScopesAndIndexes(t *testing.T) {
@@ -2223,6 +2373,191 @@ func TestSourceInvalidEmbeddingNeverPublishes(t *testing.T) {
 	require.Empty(t, hits)
 }
 
+func TestSourceUnknownEmbeddingProfileFailsAndPreservesPublishedVersion(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	runSync := func() *types.SyncLog {
+		t.Helper()
+		log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+		require.NoError(t, err)
+		payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+		require.NoError(t, err)
+		_ = f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload))
+		finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+		require.NoError(t, err)
+		return finished
+	}
+
+	first := runSync()
+	require.Equal(t, types.SyncLogStatusSuccess, first.Status)
+	var before types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&before).Error)
+	var file types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/Service.java").Take(&file).Error)
+	oldView, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+
+	var model types.Model
+	require.NoError(t, f.db.Where("id=?", f.kb.EmbeddingModelID).Take(&model).Error)
+	model.Parameters.EmbeddingParameters.Tokenizer = ""
+	model.Parameters.EmbeddingParameters.MaxInputTokens = 0
+	require.NoError(t, f.db.Save(&model).Error)
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.False(t, preview.CanSync, "preview must surface a missing source token profile before sync")
+
+	_, syncErr := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.ErrorContains(t, syncErr, "tokenizer")
+	var after types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&after).Error)
+	require.Equal(t, before.ID, after.ID, "invalid token profile must not replace the published snapshot")
+	currentView, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+	require.Equal(t, oldView.FileVersionID, currentView.FileVersionID)
+	require.Equal(t, oldView.Content, currentView.Content)
+}
+
+func TestSourceEmbeddingDimensionIsConsistentAcrossReadinessChecks(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	var model types.Model
+	require.NoError(t, f.db.Where("id=?", f.kb.EmbeddingModelID).Take(&model).Error)
+	model.Parameters.EmbeddingParameters.Dimension = 0
+	require.NoError(t, f.db.Save(&model).Error)
+
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.False(t, preview.CanSync)
+	_, err = f.service.ManualSync(f.ctx, f.ds.ID)
+	require.ErrorContains(t, err, "embedding model dimension")
+}
+
+func TestSourceUnfitPathHeaderFailsAndPreservesPublishedVersion(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+
+	var before types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&before).Error)
+	var file types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/Service.java").Take(&file).Error)
+	oldView, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+
+	var model types.Model
+	require.NoError(t, f.db.Where("id=?", f.kb.EmbeddingModelID).Take(&model).Error)
+	model.Parameters.EmbeddingParameters.MaxInputTokens = 17 // leaves one usable token after the required margin
+	require.NoError(t, f.db.Save(&model).Error)
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.False(t, preview.CanSync, "preview must reject a required path header that cannot fit")
+	var unfit *types.SourcePreviewFile
+	for index := range preview.Files {
+		if preview.Files[index].Path == "src/Service.java" {
+			unfit = &preview.Files[index]
+			break
+		}
+	}
+	require.NotNil(t, unfit)
+	require.Equal(t, "unindexable", unfit.Status)
+	require.Contains(t, unfit.Reason, "header exceeds")
+
+	failedLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	failedPayload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: failedLog.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.ErrorContains(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, failedPayload)), "header exceeds")
+	finished, err := f.service.GetSyncLog(f.ctx, failedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusQueued, finished.Status)
+	require.Contains(t, finished.ErrorMessage, "header exceeds")
+	requireSourceRunPhase(t, f, failedLog.ID, "retry_wait")
+
+	var after types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&after).Error)
+	require.Equal(t, before.ID, after.ID, "an unfit required path header must not replace the published snapshot")
+	currentView, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+	require.Equal(t, oldView.FileVersionID, currentView.FileVersionID)
+	require.Equal(t, oldView.Content, currentView.Content)
+
+	model.Parameters.EmbeddingParameters.MaxInputTokens = 8192
+	require.NoError(t, f.db.Save(&model).Error)
+	preview, err = f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync, "the required path header must fit a reasonable profile")
+}
+
+func TestSourcePreviewRejectsMinimumTextBodyThatCannotFit(t *testing.T) {
+	f := newJavaSourceFixture(t, map[string][]byte{"src/a.txt": []byte(strings.Repeat("a ", 32))})
+	var model types.Model
+	require.NoError(t, f.db.Where("id=?", f.kb.EmbeddingModelID).Take(&model).Error)
+	model.Parameters.EmbeddingParameters.MaxInputTokens = 22 // six usable tokens; the 64-byte body cannot fit
+	require.NoError(t, f.db.Save(&model).Error)
+
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.False(t, preview.CanSync, "preview must reject a minimum bounded body that cannot fit")
+	var unfit *types.SourcePreviewFile
+	for index := range preview.Files {
+		if preview.Files[index].Path == "src/a.txt" {
+			unfit = &preview.Files[index]
+			break
+		}
+	}
+	require.NotNil(t, unfit)
+	require.Equal(t, "unindexable", unfit.Status)
+	require.Contains(t, unfit.Reason, "64-byte")
+}
+
+func TestSourceUnsupportedUTF16PreviewAndSyncPreservePublishedVersion(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	var before types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&before).Error)
+	var file types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/Service.java").Take(&file).Error)
+	oldView, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+
+	utf16 := []byte{0xff, 0xfe, 'c', 0, 'l', 0, 'a', 0, 's', 0, 's', 0}
+	f.advanceFiles(map[string][]byte{"src/Legacy.java": utf16})
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.False(t, preview.CanSync, "UTF-16 input must be a clear non-ready preview")
+	var unsupported *types.SourcePreviewFile
+	for index := range preview.Files {
+		if preview.Files[index].Path == "src/Legacy.java" {
+			unsupported = &preview.Files[index]
+			break
+		}
+	}
+	require.NotNil(t, unsupported)
+	require.Equal(t, "unsupported_encoding", unsupported.Status)
+	require.Contains(t, unsupported.Reason, "UTF-16")
+
+	failedLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	failedPayload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: failedLog.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.ErrorContains(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, failedPayload)), "not readable")
+	finished, err := f.service.GetSyncLog(f.ctx, failedLog.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusFailed, finished.Status)
+	var after types.SourceSnapshot
+	require.NoError(t, f.db.Where("data_source_id=? AND state='published'", f.ds.ID).Take(&after).Error)
+	require.Equal(t, before.ID, after.ID, "unsupported encoding must not replace the existing publication")
+	currentView, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+	require.Equal(t, oldView.FileVersionID, currentView.FileVersionID)
+	require.Equal(t, oldView.Content, currentView.Content)
+}
+
 func TestSourceUnreadableSelectedJavaPreventsPublication(t *testing.T) {
 	f := newJavaSourceFixture(t, map[string][]byte{"src/Broken.java": {0xff, 0xfe, 'c', 0, 'l', 0}})
 	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
@@ -2559,7 +2894,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	tenant := &types.Tenant{ID: 1, Name: "source integration", Business: "test", RetrieverEngines: types.RetrieverEngines{Engines: types.GetRetrieverEngineMapping()["postgres"]}}
 	require.NoError(t, db.Create(tenant).Error)
 	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "source-test-model", Type: types.ModelTypeEmbedding, Source: types.ModelSourceRemote, Status: types.ModelStatusActive,
-		Parameters: types.ModelParameters{BaseURL: modelServer.URL, Provider: "openai", InterfaceType: "openai", EmbeddingParameters: types.EmbeddingParameters{Dimension: 3}}}
+		Parameters: types.ModelParameters{BaseURL: modelServer.URL, Provider: "openai", InterfaceType: "openai", EmbeddingParameters: types.EmbeddingParameters{Dimension: 3, Tokenizer: "cl100k_base", MaxInputTokens: 8192}}}
 	require.NoError(t, db.Create(model).Error)
 	kb := &types.KnowledgeBase{ID: uuid.NewString(), TenantID: 1, Name: "Java source", Type: "document", EmbeddingModelID: model.ID,
 		IndexingStrategy: types.IndexingStrategy{KeywordEnabled: true, VectorEnabled: true}}

@@ -126,9 +126,12 @@ class PythonHTTPContract(unittest.TestCase):
                '    return ' + expression + '\r\n').encode()
         status, result = self.parse('pkg/deep_expression.py', raw)
         self.assertEqual(status, 200, result)
-        self.assertEqual(result['quality'], 'structural')
+        self.assertEqual(result['quality'], 'partial')
         self.assertEqual(''.join(chunk['content'] for chunk in result['chunks']).encode(), raw)
         self.assertTrue(any(symbol['name'] == 'deep_expression' for symbol in result['symbols']))
+        self.assertTrue(any(diagnostic['code'] == 'oversized_unstructured_region'
+                            for diagnostic in result['diagnostics']))
+        self.assertTrue(any(chunk['quality'] == 'partial' for chunk in result['chunks']))
         for chunk in result['chunks']:
             span = chunk['range']
             self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), chunk['content'])

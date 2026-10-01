@@ -14,7 +14,8 @@ import subprocess
 import threading
 import time
 
-from runtime import SFCAttributeLimitError, load_runtime, load_sfc_runtime, parse_source, parse_vue_source, runtime_version
+from runtime import (SFCAttributeLimitError, is_text_fallback_path, load_runtime, load_sfc_runtime,
+                     parse_source, parse_vue_source, runtime_version)
 
 MAX_FILE_BYTES = 16 << 20
 MAX_REQUEST_BYTES = 23 << 20
@@ -139,8 +140,11 @@ class Handler(BaseHTTPRequestHandler):
             extensions = {'java': ('.java',), 'javascript': ('.js', '.jsx', '.mjs', '.cjs'),
                           'typescript': ('.ts', '.mts', '.cts'), 'tsx': ('.tsx',), 'python': ('.py',),
                           'mybatis-xml': ('.xml',), 'vue': ('.vue',)}
-            available = language in self.server.versions or (language == 'mybatis-xml' and 'java' in self.server.versions)
-            if not available or not path.lower().endswith(extensions[language]):
+            available = language in self.server.versions or language == 'text' or (
+                language == 'mybatis-xml' and 'java' in self.server.versions)
+            path_matches = (is_text_fallback_path(path) if language == 'text'
+                            else path.lower().endswith(extensions.get(language, ())))
+            if not available or not path_matches:
                 raise ValueError()
             raw = base64.b64decode(body['content_base64'], validate=True)
             if len(raw) > MAX_FILE_BYTES or hashlib.sha256(raw).hexdigest() != body['sha256']:
@@ -214,7 +218,7 @@ def main():
         sfc = None
     parser_version = runtime_version(versions)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    languages = sorted(versions)
+    languages = sorted([*versions, 'text']) if versions else []
     if 'java' in versions:
         languages = sorted([*languages, 'mybatis-xml'])
     server.cache, server.parser_version, server.versions, server.languages, server.sfc = cache, parser_version, versions, languages, sfc

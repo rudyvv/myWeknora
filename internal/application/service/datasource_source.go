@@ -68,14 +68,39 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 	if err != nil {
 		return nil, err
 	}
-	files, err := source.PreviewGit(ctx, repository, rules)
+	indexBackendReady := s.sourceIndexBackendReady(ctx, kb)
+	profile, profileErr := s.sourceIndexProfile(ctx, kb)
+	preflightFailures := map[string]error{}
+	preflightCount := 0
+	var preflightSize int64
+	preflightWithinPipelineLimits := true
+	files, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, content []byte) error {
+		preflightCount++
+		preflightSize += file.Size
+		if preflightCount > 100 || preflightSize > 16<<20 {
+			preflightWithinPipelineLimits = false
+		}
+		if profileErr != nil || source.LanguageForPath(file.Path) == "" || !preflightWithinPipelineLimits {
+			return nil
+		}
+		if checkErr := source.CheckPreviewIndexFeasibility(file.Path, content, profile); checkErr != nil {
+			preflightFailures[file.Path] = checkErr
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
+	}
+	for index := range files {
+		if reason, unfit := preflightFailures[files[index].Path]; unfit {
+			files[index].Status = "unindexable"
+			files[index].Reason = reason.Error()
+		}
 	}
 	requiredLanguages := []string{}
 	seenLanguages := map[string]bool{}
 	for _, file := range files {
-		if file.Status == "included" {
+		if file.Status == "included" || file.Status == "unindexable" {
 			language := source.LanguageForPath(file.Path)
 			if language != "" && !seenLanguages[language] {
 				requiredLanguages = append(requiredLanguages, language)
@@ -83,11 +108,17 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 			}
 		}
 	}
+	indexMessage := "source mode requires PostgreSQL keyword/vector indexes and an embedding model with a supported tokenizer and configured hard input limit"
+	if profileErr != nil {
+		indexMessage = profileErr.Error()
+	} else if len(preflightFailures) > 0 {
+		indexMessage = "one or more included files exceed the model's source index budget; see unindexable file rows"
+	}
 	preview := &types.SourcePreview{ProjectID: repository.ProjectID, Branch: repository.Branch, CommitSHA: repository.CommitSHA,
 		RulesVersion: version, Files: files, Warnings: []string{}, Checks: []types.SourcePreviewCheck{
 			{Name: "gitlab_branch", Ready: true, Message: "specified branch resolved and fixed commit fetched"},
-			{Name: "indexes", Ready: s.sourceIndexesReady(ctx, kb), Message: "source mode requires a resolved PostgreSQL backend with keyword and vector indexes and an embedding model"},
-			{Name: "parser", Ready: sourceParserReady(ctx, requiredLanguages...), Message: "source mode requires a healthy, versioned parser with every selected language grammar"},
+			{Name: "indexes", Ready: indexBackendReady && profileErr == nil && len(preflightFailures) == 0, Message: indexMessage},
+			{Name: "parser", Ready: sourceParserReady(ctx, requiredLanguages...), Message: "source mode requires a healthy, versioned parser with every selected grammar or text fallback route"},
 			{Name: "source_pipeline", Ready: false, Message: "source ingestion pipeline is not available; configuration and preview can be saved"},
 		}}
 	if !kb.IsWikiEnabled() {
@@ -109,7 +140,7 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 		canPublishEmpty := publishedErr == nil && previous != nil
 		pipeline := &preview.Checks[3]
 		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && supportedOnly && (count > 0 || canPublishEmpty) && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
-		pipeline.Message = "source sync requires explicit paths, at most 100 Java/JavaScript/TypeScript/Python/Vue/MyBatis XML files and 16 MiB with built-in PostgreSQL indexes; an existing publication may become empty"
+		pipeline.Message = "source sync requires explicit paths, at most 100 supported source, template, and text configuration files and 16 MiB with built-in PostgreSQL indexes; an existing publication may become empty"
 		preview.CanSync = true
 		for _, check := range preview.Checks {
 			preview.CanSync = preview.CanSync && check.Ready
@@ -118,10 +149,10 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 	return preview, nil
 }
 
-func (s *DataSourceService) sourceIndexesReady(ctx context.Context, kb *types.KnowledgeBase) bool {
+func (s *DataSourceService) sourceIndexBackendReady(ctx context.Context, kb *types.KnowledgeBase) bool {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if !kb.IsKeywordEnabled() || !kb.IsVectorEnabled() || kb.EmbeddingModelID == "" || s.sourceRetrieve == nil {
+	if kb == nil || !kb.IsKeywordEnabled() || !kb.IsVectorEnabled() || kb.EmbeddingModelID == "" || s.sourceRetrieve == nil {
 		return false
 	}
 	if kb.VectorStoreID != nil && *kb.VectorStoreID != "" && s.sourceOwnership == nil {
@@ -138,11 +169,26 @@ func (s *DataSourceService) sourceIndexesReady(ctx context.Context, kb *types.Kn
 		ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
 	}
 	engine, err := retriever.CreateRetrieveEngineForKB(ctx, s.sourceRetrieve, s.sourceOwnership, kb.TenantID, kb.VectorStoreID)
-	if err != nil || !engine.SupportsEngine(types.PostgresRetrieverEngineType, types.KeywordsRetrieverType, types.VectorRetrieverType) || engine.CheckSourceIndexes(ctx) != nil || s.sourceModels == nil {
-		return false
+	return err == nil && engine.SupportsEngine(types.PostgresRetrieverEngineType, types.KeywordsRetrieverType, types.VectorRetrieverType) && engine.CheckSourceIndexes(ctx) == nil
+}
+
+func (s *DataSourceService) sourceIndexProfile(ctx context.Context, kb *types.KnowledgeBase) (source.IndexProfile, error) {
+	if s.sourceModels == nil || kb == nil || kb.EmbeddingModelID == "" {
+		return source.IndexProfile{}, fmt.Errorf("source embedding model is unavailable")
 	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	model, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
-	return err == nil && model != nil && (model.IsBuiltin || model.TenantID == kb.TenantID) && model.Type == types.ModelTypeEmbedding && model.Status == types.ModelStatusActive && model.Parameters.EmbeddingParameters.Dimension > 0
+	if err != nil {
+		return source.IndexProfile{}, err
+	}
+	if model == nil || (!model.IsBuiltin && model.TenantID != kb.TenantID) || model.Type != types.ModelTypeEmbedding || model.Status != types.ModelStatusActive {
+		return source.IndexProfile{}, fmt.Errorf("source embedding model is unavailable or inactive")
+	}
+	if model.Parameters.EmbeddingParameters.Dimension <= 0 {
+		return source.IndexProfile{}, fmt.Errorf("source embedding model dimension is invalid")
+	}
+	return source.NewIndexProfile(model.Parameters.EmbeddingParameters)
 }
 
 func sourceParserReady(ctx context.Context, requiredLanguages ...string) bool {

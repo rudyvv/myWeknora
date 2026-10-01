@@ -365,6 +365,8 @@ function convertToLegacyFormat(model: ModelConfig) {
     provider: model.parameters.provider || '',
     dimension: model.parameters.embedding_parameters?.dimension,
     supportsDimensionOverride: model.parameters.embedding_parameters?.supports_dimension_override || false,
+    tokenizer: model.parameters.embedding_parameters?.tokenizer,
+    maxInputTokens: model.parameters.embedding_parameters?.max_input_tokens,
     isBuiltin: model.is_builtin || false,
     supportsVision: model.parameters.supports_vision || false,
     contextWindow: model.parameters.context_window || undefined,
@@ -628,7 +630,11 @@ const handleModelSave = async (modelData: any) => {
           embedding_parameters: {
             dimension: modelData.dimension,
             truncate_prompt_tokens: 0,
-            supports_dimension_override: modelData.supportsDimensionOverride ?? false
+            supports_dimension_override: modelData.supportsDimensionOverride ?? false,
+            tokenizer: modelData.tokenizer?.trim() || undefined,
+            max_input_tokens: Number(modelData.maxInputTokens) > 0
+              ? Math.round(Number(modelData.maxInputTokens))
+              : undefined,
           }
         } : {}),
         ...(saveType === 'vllm' ? {

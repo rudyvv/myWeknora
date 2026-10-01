@@ -98,10 +98,10 @@ func reconcileSourceMembers(snapshot *types.SourceSnapshot, members []types.Sour
 	}
 }
 
-func sourceParseArtifactKey(path string, raw []byte, parserVersion, rulesVersion string) string {
+func sourceParseArtifactKey(path string, raw []byte, parserVersion, rulesVersion, indexProfileIdentity string) string {
 	// Extension is the admitted language/grammar route, and the worker version
 	// controls the installed grammar. Paths alter symbol/index context.
-	return source.ArtifactKey(source.ProcessingVersion, parserVersion, strings.ToLower(filepath.Ext(path)), path, fmt.Sprintf("%x", sha256.Sum256(raw)), rulesVersion)
+	return source.ArtifactKey(source.ProcessingVersion, parserVersion, strings.ToLower(filepath.Ext(path)), path, fmt.Sprintf("%x", sha256.Sum256(raw)), rulesVersion, indexProfileIdentity)
 }
 
 func (s *DataSourceService) currentSourceEmbeddingVersion(ctx context.Context, kb *types.KnowledgeBase) (string, error) {
@@ -129,13 +129,17 @@ func (s *DataSourceService) currentSourceEmbeddingVersion(ctx context.Context, k
 	return source.EmbeddingVersion(configured, model.GetDimensions()), nil
 }
 
-func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase, snapshot *types.SourceSnapshot, indexes []*types.IndexInfo) (int, error) {
+func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase, snapshot *types.SourceSnapshot, indexes []*types.IndexInfo, indexProfile source.IndexProfile) (int, error) {
 	config, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
 	if err != nil {
 		return 0, err
 	}
 	if config == nil {
 		return 0, fmt.Errorf("source embedding model no longer exists")
+	}
+	configuredProfile, err := source.NewIndexProfile(config.Parameters.EmbeddingParameters)
+	if err != nil || configuredProfile.Identity != indexProfile.Identity {
+		return 0, fmt.Errorf("source embedding token profile changed during initialization")
 	}
 	model, err := s.sourceModelService.GetEmbeddingModelForTenant(ctx, kb.EmbeddingModelID, kb.TenantID)
 	if err != nil {
@@ -151,6 +155,10 @@ func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.Da
 	}
 	if current == nil || source.EmbeddingVersion(current, dimension) != source.EmbeddingVersion(config, dimension) {
 		return 0, fmt.Errorf("source embedding configuration changed during initialization")
+	}
+	currentProfile, err := source.NewIndexProfile(current.Parameters.EmbeddingParameters)
+	if err != nil || currentProfile.Identity != indexProfile.Identity {
+		return 0, fmt.Errorf("source embedding token profile changed during initialization")
 	}
 	snapshot.EmbeddingVersion = source.EmbeddingVersion(config, dimension)
 	for offset := 0; offset < len(indexes); offset += 32 {

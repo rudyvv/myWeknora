@@ -14,7 +14,7 @@ import (
 
 // ProcessingVersion controls coordinates, structure, chunk budgeting and index context.
 // Increment this whenever any of those contracts changes, including tokenization.
-const ProcessingVersion = "source-structure-context-cl100k-2000-v2"
+const ProcessingVersion = "source-structure-text-fallback-embedding-profile-2000-margin16-v3"
 
 func ArtifactKey(parts ...string) string {
 	data, _ := json.Marshal(parts)

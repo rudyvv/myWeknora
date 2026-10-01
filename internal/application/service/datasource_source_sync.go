@@ -18,26 +18,36 @@ import (
 	"github.com/hibiken/asynq"
 )
 
-func (s *DataSourceService) checkSourceSyncReady(ctx context.Context, kb *types.KnowledgeBase, config *types.DataSourceConfig) error {
+func (s *DataSourceService) checkSourceSyncReady(ctx context.Context, kb *types.KnowledgeBase, config *types.DataSourceConfig) (source.IndexProfile, error) {
 	if kb == nil || s.sourceSnapshots == nil || s.sourceModelService == nil {
-		return datasource.ErrSourcePipelineUnavailable
+		return source.IndexProfile{}, datasource.ErrSourcePipelineUnavailable
 	}
 	// T02 publishes in one local PG transaction. Bound remote index stores need
 	// a later distributed publication adapter and cannot silently participate.
 	if kb.VectorStoreID != nil && *kb.VectorStoreID != "" {
-		return fmt.Errorf("initial source sync requires the built-in PostgreSQL index store")
+		return source.IndexProfile{}, fmt.Errorf("initial source sync requires the built-in PostgreSQL index store")
 	}
 	rules, _, err := datasource.ParseSourceSettings(config)
 	if err != nil {
-		return err
+		return source.IndexProfile{}, err
 	}
 	if len(rules.Projects[0].Paths) == 0 {
-		return fmt.Errorf("initial source sync requires explicitly selected paths")
+		return source.IndexProfile{}, fmt.Errorf("initial source sync requires explicitly selected paths")
 	}
-	if !s.sourceIndexesReady(ctx, kb) || !sourceParserReady(ctx) {
-		return fmt.Errorf("source indexes or parser are not ready")
+	if !s.sourceIndexBackendReady(ctx, kb) {
+		return source.IndexProfile{}, fmt.Errorf("source indexes are not ready")
 	}
-	return s.sourceSnapshots.CheckReady(ctx)
+	indexProfile, err := s.sourceIndexProfile(ctx, kb)
+	if err != nil {
+		return source.IndexProfile{}, fmt.Errorf("source embedding token profile is invalid: %w", err)
+	}
+	if !sourceParserReady(ctx) {
+		return source.IndexProfile{}, fmt.Errorf("source parser is not ready")
+	}
+	if err := s.sourceSnapshots.CheckReady(ctx); err != nil {
+		return source.IndexProfile{}, err
+	}
+	return indexProfile, nil
 }
 
 func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.DataSource, log *types.SyncLog, kb *types.KnowledgeBase, connector datasource.Connector, config *types.DataSourceConfig, wasPaused bool) (failure error) {
@@ -100,7 +110,8 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		snapshot.PreviousPublishedAt = previous.Snapshot.PublishedAt
 		snapshot.LastSuccessfulPublishedAt = previous.Snapshot.PublishedAt
 	}
-	if err := s.checkSourceSyncReady(ctx, kb, config); err != nil {
+	indexProfile, err := s.checkSourceSyncReady(ctx, kb, config)
+	if err != nil {
 		return err
 	}
 	rules, version, err := datasource.ParseSourceSettings(config)
@@ -158,14 +169,14 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err != nil {
 		return err
 	}
-	snapshot.ProcessingVersion = source.ArtifactKey(source.ProcessingVersion, parserVersion)
+	snapshot.ProcessingVersion = source.ArtifactKey(source.ProcessingVersion, parserVersion, indexProfile.Identity)
 	content := map[string][]byte{}
 	checkedLanguages := map[string]bool{}
 	var totalBytes int
 	manifest, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, raw []byte) error {
 		language := source.LanguageForPath(file.Path)
 		if language == "" {
-			return fmt.Errorf("source sync supports selected Java/JavaScript/TypeScript/Python/Vue/MyBatis XML files only; narrow the included paths")
+			return fmt.Errorf("source sync supports selected source, template, and text configuration files only; narrow the included paths")
 		}
 		if !checkedLanguages[language] {
 			if !sourceParserReady(ctx, language) {
@@ -274,13 +285,13 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			result.Skipped++
 			continue
 		}
-		artifactKey := sourceParseArtifactKey(member.Path, raw, parserVersion, version)
+		artifactKey := sourceParseArtifactKey(member.Path, raw, parserVersion, version, indexProfile.Identity)
 		parsed, err := s.sourceSnapshots.GetParsedArtifact(ctx, ds.TenantID, ds.ID, artifactKey)
 		if err != nil {
 			return err
 		}
 		if parsed == nil {
-			parsed, err = source.ParseFile(ctx, os.Getenv("SOURCE_PARSER_URL"), member.Path, raw)
+			parsed, err = source.ParseFileWithProfile(ctx, os.Getenv("SOURCE_PARSER_URL"), member.Path, raw, indexProfile)
 			if err == nil && parsed.ParserVersion != parserVersion {
 				return fmt.Errorf("source parser version changed during processing")
 			}
@@ -347,7 +358,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err := progress("indexing"); err != nil {
 		return err
 	}
-	dimension, err := s.stageSourceIndexes(ctx, ds, kb, snapshot, indexes)
+	dimension, err := s.stageSourceIndexes(ctx, ds, kb, snapshot, indexes, indexProfile)
 	if err != nil {
 		return err
 	}

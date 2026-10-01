@@ -19,8 +19,13 @@ import (
 	"github.com/tiktoken-go/tokenizer"
 )
 
-// LanguageForPath selects only deployed source grammars. No project plugins run.
+// LanguageForPath selects a locked grammar or an explicitly supported text-only route.
+// No project plugins or repository-defined parsers run.
 func LanguageForPath(logicalPath string) string {
+	base := strings.ToLower(path.Base(logicalPath))
+	if base == "dockerfile" || base == "containerfile" || strings.HasPrefix(base, "dockerfile.") || strings.HasPrefix(base, "containerfile.") {
+		return "text"
+	}
 	switch strings.ToLower(path.Ext(logicalPath)) {
 	case ".java":
 		return "java"
@@ -36,6 +41,11 @@ func LanguageForPath(logicalPath string) string {
 		return "mybatis-xml"
 	case ".vue":
 		return "vue"
+	case ".html", ".htm", ".jsp", ".jspx", ".tag", ".tagx", ".ftl", ".ftlh", ".vm",
+		".css", ".scss", ".sass", ".less", ".styl", ".yaml", ".yml", ".json", ".toml",
+		".properties", ".ini", ".conf", ".cfg", ".env", ".sql", ".sh", ".bash",
+		".md", ".txt":
+		return "text"
 	default:
 		return ""
 	}
@@ -52,11 +62,23 @@ func ParseJava(ctx context.Context, endpoint, logicalPath string, raw []byte) (*
 // ParseFile uses the deployment-owned worker URL, never one supplied by GitLab.
 // The worker sees a logical path, verified bytes and hash, without credentials.
 func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.ParsedSourceFile, error) {
+	return ParseFileWithProfile(ctx, endpoint, path, raw, IndexProfile{
+		Tokenizer: tokenizer.Cl100kBase,
+		MaxTokens: SourceIndexTokenCeiling,
+	})
+}
+
+// ParseFileWithProfile verifies complete derived index text against the
+// selected embedding model's explicit tokenizer and usable per-input limit.
+func ParseFileWithProfile(ctx context.Context, endpoint, path string, raw []byte, profile IndexProfile) (*types.ParsedSourceFile, error) {
 	language := LanguageForPath(path)
 	if language == "" {
 		return nil, fmt.Errorf("source language is not supported")
 	}
-	codec, err := tokenizer.Get(tokenizer.Cl100kBase)
+	if profile.MaxTokens <= 0 {
+		return nil, fmt.Errorf("source index token budget is invalid")
+	}
+	codec, err := tokenizer.Get(profile.Tokenizer)
 	if err != nil {
 		return nil, fmt.Errorf("source tokenizer unavailable")
 	}
@@ -64,9 +86,10 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 	digest := hex.EncodeToString(hash[:])
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
-	// The library budgets bytes. Verify the actual index text with the existing
-	// BPE tokenizer and reduce the library budget if it exceeds 2,000 tokens.
-	for budget := 4096; budget >= 64; budget /= 2 {
+	// The parser worker budgets bytes. Count the body, header and complete
+	// derived index text with the selected model tokenizer, then reduce the byte
+	// budget until each chunk is within the usable model token limit.
+	for budget := 4096; budget >= SourceMinimumChunkBytes; budget /= 2 {
 		body, _ := json.Marshal(map[string]any{"path": path, "language": language, "sha256": digest, "content_base64": base64.StdEncoding.EncodeToString(raw), "chunk_max_bytes": budget})
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/v1/parse", bytes.NewReader(body))
 		if err != nil {
@@ -129,7 +152,9 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 			}
 		}
 		cursor, oversized := 0, false
-		for _, chunk := range parsed.Chunks {
+		var headerTrimmedRange types.SourceRange
+		for chunkIndex := range parsed.Chunks {
+			chunk := &parsed.Chunks[chunkIndex]
 			span := chunk.Range
 			if span.StartByte != cursor || span.EndByte <= cursor || span.EndByte > len(raw) || !utf8.Valid(raw[span.StartByte:span.EndByte]) || string(raw[span.StartByte:span.EndByte]) != chunk.Content {
 				return nil, fmt.Errorf("source parser returned invalid original coordinates")
@@ -151,21 +176,83 @@ func ParseFile(ctx context.Context, endpoint, path string, raw []byte) (*types.P
 					return nil, fmt.Errorf("source parser returned invalid context coordinates")
 				}
 			}
-			ids, _, e := codec.Encode(SourceIndexText(path, chunk))
+			trimmed, headerTokens, e := fitSourceIndexHeader(codec, path, chunk, profile.MaxTokens)
 			if e != nil {
 				return nil, fmt.Errorf("source tokenization failed")
 			}
-			oversized = oversized || len(ids) > 2000
+			if trimmed && headerTrimmedRange == (types.SourceRange{}) {
+				headerTrimmedRange = chunk.Range
+			}
+			if headerTokens > profile.MaxTokens {
+				return nil, fmt.Errorf("source index header exceeds the embedding model token budget after removing trace context")
+			}
+			_, bodyTokens, indexTokens, e := sourceIndexTokenCounts(codec, path, *chunk)
+			if e != nil {
+				return nil, fmt.Errorf("source tokenization failed")
+			}
+			oversized = oversized || bodyTokens > profile.MaxTokens || indexTokens > profile.MaxTokens
 			cursor = span.EndByte
 		}
 		if cursor != len(raw) {
 			return nil, fmt.Errorf("source parser returned an incomplete file")
 		}
+		if headerTrimmedRange != (types.SourceRange{}) {
+			parsed.Diagnostics = append(parsed.Diagnostics, types.ParsedSourceDiagnostic{
+				Code:    "source_index_header_trimmed",
+				Message: "Trace context or nonessential symbols were omitted from derived embedding text to fit the model input limit",
+				Range:   headerTrimmedRange,
+			})
+		}
 		if !oversized {
 			return &parsed, nil
 		}
 	}
-	return nil, fmt.Errorf("source context exceeds the index token budget")
+	return nil, fmt.Errorf("source context exceeds the embedding model token budget")
+}
+
+func sourceIndexTokenCounts(codec tokenizer.Codec, path string, chunk types.ParsedSourceChunk) (header, body, full int, err error) {
+	header, err = sourceIndexHeaderTokenCount(codec, path, chunk)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	bodyIDs, _, err := codec.Encode(chunk.Content)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	fullIDs, _, err := codec.Encode(SourceIndexText(path, chunk))
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return header, len(bodyIDs), len(fullIDs), nil
+}
+
+func sourceIndexHeaderTokenCount(codec tokenizer.Codec, path string, chunk types.ParsedSourceChunk) (int, error) {
+	headerIDs, _, err := codec.Encode(SourceIndexHeader(path, chunk))
+	if err != nil {
+		return 0, err
+	}
+	return len(headerIDs), nil
+}
+
+func fitSourceIndexHeader(codec tokenizer.Codec, path string, chunk *types.ParsedSourceChunk, limit int) (bool, int, error) {
+	trimmed := false
+	for {
+		headerTokens, err := sourceIndexHeaderTokenCount(codec, path, *chunk)
+		if err != nil || headerTokens <= limit {
+			return trimmed, headerTokens, err
+		}
+		if len(chunk.Context) > 0 {
+			chunk.Context = chunk.Context[1:]
+			trimmed = true
+			continue
+		}
+		if len(chunk.Symbols) > 0 {
+			chunk.Symbols = chunk.Symbols[:len(chunk.Symbols)-1]
+			trimmed = true
+			continue
+		}
+		return trimmed, headerTokens, nil
+	}
 }
 
 func validSourceRegion(region *types.SourceRegion) bool {
@@ -215,6 +302,11 @@ func validSourceDiagnostic(language string, raw []byte, diagnostic types.SourceD
 // SourceIndexText is derived index text, not a contiguous original fragment.
 // Only Chunk.Content and separately ranged context may be shown as code evidence.
 func SourceIndexText(path string, chunk types.ParsedSourceChunk) string {
+	return SourceIndexHeader(path, chunk) + "\n" + chunk.Content
+}
+
+// SourceIndexHeader is derived context counted separately from the source body.
+func SourceIndexHeader(path string, chunk types.ParsedSourceChunk) string {
 	parts := []string{path, strings.Join(chunk.Symbols, " ")}
 	if chunk.Region != nil {
 		parts = append(parts, "Vue "+chunk.Region.Kind+" region "+chunk.Region.Language+" "+chunk.Region.Quality)
@@ -233,5 +325,5 @@ func SourceIndexText(path string, chunk types.ParsedSourceChunk) string {
 	for _, c := range chunk.Context {
 		parts = append(parts, c.Text)
 	}
-	return strings.Join(parts, "\n") + "\n" + chunk.Content
+	return strings.Join(parts, "\n")
 }

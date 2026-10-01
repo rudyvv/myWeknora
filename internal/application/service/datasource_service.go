@@ -631,7 +631,7 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		if err != nil {
 			return nil, err
 		}
-		if err := s.checkSourceSyncReady(ctx, kb, config); err != nil {
+		if _, err := s.checkSourceSyncReady(ctx, kb, config); err != nil {
 			return nil, err
 		}
 	}
