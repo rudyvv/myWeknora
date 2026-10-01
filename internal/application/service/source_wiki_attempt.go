@@ -438,6 +438,9 @@ func (s *sourceWikiService) loadOrCreateSourceWikiAttempt(ctx context.Context, l
 	if err != nil {
 		return nil, fmt.Errorf("Wiki model is unavailable")
 	}
+	if model.Parameters.ContextWindow <= types.SourceWikiAttemptMaxCompletionTokens {
+		return nil, fmt.Errorf("Wiki model must have a confirmed context window larger than %d tokens", types.SourceWikiAttemptMaxCompletionTokens)
+	}
 	baseVersion := 0
 	if existing != nil {
 		baseVersion = existing.Version

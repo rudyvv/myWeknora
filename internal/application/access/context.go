@@ -79,6 +79,22 @@ func HasKBGrant(ctx context.Context, kbID string, tenantID uint64, required type
 		grant.scope.Allows(kbID, tenantID)
 }
 
+// HasKBTaskGrant reports whether trusted server code granted this caller an
+// exact-KB task scope. It never infers a task grant from tenant or caller data.
+func HasKBTaskGrant(ctx context.Context, kbID string, tenantID uint64, required types.OrgMemberRole) bool {
+	if !required.IsValid() || kbID == "" || tenantID == 0 || types.AuthorizeTenantAPIKeyKnowledgeBases(ctx, kbID) != nil {
+		return false
+	}
+	caller := types.CallerFromContext(ctx)
+	grants, _ := ctx.Value(types.KBGrantsContextKey).([]kbGrant)
+	for _, grant := range grants {
+		if grant.task && grant.caller == caller && grant.kbID == kbID && grant.tenantID == tenantID && grant.permission.HasPermission(required) {
+			return true
+		}
+	}
+	return false
+}
+
 // KBPermissions combines caller ownership, exact context grants and organization
 // shares for one service operation. Pass nil shares when that entry point does
 // not permit organization expansion (for example, a caller without a user).

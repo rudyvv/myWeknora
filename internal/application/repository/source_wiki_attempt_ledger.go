@@ -37,8 +37,8 @@ func (l *SourceWikiAttemptLedger) Create(ctx context.Context, attempt *types.Sou
 	if l == nil || l.db == nil || attempt == nil || attempt.ID == "" || attempt.Status != "running" ||
 		attempt.KnowledgeBaseID == "" || attempt.SourceID == "" || attempt.SnapshotID == "" || attempt.ModulePath == "" || attempt.Title == "" || attempt.Slug == "" ||
 		attempt.SourceConfigFingerprint == "" || attempt.SourceUpdatedAt.IsZero() || attempt.ModelID == "" || attempt.ModelSettingsFingerprint == "" ||
-		attempt.ModelContextWindow < 0 || attempt.MaxCompletionTokens <= 0 || attempt.MaxCompletionTokens > types.SourceWikiAttemptMaxCompletionTokens ||
-		(attempt.ModelContextWindow > 0 && attempt.MaxCompletionTokens > attempt.ModelContextWindow) ||
+		attempt.ModelContextWindow <= 0 || attempt.MaxCompletionTokens <= 0 || attempt.MaxCompletionTokens > types.SourceWikiAttemptMaxCompletionTokens ||
+		attempt.MaxCompletionTokens >= attempt.ModelContextWindow ||
 		attempt.MaxCalls <= 0 || attempt.MaxCalls > types.SourceWikiAttemptMaxCalls || attempt.MaxTokens <= 0 || attempt.MaxTokens > types.SourceWikiAttemptMaxTokens ||
 		attempt.MaxElapsedMS <= 0 || attempt.MaxElapsedMS > types.SourceWikiAttemptMaxElapsedMS || attempt.MaxRepairs < 0 || attempt.MaxRepairs > types.SourceWikiAttemptMaxRepairs ||
 		attempt.BasePageVersion < 0 || attempt.Calls != 0 || attempt.Tokens != 0 || attempt.Repairs != 0 ||
@@ -349,7 +349,7 @@ func attemptLeaseExpiry(now time.Time, leaseFor time.Duration, deadline time.Tim
 func sourceWikiAttemptTargetIsFixed(attempt types.SourceWikiAttempt) bool {
 	return attempt.SnapshotID != "" && attempt.SourceConfigFingerprint != "" &&
 		attempt.SourceUpdatedAt.After(time.Unix(0, 0)) && attempt.ModelID != "" &&
-		attempt.ModelSettingsFingerprint != "" && attempt.MaxCompletionTokens > 0
+		attempt.ModelSettingsFingerprint != "" && attempt.ModelContextWindow > attempt.MaxCompletionTokens && attempt.MaxCompletionTokens > 0
 }
 
 func markSourceWikiAttemptCallsUnknown(tx *gorm.DB, attemptID string, now time.Time) error {

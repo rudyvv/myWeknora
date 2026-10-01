@@ -251,6 +251,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewUserResourceFavoriteService))
 	must(container.Provide(service.NewWikiPageService))
 	must(container.Provide(service.NewSourceWikiService))
+	must(container.Provide(service.NewSourceWikiAttemptRecovery))
+	must(container.Invoke(startSourceWikiAttemptRecovery))
 	must(container.Provide(service.NewWikiIngestService, dig.Name("wikiIngest")))
 	must(container.Provide(service.NewWikiLintService))
 	must(container.Provide(service.NewEmbedChannelService))
@@ -1771,6 +1773,21 @@ func startHousekeepingService(svc *service.HousekeepingService, cleaner interfac
 	cleaner.RegisterWithName("KnowledgeHousekeeping", func() error {
 		svc.Stop()
 		return nil
+	})
+}
+
+// startSourceWikiAttemptRecovery starts the bounded durable-attempt scanner.
+// Startup failure is best-effort like other housekeeping workers; the API can
+// still serve requests and the next process start will scan the ledger again.
+func startSourceWikiAttemptRecovery(svc *service.SourceWikiAttemptRecovery, cleaner interfaces.ResourceCleaner) {
+	if svc == nil {
+		return
+	}
+	if err := svc.Start(context.Background()); err != nil {
+		logger.Warnf(context.Background(), "[Container] source Wiki attempt recovery start failed: %v", err)
+	}
+	cleaner.RegisterWithName("SourceWikiAttemptRecovery", func() error {
+		return svc.Stop()
 	})
 }
 

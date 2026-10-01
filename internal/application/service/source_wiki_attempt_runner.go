@@ -50,7 +50,7 @@ func (r *sourceWikiAttemptCallRunner) Call(ctx context.Context, phase string, me
 		return nil, fmt.Errorf("encode source Wiki provider request: %w", err)
 	}
 	reservedTokens := len(encoded) + r.lease.MaxCompletionTokens
-	if r.lease.ModelContextWindow > 0 && reservedTokens > r.lease.ModelContextWindow {
+	if r.lease.ModelContextWindow <= r.lease.MaxCompletionTokens || reservedTokens > r.lease.ModelContextWindow {
 		return nil, errSourceWikiAttemptCallContext
 	}
 	now := r.clock()

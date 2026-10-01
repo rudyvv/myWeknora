@@ -49,7 +49,7 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	models := service.NewModelService(repository.NewModelRepository(f.DB), repository.NewKnowledgeBaseRepository(f.DB), nil, nil, nil, nil)
-	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "wiki-http-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai"}}
+	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "wiki-http-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai", ContextWindow: 65536}}
 	require.NoError(t, models.CreateModel(f.Ctx, model))
 	f.KB.SummaryModelID = model.ID
 	f.KB.IndexingStrategy.WikiEnabled = true

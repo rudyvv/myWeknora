@@ -61,7 +61,7 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 	}))
 	t.Cleanup(server.Close)
 	models := NewModelService(repository.NewModelRepository(f.db), repository.NewKnowledgeBaseRepository(f.db), nil, nil, nil, nil)
-	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "source-wiki-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai"}}
+	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "source-wiki-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai", ContextWindow: 65536}}
 	require.NoError(t, models.CreateModel(f.ctx, model))
 	f.kb.SummaryModelID = model.ID
 	f.kb.IndexingStrategy.WikiEnabled = true
@@ -96,6 +96,34 @@ func TestSourceWikiModuleGeneratesValidatedCardThroughExistingWikiTools(t *testi
 	require.NoError(t, err)
 	require.Equal(t, f.sha, evidence.CommitSHA)
 	require.Contains(t, evidence.Content, "getPushSchedule")
+}
+
+func TestSourceWikiUnknownContextFailsBeforeProviderDispatch(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var providerCalls atomic.Int32
+	_, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		providerCalls.Add(1)
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	svc := generator.(*sourceWikiService)
+	model, err := svc.models.GetModelByID(f.ctx, f.kb.SummaryModelID)
+	require.NoError(t, err)
+	model.Parameters.ContextWindow = 0
+	require.NoError(t, svc.models.UpdateModel(f.ctx, model))
+
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.Error(t, err, "an unknown provider context window must be an actionable configuration error")
+	require.Nil(t, attempt)
+	require.Zero(t, providerCalls.Load(), "unknown context must stop before any model dispatch")
+	var attempts int64
+	require.NoError(t, f.db.Model(&types.SourceWikiAttempt{}).Where("knowledge_base_id=?", f.kb.ID).Count(&attempts).Error)
+	require.Zero(t, attempts, "invalid model configuration must not consume a module attempt slot")
 }
 
 func TestSourceWikiGenerationRecoversSameAttemptFromPersistedQAPhase(t *testing.T) {

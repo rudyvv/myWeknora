@@ -21,6 +21,7 @@ func (s *knowledgeBaseService) BeginSourceRead(ctx context.Context, targets type
 		return ctx, noop, nil
 	}
 	normalized := make(types.SearchTargets, 0, len(targets))
+	taskGrantedKBs := make(map[string]bool, len(targets))
 	for _, target := range targets {
 		if target == nil || target.KnowledgeBaseID == "" {
 			continue
@@ -32,6 +33,7 @@ func (s *knowledgeBaseService) BeginSourceRead(ctx context.Context, targets type
 		if _, err = resolveKBReadTenant(ctx, kb, s.kbShareService); err != nil {
 			return ctx, noop, err
 		}
+		taskGrantedKBs[kb.ID] = access.HasKBTaskGrant(ctx, kb.ID, kb.TenantID, types.OrgRoleViewer)
 		copy := *target
 		copy.TenantID = kb.TenantID
 		normalized = append(normalized, &copy)
@@ -58,6 +60,14 @@ func (s *knowledgeBaseService) BeginSourceRead(ctx context.Context, targets type
 			}
 			if kb.TenantID != target.TenantID {
 				return apperrors.NewForbiddenError("source knowledge base ownership changed")
+			}
+			if taskGrantedKBs[kb.ID] {
+				// Recovery has no persisted human caller to re-resolve. Re-mint only
+				// the exact task scope after reloading and rechecking this KB binding.
+				if _, err := access.WithKBTaskWrite(fresh, kb, target.TenantID); err != nil {
+					return err
+				}
+				continue
 			}
 			shares := s.kbShareService
 			if types.CallerFromContext(fresh).UserID == "" {

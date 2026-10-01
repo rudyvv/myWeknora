@@ -110,7 +110,7 @@ func newSourceWikiRunnerAttempt(now time.Time) *types.SourceWikiAttempt {
 		ID: uuid.NewString(), TenantID: 7, KnowledgeBaseID: "kb-runner", SourceID: "source-runner",
 		SnapshotID: "snapshot-runner", ModulePath: "src", Title: "Runner card", Slug: "concept/runner",
 		Status: "running", SourceConfigFingerprint: "config-a", SourceUpdatedAt: now, ModelID: "model-a",
-		ModelSettingsFingerprint: "model-a-settings", ModelContextWindow: 4096, MaxCompletionTokens: 4096, MaxCalls: 18, MaxTokens: 360000,
+		ModelSettingsFingerprint: "model-a-settings", ModelContextWindow: 8192, MaxCompletionTokens: 4096, MaxCalls: 18, MaxTokens: 360000,
 		MaxElapsedMS: 180000, MaxRepairs: 2, DeadlineAt: now.Add(3 * time.Minute),
 		CreatedAt: now, UpdatedAt: now,
 	}
