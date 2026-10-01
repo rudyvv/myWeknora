@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+const (
+	SourceWikiAttemptMaxCalls                  = 18
+	SourceWikiAttemptMaxTokens                 = 360000
+	SourceWikiAttemptMaxElapsedMS        int64 = 180000
+	SourceWikiAttemptMaxRepairs                = 2
+	SourceWikiAttemptMaxCompletionTokens       = 4096
+)
+
 // SourceWikiEvidence is registered by the server from an immutable source read.
 // Models cite only ID and cannot choose provenance or byte/line coordinates.
 type SourceWikiEvidence struct {
@@ -50,24 +58,114 @@ type SourceWikiGenerateRequest struct {
 	Title           string `json:"title" binding:"required"`
 }
 type SourceWikiAttempt struct {
-	ID                   string      `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID             uint64      `json:"tenant_id"`
-	KnowledgeBaseID      string      `json:"knowledge_base_id" gorm:"type:varchar(36)"`
-	SourceID             string      `json:"source_id" gorm:"type:varchar(36)"`
-	SnapshotID           string      `json:"snapshot_id" gorm:"type:varchar(36)"`
-	ModulePath           string      `json:"module_path"`
-	Title                string      `json:"title"`
-	Slug                 string      `json:"slug"`
-	Status               string      `json:"status"`
-	Reason               string      `json:"reason"`
-	EvidenceKnowledgeIDs StringArray `json:"-" gorm:"type:jsonb"`
-	Draft                JSON        `json:"draft" gorm:"type:jsonb"`
-	Calls                int         `json:"calls"`
-	Tokens               int         `json:"tokens"`
-	Repairs              int         `json:"repairs"`
-	CreatedAt            time.Time   `json:"created_at"`
-	UpdatedAt            time.Time   `json:"updated_at"`
+	ID                       string      `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID                 uint64      `json:"tenant_id"`
+	KnowledgeBaseID          string      `json:"knowledge_base_id" gorm:"type:varchar(36)"`
+	SourceID                 string      `json:"source_id" gorm:"type:varchar(36)"`
+	SnapshotID               string      `json:"snapshot_id" gorm:"type:varchar(36)"`
+	ModulePath               string      `json:"module_path"`
+	Title                    string      `json:"title"`
+	Slug                     string      `json:"slug"`
+	Status                   string      `json:"status"`
+	Reason                   string      `json:"reason"`
+	EvidenceKnowledgeIDs     StringArray `json:"-" gorm:"type:jsonb"`
+	Draft                    JSON        `json:"draft" gorm:"type:jsonb"`
+	Calls                    int         `json:"calls"`
+	Tokens                   int         `json:"tokens"`
+	Repairs                  int         `json:"repairs"`
+	SourceConfigFingerprint  string      `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	SourceUpdatedAt          time.Time   `json:"-" gorm:"not null"`
+	ModelID                  string      `json:"-" gorm:"type:varchar(36);not null;default:''"`
+	ModelSettingsFingerprint string      `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	ModelContextWindow       int         `json:"-" gorm:"not null;default:0"`
+	MaxCompletionTokens      int         `json:"-" gorm:"not null;default:4096"`
+	BasePageVersion          int         `json:"-" gorm:"not null;default:0"`
+	Epoch                    int64       `json:"-" gorm:"not null;default:0"`
+	LeaseOwner               string      `json:"-" gorm:"type:varchar(36);not null;default:''"`
+	LeaseExpiresAt           *time.Time  `json:"-"`
+	DeadlineAt               time.Time   `json:"deadline_at" gorm:"not null"`
+	MaxCalls                 int         `json:"max_calls" gorm:"not null"`
+	MaxTokens                int         `json:"max_tokens" gorm:"not null"`
+	MaxElapsedMS             int64       `json:"max_elapsed_ms" gorm:"not null"`
+	MaxRepairs               int         `json:"max_repairs" gorm:"not null"`
+	Phase                    string      `json:"phase,omitempty" gorm:"type:text;not null;default:''"`
+	Checkpoint               JSON        `json:"-" gorm:"type:jsonb"`
+	CreatedAt                time.Time   `json:"created_at"`
+	UpdatedAt                time.Time   `json:"updated_at"`
 }
+
+// SourceWikiAttemptLease is an epoch-fenced claim on one durable attempt.
+// The epoch and owner must accompany every heartbeat, reservation, checkpoint,
+// and terminal transition.
+type SourceWikiAttemptLease struct {
+	AttemptID                string
+	Owner                    string
+	Epoch                    int64
+	ModelID                  string
+	ModelSettingsFingerprint string
+	ModelContextWindow       int
+	MaxCompletionTokens      int
+}
+
+type SourceWikiAttemptClaimRequest struct {
+	AttemptID string
+	Owner     string
+	Now       time.Time
+	LeaseFor  time.Duration
+}
+
+type SourceWikiAttemptCallReservation struct {
+	ID             string
+	AttemptID      string
+	Epoch          int64
+	CallNumber     int
+	Phase          string
+	ReservedTokens int
+}
+
+type SourceWikiAttemptCallReservationRequest struct {
+	Lease          SourceWikiAttemptLease
+	Phase          string
+	ReservedTokens int
+	Now            time.Time
+	LeaseFor       time.Duration
+}
+
+type SourceWikiAttemptCallCompletion struct {
+	Lease         SourceWikiAttemptLease
+	ReservationID string
+	Outcome       string
+	ActualTokens  *int
+	Checkpoint    JSON
+	Draft         JSON
+	NextPhase     string
+	Repairs       *int
+	Now           time.Time
+}
+
+type SourceWikiAttemptProgress struct {
+	Phase      string
+	Checkpoint JSON
+	Draft      JSON
+	Repairs    int
+	Now        time.Time
+}
+
+type SourceWikiAttemptCall struct {
+	ID             string `gorm:"type:varchar(36);primaryKey"`
+	AttemptID      string `gorm:"type:varchar(36);not null;index"`
+	Epoch          int64  `gorm:"not null"`
+	CallNumber     int    `gorm:"not null"`
+	Phase          string `gorm:"type:text;not null"`
+	ReservedTokens int    `gorm:"not null"`
+	ActualTokens   *int
+	Outcome        string    `gorm:"type:text;not null"`
+	CreatedAt      time.Time `gorm:"not null"`
+	CompletedAt    *time.Time
+}
+
+func (SourceWikiAttemptCall) TableName() string { return "source_wiki_attempt_calls" }
+
 type SourceWikiEvidenceRef struct {
 	ID            string  `gorm:"type:varchar(36);primaryKey"`
 	PageID        string  `gorm:"type:varchar(36)"`
