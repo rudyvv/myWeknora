@@ -142,3 +142,9 @@ T18 接续合同已由根批准并直接送达：固定 base `a1d11b956f2292290c
 T18额外接口核对已送达：source_chunk_references也限制file version删除；历史ReadSourceWikiEvidence现依赖sm.path/status与published快照元数据，删除old membership不能只保留sv.content，需保持exact历史路径/SHA/坐标可读且普通RAG范围不变。要求新发布→GC旧index→实际修订来源读仍成功，并核对旧chunk/embedding确已释放。统一revision→version/pin锁顺序；根将现有attempt普通Save缺owner/抢占恢复的问题记为后续T17范围，不扩T18完整恢复状态机。
 
 T18/T17已协调exact(attempt_id,file_version_id,snapshot_id)耐久原文owner：已授权证据收集后、首次model调用前持久登记，独立于普通lease过期；publish同TX转交page/revision owner，terminal同TX释放并入队；崩溃running由T17恢复处理。T17只读Sol/high规划建议已收取但未派执行者下一票：复用现有attempt ID/计数/草稿，未来固定持久有限额度与epoch/lease；每次provider调度前原子reservation，重试/QA/合并共用，unknown usage保留已消耗预算，恢复同一ID不得重置；page.version CAS失败读新正文、只合并相应源并累计计费。正式T17实现启动时再决定预检额度/时间/有界冲突合并次数，不新增用户逐票审批。
+
+2026-10-01 用户再次明确额度恢复/中断后继续全部关联对话：三个原worker上轮usage-limit failed，后续恢复turn又interrupted，均未计完成。根保留各原dirty现场重新发送当前具体任务；紧凑核对T18/T11/T13全部active。最新游标T18 `82e187da-afe3-4f59-9c78-3b4417471064:5`，T11 `ede37483-473c-44e0-92a2-6b249170c218:4`，T13 `12e65bc3-bae2-46ea-aadc-5cd9312d2227:4`。T18继续exact attempt pins及移除旧membership后的历史读取；T11保留60冻结只做指定链有界audit；T13统一111函数，继续既有cap红测后的实现。累计13/22，无新验收或关票。
+
+根发现Docker engine不可用及57521不通，执行docker desktop start后turn中断、旧exec session已不存在；复核engine29.7.2实际恢复，仅专用weknora-source-batch-two-test停于Exited(0)。根只启动该专用容器，pg_isready accepting connections且57521 TCP True；共享应用未重启，未读取旧凭据。三个worker已直接收到环境恢复通知。所有根该轮命令结果已收取，无遗留根测试进程。
+
+原heartbeat `weknora`实际PAUSED，根依据用户明确继续本对话与关联对话及原自动协调授权，通过automation_update更新同ID为ACTIVE，保留原prompt/10分钟频率/目标thread；工具和toml均确认ACTIVE，未新建重复automation。继续只在新结果/问题/异常动作，同SHA不重复review，未变状态安静；全部22验收后停用。root仍负责新完整干净SHA双轴/独立复验/集成，通过后才派下一票。
