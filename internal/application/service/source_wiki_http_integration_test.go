@@ -28,6 +28,12 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000105_source_wiki.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.DB.Exec(string(migration)).Error)
+	retentionMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000112_source_wiki_revision_retention.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(retentionMigration)).Error)
+	attemptLedgerMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000113_source_wiki_attempt_ledger.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(attemptLedgerMigration)).Error)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Messages []struct {

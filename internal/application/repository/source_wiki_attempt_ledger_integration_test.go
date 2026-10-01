@@ -79,7 +79,8 @@ func newSourceWikiAttemptLedgerPostgres(t *testing.T) (*gorm.DB, *SourceWikiAtte
 		updated_at TIMESTAMPTZ NOT NULL
 	);
 	CREATE UNIQUE INDEX source_wiki_one_running_module
-		ON source_wiki_attempts(tenant_id,knowledge_base_id,source_id,module_path) WHERE status='running';`
+		ON source_wiki_attempts(tenant_id,knowledge_base_id,source_id,module_path) WHERE status='running';
+	CREATE TABLE source_wiki_attempt_evidence_refs (attempt_id VARCHAR(36) NOT NULL);`
 	if err := db.Exec(baseSchema).Error; err != nil {
 		t.Fatalf("create source Wiki attempt baseline schema: %v", err)
 	}
@@ -216,12 +217,15 @@ func TestAttemptLedgerConcurrentReservationsStopAtPersistedCallCap(t *testing.T)
 }
 
 func TestAttemptLedgerDeadlineFinalizesOnHeartbeatAndPreservesCheckpoint(t *testing.T) {
-	_, ledger := newSourceWikiAttemptLedgerPostgres(t)
+	db, ledger := newSourceWikiAttemptLedgerPostgres(t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	attempt := newLedgerAttempt(uuid.NewString(), now)
 	if err := ledger.Create(ctx, attempt); err != nil {
 		t.Fatalf("create attempt: %v", err)
+	}
+	if err := db.Exec("INSERT INTO source_wiki_attempt_evidence_refs(attempt_id) VALUES (?)", attempt.ID).Error; err != nil {
+		t.Fatalf("register attempt evidence owner: %v", err)
 	}
 	lease, err := ledger.Claim(ctx, types.SourceWikiAttemptClaimRequest{AttemptID: attempt.ID, Owner: "worker", Now: now, LeaseFor: 3 * time.Minute})
 	if err != nil {
@@ -248,15 +252,50 @@ func TestAttemptLedgerDeadlineFinalizesOnHeartbeatAndPreservesCheckpoint(t *test
 		!jsonMatches(stored.Checkpoint, `{"stage":"generated"}`) || stored.Calls != 1 || stored.Tokens != 20 || stored.LeaseOwner != "" || stored.LeaseExpiresAt != nil {
 		t.Fatalf("deadline terminal transition lost persisted state: status=%q reason=%q draft=%s checkpoint=%s calls=%d tokens=%d owner=%q lease=%v", stored.Status, stored.Reason, stored.Draft, stored.Checkpoint, stored.Calls, stored.Tokens, stored.LeaseOwner, stored.LeaseExpiresAt)
 	}
+	var ownerCount int64
+	if err := db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=?", attempt.ID).Count(&ownerCount).Error; err != nil || ownerCount != 0 {
+		t.Fatalf("expired attempt owner count=%d error=%v, want same-transaction release", ownerCount, err)
+	}
+}
+
+func TestAttemptLedgerIncompleteTargetTerminalTransitionReleasesEvidenceOwner(t *testing.T) {
+	db, ledger := newSourceWikiAttemptLedgerPostgres(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 1, 12, 15, 0, 0, time.UTC)
+	attempt := newLedgerAttempt(uuid.NewString(), now)
+	if err := ledger.Create(ctx, attempt); err != nil {
+		t.Fatalf("create attempt: %v", err)
+	}
+	if err := db.Exec("INSERT INTO source_wiki_attempt_evidence_refs(attempt_id) VALUES (?)", attempt.ID).Error; err != nil {
+		t.Fatalf("register attempt evidence owner: %v", err)
+	}
+	if err := db.Model(&types.SourceWikiAttempt{}).Where("id=?", attempt.ID).Update("model_id", "").Error; err != nil {
+		t.Fatalf("make fixed model target incomplete: %v", err)
+	}
+	_, err := ledger.Claim(ctx, types.SourceWikiAttemptClaimRequest{AttemptID: attempt.ID, Owner: "worker", Now: now, LeaseFor: time.Minute})
+	if !errors.Is(err, ErrSourceWikiAttemptTargetIncomplete) {
+		t.Fatalf("claim incomplete attempt error=%v, want fixed-target rejection", err)
+	}
+	stored, err := ledger.Get(ctx, attempt.ID)
+	if err != nil || stored.Status != "failed" {
+		t.Fatalf("incomplete attempt status=%v error=%v, want failed", stored, err)
+	}
+	var ownerCount int64
+	if err := db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=?", attempt.ID).Count(&ownerCount).Error; err != nil || ownerCount != 0 {
+		t.Fatalf("incomplete attempt owner count=%d error=%v, want same-transaction release", ownerCount, err)
+	}
 }
 
 func TestAttemptLedgerExpiredCrashAttemptFailsWithoutResettingDraftOrReservations(t *testing.T) {
-	_, ledger := newSourceWikiAttemptLedgerPostgres(t)
+	db, ledger := newSourceWikiAttemptLedgerPostgres(t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 1, 12, 30, 0, 0, time.UTC)
 	attempt := newLedgerAttempt(uuid.NewString(), now)
 	if err := ledger.Create(ctx, attempt); err != nil {
 		t.Fatalf("create attempt: %v", err)
+	}
+	if err := db.Exec("INSERT INTO source_wiki_attempt_evidence_refs(attempt_id) VALUES (?)", attempt.ID).Error; err != nil {
+		t.Fatalf("register attempt evidence owner: %v", err)
 	}
 	lease, err := ledger.Claim(ctx, types.SourceWikiAttemptClaimRequest{AttemptID: attempt.ID, Owner: "crashed-worker", Now: now, LeaseFor: 30 * time.Second})
 	if err != nil {
@@ -287,6 +326,10 @@ func TestAttemptLedgerExpiredCrashAttemptFailsWithoutResettingDraftOrReservation
 	if stored.Status != "failed" || stored.Reason == "" || stored.Phase != "qa" || stored.Calls != 2 || stored.Tokens != 150 ||
 		!jsonMatches(stored.Draft, `{"title":"saved before restart"}`) || !jsonMatches(stored.Checkpoint, `{"generation":"complete"}`) {
 		t.Fatalf("expired crash attempt reset durable state: status=%q reason=%q phase=%q calls=%d tokens=%d draft=%s checkpoint=%s", stored.Status, stored.Reason, stored.Phase, stored.Calls, stored.Tokens, stored.Draft, stored.Checkpoint)
+	}
+	var ownerCount int64
+	if err := db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=?", attempt.ID).Count(&ownerCount).Error; err != nil || ownerCount != 0 {
+		t.Fatalf("expired recovered attempt owner count=%d error=%v, want same-transaction release", ownerCount, err)
 	}
 }
 

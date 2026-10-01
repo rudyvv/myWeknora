@@ -53,9 +53,12 @@ func (p *SourceWikiProvenance) Scan(value any) error {
 
 type SourceWikiGenerateRequest struct {
 	KnowledgeBaseID string `json:"knowledge_base_id"`
-	SourceID        string `json:"source_id" binding:"required"`
-	ModulePath      string `json:"module_path" binding:"required"`
-	Title           string `json:"title" binding:"required"`
+	// AttemptID is supplied only to resume a previously returned running
+	// attempt. Omitting it creates a fresh attempt with fresh limits.
+	AttemptID  string `json:"attempt_id,omitempty"`
+	SourceID   string `json:"source_id" binding:"required"`
+	ModulePath string `json:"module_path" binding:"required"`
+	Title      string `json:"title" binding:"required"`
 }
 type SourceWikiAttempt struct {
 	ID                       string      `json:"id" gorm:"type:varchar(36);primaryKey"`

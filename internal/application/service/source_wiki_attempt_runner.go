@@ -67,6 +67,12 @@ func (r *sourceWikiAttemptCallRunner) Call(ctx context.Context, phase string, me
 		// old worker must not persist any late provider result.
 		return nil, heartbeatErr
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// Keep the reservation charged when the request context expires. Trying
+		// to settle on that same canceled context only obscures the caller's
+		// deadline with a database transaction-state error.
+		return nil, ctxErr
+	}
 	actualTokens := responseUsage(response)
 	outcome := "succeeded"
 	if callErr != nil {

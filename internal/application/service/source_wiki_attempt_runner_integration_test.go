@@ -89,7 +89,8 @@ func newSourceWikiRunnerPostgres(t *testing.T) (*gorm.DB, *repository.SourceWiki
 		updated_at TIMESTAMPTZ NOT NULL
 	);
 	CREATE UNIQUE INDEX source_wiki_one_running_module
-		ON source_wiki_attempts(tenant_id,knowledge_base_id,source_id,module_path) WHERE status='running';`
+		ON source_wiki_attempts(tenant_id,knowledge_base_id,source_id,module_path) WHERE status='running';
+	CREATE TABLE source_wiki_attempt_evidence_refs (attempt_id VARCHAR(36) NOT NULL);`
 	if err := db.Exec(baseSchema).Error; err != nil {
 		t.Fatalf("create source Wiki attempt baseline schema: %v", err)
 	}

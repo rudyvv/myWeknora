@@ -91,7 +91,10 @@ func (l *SourceWikiAttemptLedger) Claim(ctx context.Context, req types.SourceWik
 			}).Error; err != nil {
 				return err
 			}
-			return markSourceWikiAttemptCallsUnknown(tx, attempt.ID, req.Now)
+			if err := markSourceWikiAttemptCallsUnknown(tx, attempt.ID, req.Now); err != nil {
+				return err
+			}
+			return ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
 		}
 		if !sourceWikiAttemptTargetIsFixed(attempt) {
 			transitionErr = ErrSourceWikiAttemptTargetIncomplete
@@ -101,7 +104,10 @@ func (l *SourceWikiAttemptLedger) Claim(ctx context.Context, req types.SourceWik
 			}).Error; err != nil {
 				return err
 			}
-			return markSourceWikiAttemptCallsUnknown(tx, attempt.ID, req.Now)
+			if err := markSourceWikiAttemptCallsUnknown(tx, attempt.ID, req.Now); err != nil {
+				return err
+			}
+			return ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
 		}
 		if attempt.LeaseOwner != "" && attempt.LeaseExpiresAt != nil && req.Now.Before(*attempt.LeaseExpiresAt) {
 			return ErrSourceWikiAttemptLeased
@@ -279,10 +285,13 @@ func (l *SourceWikiAttemptLedger) Finish(ctx context.Context, lease types.Source
 		return fmt.Errorf("%w: terminal state requires a consistent status and reason", ErrSourceWikiAttemptInvalidState)
 	}
 	return l.withClaim(ctx, lease, now, func(tx *gorm.DB, attempt *types.SourceWikiAttempt) error {
-		return tx.Model(attempt).Updates(map[string]any{
+		if err := tx.Model(attempt).Updates(map[string]any{
 			"status": status, "reason": reason, "lease_owner": "",
 			"lease_expires_at": nil, "updated_at": now,
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		return ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
 	})
 }
 
@@ -310,7 +319,10 @@ func (l *SourceWikiAttemptLedger) withClaim(ctx context.Context, lease types.Sou
 			}).Error; err != nil {
 				return err
 			}
-			return markSourceWikiAttemptCallsUnknown(tx, attempt.ID, now)
+			if err := markSourceWikiAttemptCallsUnknown(tx, attempt.ID, now); err != nil {
+				return err
+			}
+			return ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
 		}
 		if attempt.Epoch != lease.Epoch || attempt.LeaseOwner != lease.Owner ||
 			attempt.ModelID != lease.ModelID || attempt.ModelSettingsFingerprint != lease.ModelSettingsFingerprint ||
