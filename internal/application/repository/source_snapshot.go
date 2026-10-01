@@ -49,8 +49,13 @@ func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
 		to_regclass('source_parsed_artifacts') IS NOT NULL AND
 		to_regclass('source_embedding_artifacts') IS NOT NULL AND
 		to_regclass('source_code_relations') IS NOT NULL AND
+		to_regclass('source_chunk_search_terms') IS NOT NULL AND
+		to_regprocedure('source_chunk_search_projection_v1(character varying)') IS NOT NULL AND
+		obj_description(to_regprocedure('source_chunk_search_projection_v1(character varying)'), 'pg_proc')=? AND
+		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_full_gin') AND
+		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_terms_gin') AND
 		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_file_versions' AND column_name='facts') AND
-		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged')`).Scan(&ready).Error
+		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged')`, source.SourceSearchTermsVersion).Scan(&ready).Error
 	if err != nil {
 		return err
 	}
@@ -93,6 +98,14 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 		if err := tx.Create(version).Error; err != nil {
 			return err
 		}
+		result := tx.Model(&types.SourceSnapshotMember{}).Where("snapshot_id=? AND path=? AND status='included'", version.SnapshotID, file.Path).
+			Updates(map[string]any{"source_file_id": file.ID, "file_version_id": version.ID, "status": "parsed", "encoding": version.Encoding})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("source file is absent from the complete manifest")
+		}
 		if len(chunks) > 0 {
 			if err := tx.Select("*").CreateInBatches(chunks, 100).Error; err != nil {
 				return err
@@ -104,14 +117,31 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 			if err := tx.CreateInBatches(refs, 100).Error; err != nil {
 				return err
 			}
-		}
-		result := tx.Model(&types.SourceSnapshotMember{}).Where("snapshot_id=? AND path=? AND status='included'", version.SnapshotID, file.Path).
-			Updates(map[string]any{"source_file_id": file.ID, "file_version_id": version.ID, "status": "parsed", "encoding": version.Encoding})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return fmt.Errorf("source file is absent from the complete manifest")
+			for _, chunk := range chunks {
+				var metadata struct {
+					Source types.SourceEvidence `json:"source"`
+				}
+				if err := json.Unmarshal(chunk.Metadata, &metadata); err != nil {
+					return fmt.Errorf("source chunk evidence is invalid: %w", err)
+				}
+				evidence := metadata.Source
+				if evidence.Path != file.Path || evidence.FileVersionID != version.ID || evidence.SnapshotID != version.SnapshotID {
+					return fmt.Errorf("source chunk evidence does not match staged file version")
+				}
+				projection := tx.Exec(`INSERT INTO source_chunk_search_terms
+					(chunk_id,path,full_identifiers,normalized_terms,search_version)
+					SELECT ?, projection.path, projection.full_identifiers, projection.normalized_terms, projection.search_version
+					FROM source_chunk_search_projection_v1(?) projection
+					ON CONFLICT (chunk_id) DO UPDATE SET
+					path=EXCLUDED.path, full_identifiers=EXCLUDED.full_identifiers,
+					normalized_terms=EXCLUDED.normalized_terms, search_version=EXCLUDED.search_version`, chunk.ID, chunk.ID)
+				if projection.Error != nil {
+					return projection.Error
+				}
+				if projection.RowsAffected != 1 {
+					return fmt.Errorf("source search projection is unavailable for chunk %s", chunk.ID)
+				}
+			}
 		}
 		return nil
 	})
@@ -254,21 +284,22 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		if previous.SnapshotID != snapshot.PreviousSnapshotID {
 			return fmt.Errorf("source publication changed during preparation")
 		}
-		var counts struct{ Members, Files, Chunks, Embeddings, Relations int64 }
+		var counts struct{ Members, Files, Chunks, Embeddings, Relations, SearchTerms int64 }
 		if err := tx.Raw(`SELECT
 			(SELECT count(*) FROM source_snapshot_members WHERE snapshot_id=?) AS members,
 			(SELECT count(*) FROM source_snapshot_members WHERE snapshot_id=? AND status='parsed') AS files,
 			(SELECT count(*) FROM source_chunk_references WHERE snapshot_id=?) AS chunks,
 			(SELECT count(*) FROM embeddings e JOIN source_chunk_references c ON c.chunk_id=e.chunk_id WHERE c.snapshot_id=? AND e.dimension=?) AS embeddings,
+			(SELECT count(*) FROM source_chunk_references sc JOIN source_chunk_search_terms st ON st.chunk_id=sc.chunk_id AND st.search_version=? WHERE sc.snapshot_id=?) AS search_terms,
 			(SELECT count(*) FROM source_code_relations WHERE tenant_id=? AND data_source_id=? AND snapshot_id=?) AS relations`,
-			snapshot.ID, snapshot.ID, snapshot.ID, snapshot.ID, dimension, snapshot.TenantID, snapshot.DataSourceID, snapshot.ID).Scan(&counts).Error; err != nil {
+			snapshot.ID, snapshot.ID, snapshot.ID, snapshot.ID, dimension, source.SourceSearchTermsVersion, snapshot.ID, snapshot.TenantID, snapshot.DataSourceID, snapshot.ID).Scan(&counts).Error; err != nil {
 			return err
 		}
 		var relationStaged bool
 		if err := tx.Model(&types.SourceSnapshot{}).Select("relations_staged").Where("id=?", snapshot.ID).Scan(&relationStaged).Error; err != nil {
 			return err
 		}
-		if !relationStaged || counts.Relations != int64(snapshot.RelationCount) || counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks {
+		if !relationStaged || counts.Relations != int64(snapshot.RelationCount) || counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks || counts.SearchTerms != counts.Chunks {
 			return fmt.Errorf("source membership or dual index preparation is incomplete")
 		}
 		// BM25 readiness is checked on the actual transaction's index database.

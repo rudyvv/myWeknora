@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/common"
@@ -12,6 +13,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -211,16 +213,16 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 		return nil, err
 	}
 	logger.GetLogger(ctx).Infof("[Postgres] Keywords retrieval: query=%s, topK=%d", params.Query, params.TopK)
-	conds := make([]clause.Expression, 0)
+	filters := make([]clause.Expression, 0)
 	if g.sourceVisibility {
-		conds = append(conds, clause.Expr{SQL: source.PublishedChunkSQL(ctx, "embeddings.chunk_id", "embeddings.knowledge_id")})
+		filters = append(filters, clause.Expr{SQL: source.PublishedChunkSQL(ctx, "embeddings.chunk_id", "embeddings.knowledge_id")})
 	}
 	if len(params.SourceIDs) > 0 {
 		if !g.sourceVisibility {
 			return nil, errors.New("repository source scope requires the built-in source index")
 		}
 		marks := strings.TrimSuffix(strings.Repeat("?,", len(params.SourceIDs)), ",")
-		conds = append(conds, clause.Expr{SQL: sourceRepositoryFilterSQL(marks), Vars: common.ToInterfaceSlice(params.SourceIDs)})
+		filters = append(filters, clause.Expr{SQL: sourceRepositoryFilterSQL(marks), Vars: common.ToInterfaceSlice(params.SourceIDs)})
 	}
 
 	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
@@ -229,14 +231,14 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	// - If both: search specific documents within the knowledge bases (AND)
 	if len(params.KnowledgeBaseIDs) > 0 {
 		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by knowledge base IDs: %v", params.KnowledgeBaseIDs)
-		conds = append(conds, clause.IN{
+		filters = append(filters, clause.IN{
 			Column: "knowledge_base_id",
 			Values: common.ToInterfaceSlice(params.KnowledgeBaseIDs),
 		})
 	}
 	if len(params.KnowledgeIDs) > 0 {
 		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by knowledge IDs: %v", params.KnowledgeIDs)
-		conds = append(conds, clause.IN{
+		filters = append(filters, clause.IN{
 			Column: "knowledge_id",
 			Values: common.ToInterfaceSlice(params.KnowledgeIDs),
 		})
@@ -247,29 +249,25 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 		values := common.ToInterfaceSlice(params.TagIDs)
 		if g.sourceVisibility {
 			marks := strings.TrimSuffix(strings.Repeat("?,", len(values)), ",")
-			conds = append(conds, clause.Expr{SQL: sourceTagFilterSQL(marks), Vars: append(append([]interface{}{}, values...), values...)})
+			filters = append(filters, clause.Expr{SQL: sourceTagFilterSQL(marks), Vars: append(append([]interface{}{}, values...), values...)})
 		} else {
-			conds = append(conds, clause.IN{Column: "tag_id", Values: values})
+			filters = append(filters, clause.IN{Column: "tag_id", Values: values})
 		}
 	}
+	filters = append(filters, clause.Expr{SQL: "(is_enabled IS NULL OR is_enabled = ?)", Vars: []interface{}{true}})
 
 	// Use ParadeDB's ||| operator for matching any token
-	conds = append(conds, clause.Expr{
+	bm25Conds := append([]clause.Expression(nil), filters...)
+	bm25Conds = append(bm25Conds, clause.Expr{
 		SQL:  "content ||| ?",
 		Vars: []interface{}{params.Query},
 	})
-
-	// Filter by is_enabled = true or NULL (NULL means enabled for historical data)
-	conds = append(conds, clause.Expr{
-		SQL:  "(is_enabled IS NULL OR is_enabled = ?)",
-		Vars: []interface{}{true},
-	})
-	conds = append(conds, clause.OrderBy{Columns: []clause.OrderByColumn{
+	bm25Conds = append(bm25Conds, clause.OrderBy{Columns: []clause.OrderByColumn{
 		{Column: clause.Column{Name: "score"}, Desc: true},
 	}})
 
-	var embeddingDBList []pgVectorWithScore
-	err := g.db.WithContext(ctx).Clauses(conds...).Debug().
+	var bm25Rows []pgVectorWithScore
+	err := g.db.WithContext(ctx).Clauses(bm25Conds...).Debug().
 		Select([]string{
 			"paradedb.score(id) as score",
 			"id",
@@ -282,7 +280,7 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 			"tag_id",
 		}).
 		Limit(int(params.TopK)).
-		Find(&embeddingDBList).Error
+		Find(&bm25Rows).Error
 
 	if err == gorm.ErrRecordNotFound {
 		logger.GetLogger(ctx).Warnf("[Postgres] No records found for keywords query: %s", params.Query)
@@ -293,22 +291,116 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 		return nil, err
 	}
 
-	logger.GetLogger(ctx).Infof("[Postgres] Keywords retrieval found %d results", len(embeddingDBList))
-	results := make([]*types.IndexWithScore, len(embeddingDBList))
-	const maxKeywordResultLog = 8
-	for i := range embeddingDBList {
-		results[i] = fromDBVectorEmbeddingWithScore(&embeddingDBList[i], types.MatchTypeKeywords)
-		if i < maxKeywordResultLog {
-			logger.GetLogger(ctx).Debugf("[Postgres] Keywords result %d: chunk=%s, score=%f",
-				i, results[i].ChunkID, results[i].Score)
+	codeQuery := source.SourceCodeQuery{}
+	var exactRows, normalizedRows []pgVectorWithScore
+	if g.sourceVisibility {
+		codeQuery = source.ParseSourceCodeQuery(params.Query)
+		if codeQuery.Enabled {
+			exactRows, err = g.retrieveSourceCodeCandidates(ctx, filters, "full_identifiers", pq.Array(codeQuery.ExactIdentifiers), params.Query, params.TopK)
+			if err != nil {
+				return nil, err
+			}
+			normalizedRows, err = g.retrieveSourceCodeCandidates(ctx, filters, "normalized_terms", pq.Array(codeQuery.NormalizedTerms), params.Query, params.TopK)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	if len(results) > maxKeywordResultLog {
-		logger.GetLogger(ctx).Debugf(
-			"[Postgres] Keywords result summary: total=%d logged=%d truncated=%d",
-			len(results), maxKeywordResultLog, len(results)-maxKeywordResultLog,
-		)
+
+	if len(exactRows)+len(normalizedRows) == 0 {
+		results := make([]*types.IndexWithScore, len(bm25Rows))
+		for i := range bm25Rows {
+			results[i] = fromDBVectorEmbeddingWithScore(&bm25Rows[i], types.MatchTypeKeywords)
+		}
+		return keywordRetrieveResult(results), nil
 	}
+
+	type rankedCandidate struct {
+		row  pgVectorWithScore
+		tier int
+	}
+	candidates := make(map[string]rankedCandidate, len(exactRows)+len(normalizedRows)+len(bm25Rows))
+	bm25Scores := make(map[string]float64, len(bm25Rows))
+	for _, row := range bm25Rows {
+		bm25Scores[row.ChunkID] = row.Score
+		candidates[row.ChunkID] = rankedCandidate{row: row, tier: 2}
+	}
+	addCodeRows := func(rows []pgVectorWithScore, tier int) {
+		for _, row := range rows {
+			if score, ok := bm25Scores[row.ChunkID]; ok {
+				row.Score = score
+			}
+			if current, ok := candidates[row.ChunkID]; ok && current.tier <= tier {
+				continue
+			}
+			candidates[row.ChunkID] = rankedCandidate{row: row, tier: tier}
+		}
+	}
+	addCodeRows(normalizedRows, 1)
+	addCodeRows(exactRows, 0)
+	ranked := make([]rankedCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		ranked = append(ranked, candidate)
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].tier != ranked[j].tier {
+			return ranked[i].tier < ranked[j].tier
+		}
+		if ranked[i].row.Score != ranked[j].row.Score {
+			return ranked[i].row.Score > ranked[j].row.Score
+		}
+		return ranked[i].row.ChunkID < ranked[j].row.ChunkID
+	})
+	if params.TopK >= 0 && len(ranked) > params.TopK {
+		ranked = ranked[:params.TopK]
+	}
+	results := make([]*types.IndexWithScore, len(ranked))
+	for i := range ranked {
+		results[i] = fromDBVectorEmbeddingWithScore(&ranked[i].row, types.MatchTypeKeywords)
+		results[i].KeywordTier = ranked[i].tier
+		results[i].HasKeywordTier = true
+	}
+	return keywordRetrieveResult(results), nil
+}
+
+func (g *pgRepository) retrieveSourceCodeCandidates(ctx context.Context, filters []clause.Expression, column string, values interface{}, query string, topK int) ([]pgVectorWithScore, error) {
+	if column != "full_identifiers" && column != "normalized_terms" {
+		return nil, errors.New("invalid source code search field")
+	}
+	operator := "&&"
+	if column == "normalized_terms" {
+		operator = "@>"
+	}
+	var rows []pgVectorWithScore
+	matched := g.db.WithContext(ctx).Table("embeddings").
+		Select("paradedb.score(embeddings.id) AS score, embeddings.id, embeddings.content, embeddings.source_id, embeddings.source_type, embeddings.chunk_id, embeddings.knowledge_id, embeddings.knowledge_base_id, embeddings.tag_id").
+		Joins("JOIN source_chunk_search_terms ON source_chunk_search_terms.chunk_id=embeddings.chunk_id").
+		Clauses(filters...).
+		Where("source_chunk_search_terms."+column+" "+operator+" ?", values).
+		Where("embeddings.content ||| ?", query).
+		Order("score DESC, embeddings.chunk_id ASC").Limit(topK).Find(&rows)
+	if matched.Error != nil {
+		return nil, matched.Error
+	}
+	remaining := topK - len(rows)
+	if remaining <= 0 {
+		return rows, nil
+	}
+	var nonBM25 []pgVectorWithScore
+	fallback := g.db.WithContext(ctx).Table("embeddings").
+		Select("embeddings.id, embeddings.content, embeddings.source_id, embeddings.source_type, embeddings.chunk_id, embeddings.knowledge_id, embeddings.knowledge_base_id, embeddings.tag_id").
+		Joins("JOIN source_chunk_search_terms ON source_chunk_search_terms.chunk_id=embeddings.chunk_id").
+		Clauses(filters...).
+		Where("source_chunk_search_terms."+column+" "+operator+" ?", values).
+		Where("NOT (embeddings.content ||| ?)", query).
+		Order("embeddings.chunk_id ASC").Limit(remaining).Find(&nonBM25)
+	if fallback.Error != nil {
+		return nil, fallback.Error
+	}
+	return append(rows, nonBM25...), nil
+}
+
+func keywordRetrieveResult(results []*types.IndexWithScore) []*types.RetrieveResult {
 	return []*types.RetrieveResult{
 		{
 			Results:             results,
@@ -316,7 +408,7 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 			RetrieverType:       types.KeywordsRetrieverType,
 			Error:               nil,
 		},
-	}, nil
+	}
 }
 
 // VectorRetrieve performs vector similarity search using pgvector

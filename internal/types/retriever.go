@@ -96,6 +96,10 @@ type IndexWithScore struct {
 	Score float64
 	// Match type
 	MatchType MatchType
+	// KeywordTier is an internal source-code keyword ordering tier. It is
+	// meaningful only when HasKeywordTier is true and never changes Score.
+	KeywordTier    int  `json:"-"`
+	HasKeywordTier bool `json:"-"`
 	// IsEnabled
 	IsEnabled bool
 }
