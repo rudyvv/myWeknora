@@ -148,3 +148,7 @@ T18/T17已协调exact(attempt_id,file_version_id,snapshot_id)耐久原文owner�
 根发现Docker engine不可用及57521不通，执行docker desktop start后turn中断、旧exec session已不存在；复核engine29.7.2实际恢复，仅专用weknora-source-batch-two-test停于Exited(0)。根只启动该专用容器，pg_isready accepting connections且57521 TCP True；共享应用未重启，未读取旧凭据。三个worker已直接收到环境恢复通知。所有根该轮命令结果已收取，无遗留根测试进程。
 
 原heartbeat `weknora`实际PAUSED，根依据用户明确继续本对话与关联对话及原自动协调授权，通过automation_update更新同ID为ACTIVE，保留原prompt/10分钟频率/目标thread；工具和toml均确认ACTIVE，未新建重复automation。继续只在新结果/问题/异常动作，同SHA不重复review，未变状态安静；全部22验收后停用。root仍负责新完整干净SHA双轴/独立复验/集成，通过后才派下一票。
+
+2026-10-01 T13新干净0135cbd976cccec9396746bbba220cf239677161主动READY转发被应用拒绝，根已从完成记录收取，无需用户人工转告或重复绕过发送。批准basefa0dcad7两独立Sol/high正式复审Standards硬0/判断2P3，Spec0；根四PG49.504s及原cap反例PASS9.17s。合并仅fixture110/111加载冲突，保留按序两项，合并后Hook/预算/terms三PG PASS36.423s、Go三个实际包通过。集成ee05f5a9通过，详见t13-0135cbd9-review.md，允许发布/关#21，累计14/22；发布后原T10对话接续T17/#25，base为本轮验收发布HEAD、migration113（112属T18），先给根持久预算/owner/CAS提案再实现。
+
+T11原60代码审查已过，但实际Flow A发现多wildcard时implements原始声明丢失/接口签名unresolved；根已要求继续明确实现到Mapper后端audit，声明即使无法限定也保留fact+uncertainty原因，不把snapshot唯一当完整classpath确定性。必要最小producer修复先提案，不自行改冻结60或把missing伪绿。T18继续实际并发pruning/历史pin/共享owner/回滚PG，尚无新READY。最新游标T18 `82e187da-afe3-4f59-9c78-3b4417471064:8`、T11 `ede37483-473c-44e0-92a2-6b249170c218:8`、T13 `12e65bc3-bae2-46ea-aadc-5cd9312d2227:6`（其后root已收完成并开始review，无需重复审该SHA）。
