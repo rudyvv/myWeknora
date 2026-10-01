@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"slices"
+	"sort"
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -31,6 +32,10 @@ func classifyRetrievalResults(ctx context.Context, retrieveResults []*types.Retr
 // fuseOrDeduplicate either fuses vector+keyword results via RRF or deduplicates vector-only results.
 // retrievalCfg may be nil — defaults are then used for RRF parameters.
 func fuseOrDeduplicate(ctx context.Context, vectorResults, keywordResults []*types.IndexWithScore, retrievalCfg *types.RetrievalConfig) []*types.IndexWithScore {
+	codeKeywordOrder := hasSourceCodeKeywordTier(keywordResults)
+	if codeKeywordOrder {
+		keywordResults = orderSourceCodeKeywordResults(keywordResults)
+	}
 	if len(keywordResults) == 0 {
 		// Vector-only: keep original embedding scores (important for FAQ)
 		result := deduplicateByScore(vectorResults)
@@ -40,6 +45,9 @@ func fuseOrDeduplicate(ctx context.Context, vectorResults, keywordResults []*typ
 	if len(vectorResults) == 0 {
 		// Keyword-only: keep original scores (important for FAQ)
 		result := deduplicateByScore(keywordResults)
+		if codeKeywordOrder {
+			result = deduplicateByKeywordTier(keywordResults)
+		}
 		logger.Infof(ctx, "Result count after deduplication: %d", len(result))
 		return result
 	}
@@ -47,6 +55,72 @@ func fuseOrDeduplicate(ctx context.Context, vectorResults, keywordResults []*typ
 	result := fuseWithRRF(ctx, vectorResults, keywordResults, retrievalCfg)
 	logger.Infof(ctx, "Result count after RRF fusion: %d", len(result))
 	return result
+}
+
+func hasSourceCodeKeywordTier(results []*types.IndexWithScore) bool {
+	for _, result := range results {
+		if result != nil && result.HasKeywordTier {
+			return true
+		}
+	}
+	return false
+}
+
+// orderSourceCodeKeywordResults makes the source-only lexical tiers explicit
+// across store fan-out. Untagged ordinary-document BM25 hits stay in the
+// existing keyword lane after source code candidates; their scores are never
+// modified to imitate a BM25 boost.
+func orderSourceCodeKeywordResults(results []*types.IndexWithScore) []*types.IndexWithScore {
+	ordered := make([]*types.IndexWithScore, 0, len(results))
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		copy := *result
+		if !copy.HasKeywordTier {
+			copy.KeywordTier = 2
+			copy.HasKeywordTier = true
+		}
+		ordered = append(ordered, &copy)
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].KeywordTier != ordered[j].KeywordTier {
+			return ordered[i].KeywordTier < ordered[j].KeywordTier
+		}
+		if ordered[i].Score != ordered[j].Score {
+			return ordered[i].Score > ordered[j].Score
+		}
+		return ordered[i].ChunkID < ordered[j].ChunkID
+	})
+	return ordered
+}
+
+func deduplicateByKeywordTier(results []*types.IndexWithScore) []*types.IndexWithScore {
+	bestByChunk := make(map[string]*types.IndexWithScore, len(results))
+	for _, result := range results {
+		if result == nil {
+			continue
+		}
+		current, ok := bestByChunk[result.ChunkID]
+		if !ok || result.KeywordTier < current.KeywordTier ||
+			(result.KeywordTier == current.KeywordTier && result.Score > current.Score) {
+			bestByChunk[result.ChunkID] = result
+		}
+	}
+	deduped := make([]*types.IndexWithScore, 0, len(bestByChunk))
+	for _, result := range bestByChunk {
+		deduped = append(deduped, result)
+	}
+	sort.SliceStable(deduped, func(i, j int) bool {
+		if deduped[i].KeywordTier != deduped[j].KeywordTier {
+			return deduped[i].KeywordTier < deduped[j].KeywordTier
+		}
+		if deduped[i].Score != deduped[j].Score {
+			return deduped[i].Score > deduped[j].Score
+		}
+		return deduped[i].ChunkID < deduped[j].ChunkID
+	})
+	return deduped
 }
 
 // sortByScoreDesc is a reusable sort comparator for IndexWithScore slices (descending by Score).

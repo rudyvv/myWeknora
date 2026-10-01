@@ -14,6 +14,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -49,6 +50,9 @@ func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
 		to_regclass('source_parsed_artifacts') IS NOT NULL AND
 		to_regclass('source_embedding_artifacts') IS NOT NULL AND
 		to_regclass('source_code_relations') IS NOT NULL AND
+		to_regclass('source_chunk_search_terms') IS NOT NULL AND
+		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_full_gin') AND
+		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_terms_gin') AND
 		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_file_versions' AND column_name='facts') AND
 		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged')`).Scan(&ready).Error
 	if err != nil {
@@ -103,6 +107,43 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 			}
 			if err := tx.CreateInBatches(refs, 100).Error; err != nil {
 				return err
+			}
+			var facts []types.ParsedSourceFact
+			if len(version.Facts) > 0 {
+				if err := json.Unmarshal(version.Facts, &facts); err != nil {
+					return fmt.Errorf("source parser facts are invalid: %w", err)
+				}
+			}
+			var symbols []types.SourceSymbol
+			if len(version.Symbols) > 0 {
+				if err := json.Unmarshal(version.Symbols, &symbols); err != nil {
+					return fmt.Errorf("source parser symbols are invalid: %w", err)
+				}
+			}
+			for _, chunk := range chunks {
+				var metadata struct {
+					Source types.SourceEvidence `json:"source"`
+				}
+				if err := json.Unmarshal(chunk.Metadata, &metadata); err != nil {
+					return fmt.Errorf("source chunk evidence is invalid: %w", err)
+				}
+				evidence := metadata.Source
+				if evidence.Path != file.Path || evidence.FileVersionID != version.ID || evidence.SnapshotID != version.SnapshotID {
+					return fmt.Errorf("source chunk evidence does not match staged file version")
+				}
+				projection := source.BuildSourceChunkSearchTerms(file.Path, types.ParsedSourceChunk{
+					Content: chunk.Content,
+					Range:   evidence.Range,
+					Symbols: evidence.Symbols,
+				}, symbols, facts)
+				if err := tx.Exec(`INSERT INTO source_chunk_search_terms
+					(chunk_id,path,full_identifiers,normalized_terms,search_version)
+					VALUES (?,?,?,?,?) ON CONFLICT (chunk_id) DO UPDATE SET
+					path=EXCLUDED.path, full_identifiers=EXCLUDED.full_identifiers,
+					normalized_terms=EXCLUDED.normalized_terms, search_version=EXCLUDED.search_version`,
+					chunk.ID, projection.Path, pq.Array(projection.FullIdentifiers), pq.Array(projection.NormalizedTerms), projection.Version).Error; err != nil {
+					return err
+				}
 			}
 		}
 		result := tx.Model(&types.SourceSnapshotMember{}).Where("snapshot_id=? AND path=? AND status='included'", version.SnapshotID, file.Path).
@@ -254,21 +295,22 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		if previous.SnapshotID != snapshot.PreviousSnapshotID {
 			return fmt.Errorf("source publication changed during preparation")
 		}
-		var counts struct{ Members, Files, Chunks, Embeddings, Relations int64 }
+		var counts struct{ Members, Files, Chunks, Embeddings, Relations, SearchTerms int64 }
 		if err := tx.Raw(`SELECT
 			(SELECT count(*) FROM source_snapshot_members WHERE snapshot_id=?) AS members,
 			(SELECT count(*) FROM source_snapshot_members WHERE snapshot_id=? AND status='parsed') AS files,
 			(SELECT count(*) FROM source_chunk_references WHERE snapshot_id=?) AS chunks,
 			(SELECT count(*) FROM embeddings e JOIN source_chunk_references c ON c.chunk_id=e.chunk_id WHERE c.snapshot_id=? AND e.dimension=?) AS embeddings,
+			(SELECT count(*) FROM source_chunk_references sc JOIN source_chunk_search_terms st ON st.chunk_id=sc.chunk_id AND st.search_version=? WHERE sc.snapshot_id=?) AS search_terms,
 			(SELECT count(*) FROM source_code_relations WHERE tenant_id=? AND data_source_id=? AND snapshot_id=?) AS relations`,
-			snapshot.ID, snapshot.ID, snapshot.ID, snapshot.ID, dimension, snapshot.TenantID, snapshot.DataSourceID, snapshot.ID).Scan(&counts).Error; err != nil {
+			snapshot.ID, snapshot.ID, snapshot.ID, snapshot.ID, dimension, source.SourceSearchTermsVersion, snapshot.ID, snapshot.TenantID, snapshot.DataSourceID, snapshot.ID).Scan(&counts).Error; err != nil {
 			return err
 		}
 		var relationStaged bool
 		if err := tx.Model(&types.SourceSnapshot{}).Select("relations_staged").Where("id=?", snapshot.ID).Scan(&relationStaged).Error; err != nil {
 			return err
 		}
-		if !relationStaged || counts.Relations != int64(snapshot.RelationCount) || counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks {
+		if !relationStaged || counts.Relations != int64(snapshot.RelationCount) || counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks || counts.SearchTerms != counts.Chunks {
 			return fmt.Errorf("source membership or dual index preparation is incomplete")
 		}
 		// BM25 readiness is checked on the actual transaction's index database.
