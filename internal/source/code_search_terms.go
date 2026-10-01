@@ -4,8 +4,6 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/Tencent/WeKnora/internal/types"
 )
 
 // SourceSearchTermsVersion versions the persisted source-only lexical fields.
@@ -14,8 +12,6 @@ const SourceSearchTermsVersion = "source-code-search-terms-v1"
 const (
 	MaxSourceCodeQueryIdentifiers = 8
 	MaxSourceCodeQueryTerms       = 32
-	maxSourceChunkIdentifiers     = 256
-	maxSourceSearchTerms          = 256
 	maxTermsPerIdentifier         = 64
 	maxSourceIdentifierBytes      = 512
 )
@@ -26,15 +22,6 @@ type SourceCodeQuery struct {
 	Enabled          bool
 	ExactIdentifiers []string
 	NormalizedTerms  []string
-}
-
-// SourceChunkSearchTerms is the typed source-only lexical projection. It is
-// separate from both original chunk bytes and the token-budgeted embedding text.
-type SourceChunkSearchTerms struct {
-	Path            string
-	FullIdentifiers []string
-	NormalizedTerms []string
-	Version         string
 }
 
 var (
@@ -82,105 +69,6 @@ func ParseSourceCodeQuery(query string) SourceCodeQuery {
 		return SourceCodeQuery{}
 	}
 	return SourceCodeQuery{Enabled: true, ExactIdentifiers: identifiers, NormalizedTerms: terms}
-}
-
-// BuildSourceChunkSearchTerms derives the lexical projection from the original
-// path/body and parser-authored symbols/facts. Facts outside the chunk's source
-// byte range are intentionally excluded.
-func BuildSourceChunkSearchTerms(path string, chunk types.ParsedSourceChunk, symbols []types.SourceSymbol, facts []types.ParsedSourceFact) SourceChunkSearchTerms {
-	identifiers := make([]string, 0, maxSourceChunkIdentifiers)
-	seenIdentifiers := make(map[string]struct{}, maxSourceChunkIdentifiers)
-	identifiers = appendIdentifier(identifiers, seenIdentifiers, path)
-	for _, fact := range facts {
-		if len(identifiers) >= maxSourceChunkIdentifiers {
-			break
-		}
-		if !rangesOverlap(chunk.Range, fact.Range) {
-			continue
-		}
-		switch fact.Kind {
-		case "mybatis_mapper":
-			identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Namespace)
-		case "mybatis_statement":
-			statementID := fact.StatementID
-			if statementID == "" {
-				statementID = fact.Name
-			}
-			identifiers = appendIdentifier(identifiers, seenIdentifiers, statementID)
-			if fact.Namespace != "" && statementID != "" {
-				identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Namespace+"#"+statementID)
-			}
-		case "mybatis_result_map", "mybatis_sql_fragment":
-			identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Name)
-			if fact.Namespace != "" && fact.Name != "" {
-				identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Namespace+"#"+fact.Name)
-			}
-		case "java_mapper_method":
-			identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Name)
-			if fact.Namespace != "" {
-				identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Namespace)
-			}
-			if fact.Namespace != "" && fact.Name != "" {
-				identifiers = appendIdentifier(identifiers, seenIdentifiers, fact.Namespace+"#"+fact.Name)
-			}
-		}
-	}
-	for _, symbol := range symbols {
-		if len(identifiers) >= maxSourceChunkIdentifiers {
-			break
-		}
-		if !rangesOverlap(chunk.Range, symbol.Range) {
-			continue
-		}
-		identifiers = appendIdentifier(identifiers, seenIdentifiers, symbol.QualifiedName)
-		identifiers = appendIdentifier(identifiers, seenIdentifiers, symbol.Name)
-	}
-	for _, symbol := range chunk.Symbols {
-		if len(identifiers) >= maxSourceChunkIdentifiers {
-			break
-		}
-		identifiers = appendIdentifier(identifiers, seenIdentifiers, symbol)
-	}
-	// Content is the parser-validated original chunk body, never the truncated
-	// SourceIndexHeader. It contributes terms but is not copied into identifiers.
-	terms := make([]string, 0, 64)
-	seenTerms := make(map[string]struct{}, 64)
-	for _, value := range identifiers {
-		terms = appendNormalizedTerms(terms, seenTerms, value, maxSourceSearchTerms)
-	}
-	for _, token := range identifierPart.FindAllString(chunk.Content, maxSourceSearchTerms) {
-		terms = appendNormalizedTerms(terms, seenTerms, token, maxSourceSearchTerms)
-		if len(terms) == maxSourceSearchTerms {
-			break
-		}
-	}
-	return SourceChunkSearchTerms{Path: path, FullIdentifiers: identifiers, NormalizedTerms: terms, Version: SourceSearchTermsVersion}
-}
-
-func appendIdentifier(values []string, seen map[string]struct{}, value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > maxSourceIdentifierBytes || len(values) >= maxSourceChunkIdentifiers {
-		return values
-	}
-	if _, ok := seen[value]; ok {
-		return values
-	}
-	seen[value] = struct{}{}
-	return append(values, value)
-}
-
-func appendNormalizedTerms(values []string, seen map[string]struct{}, value string, limit int) []string {
-	for _, term := range normalizedIdentifierTerms(value) {
-		if _, ok := seen[term]; ok {
-			continue
-		}
-		if len(values) >= limit {
-			return values
-		}
-		seen[term] = struct{}{}
-		values = append(values, term)
-	}
-	return values
 }
 
 func normalizedIdentifierTerms(value string) []string {
@@ -256,10 +144,6 @@ func containsRange(ranges [][2]int, target []int) bool {
 		}
 	}
 	return false
-}
-
-func rangesOverlap(chunk, fact types.SourceRange) bool {
-	return chunk.StartByte < fact.EndByte && fact.StartByte < chunk.EndByte
 }
 
 func truncateUTF8(value string, maxBytes int) string {

@@ -130,8 +130,9 @@ func TestSourceCodeExactPathTierBeatsRepeatedBM25AndIsConsumedByKeywordOnlySearc
 }
 
 func TestSourceSearchTermsBackfillPreservesSnakeAndIdentifierNormalization(t *testing.T) {
+	const snakePath = "src/编码/Snake.java"
 	f := newJavaSourceFixture(t, map[string][]byte{
-		"src/Snake.java": []byte(`class Snake { String sample() { return "find_by_id getHTTPResponse $value"; } }` + "\n"),
+		snakePath: []byte(`class Snake { String sample() { return "find_by_id getHTTPResponse $value find_by_id getHTTPResponse $value"; } }` + "\n"),
 	})
 	syncSourceFixture(t, f)
 
@@ -143,12 +144,42 @@ func TestSourceSearchTermsBackfillPreservesSnakeAndIdentifierNormalization(t *te
 		{name: "camel and acronym terms", predicate: `normalized_terms @> ARRAY['gethttpresponse','get','http','response']::text[]`},
 		{name: "dollar edge normalization", predicate: `normalized_terms @> ARRAY['value']::text[]`},
 	}
+	type projection struct {
+		FullIdentifiers string `gorm:"column:full_identifiers"`
+		NormalizedTerms string `gorm:"column:normalized_terms"`
+	}
+	readProjection := func() map[string]projection {
+		var rows []struct {
+			ChunkID string `gorm:"column:chunk_id"`
+			projection
+		}
+		require.NoError(t, f.db.Table("source_chunk_search_terms").
+			Select("chunk_id, array_to_json(full_identifiers)::text AS full_identifiers, array_to_json(normalized_terms)::text AS normalized_terms").
+			Where("path=?", snakePath).Scan(&rows).Error)
+		result := make(map[string]projection, len(rows))
+		for _, row := range rows {
+			result[row.ChunkID] = row.projection
+		}
+		return result
+	}
+	staged := readProjection()
+	require.NotEmpty(t, staged)
+	var duplicateTerms int64
+	require.NoError(t, f.db.Raw(`SELECT count(*) FROM (
+		SELECT terms.chunk_id
+		FROM source_chunk_search_terms terms
+		CROSS JOIN LATERAL unnest(terms.normalized_terms) AS term
+		WHERE terms.path=?
+		GROUP BY terms.chunk_id
+		HAVING count(*) <> count(DISTINCT term)
+	) duplicates`, snakePath).Scan(&duplicateTerms).Error)
+	require.Zero(t, duplicateTerms, "repeated source identifiers must produce unique normalized projection terms")
 	before := make([]int64, len(queries))
 	for i, query := range queries {
-		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND "+query.predicate, "src/Snake.java").Scan(&before[i]).Error)
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND "+query.predicate, snakePath).Scan(&before[i]).Error)
 		require.Positive(t, before[i], query.name+" must be available in the new projection")
 	}
-	require.NoError(t, f.db.Exec("DELETE FROM source_chunk_search_terms WHERE path=?", "src/Snake.java").Error)
+	require.NoError(t, f.db.Exec("DELETE FROM source_chunk_search_terms WHERE path=?", snakePath).Error)
 
 	migrationPath, err := filepath.Abs(filepath.Join("..", "..", "..", "migrations", "versioned", "000111_source_chunk_search_terms.up.sql"))
 	require.NoError(t, err)
@@ -158,27 +189,76 @@ func TestSourceSearchTermsBackfillPreservesSnakeAndIdentifierNormalization(t *te
 
 	for i, query := range queries {
 		var after int64
-		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND "+query.predicate, "src/Snake.java").Scan(&after).Error)
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND "+query.predicate, snakePath).Scan(&after).Error)
 		require.Equal(t, before[i], after, query.name+" must match after migration backfill")
 	}
+	require.Equal(t, staged, readProjection(), "the complete Unicode-path projection arrays must match after backfill")
 }
 
 func TestSourceMyBatisResultMapAndSQLFragmentIdentifiersSurviveBackfill(t *testing.T) {
 	f := newJavaSourceFixture(t, map[string][]byte{
-		"src/ParityMapper.xml": []byte(`<?xml version="1.0"?><!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd"><mapper namespace="demo.ParityMapper"><resultMap id="basic_map" type="demo.Row"><id column="id" property="id"/></resultMap><sql id="base_columns">id,name</sql><select id="find" resultMap="basic_map">select <include refid="base_columns"/> from fixture_table</select></mapper>`),
+		"src/ParityMapper.xml":  []byte(`<?xml version="1.0"?><!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd"><mapper namespace="demo.ParityMapper"><resultMap id="basic_map" type="demo.Row"><id column="id" property="id"/></resultMap><sql id="base_columns">id,name</sql><select id="find" resultMap="basic_map">select <include refid="base_columns"/> from fixture_table</select></mapper>`),
+		"src/ParityMapper.java": []byte("package demo;\npublic interface ParityMapper { Object findById(); }\n"),
 	})
 	syncSourceFixture(t, f)
 
-	identifiers := []string{"demo.ParityMapper#basic_map", "demo.ParityMapper#base_columns"}
+	paths := []string{"src/ParityMapper.xml", "src/ParityMapper.java"}
+	type projection struct {
+		FullIdentifiers string `gorm:"column:full_identifiers"`
+		NormalizedTerms string `gorm:"column:normalized_terms"`
+	}
+	readProjection := func() map[string]projection {
+		var rows []struct {
+			Path    string `gorm:"column:path"`
+			ChunkID string `gorm:"column:chunk_id"`
+			projection
+		}
+		require.NoError(t, f.db.Table("source_chunk_search_terms").
+			Select("path, chunk_id, array_to_json(full_identifiers)::text AS full_identifiers, array_to_json(normalized_terms)::text AS normalized_terms").
+			Where("path IN ?", paths).Scan(&rows).Error)
+		result := make(map[string]projection, len(rows))
+		for _, row := range rows {
+			result[row.Path+"#"+row.ChunkID] = row.projection
+		}
+		return result
+	}
+	staged := readProjection()
+	require.NotEmpty(t, staged)
+	identifiers := []string{"demo.ParityMapper", "demo.ParityMapper#find", "demo.ParityMapper#basic_map", "demo.ParityMapper#base_columns", "demo.ParityMapper#findById"}
 	for _, identifier := range identifiers {
 		var staged int64
-		err := f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND ?=ANY(full_identifiers)", "src/ParityMapper.xml", identifier).Scan(&staged).Error
+		path := "src/ParityMapper.xml"
+		if identifier == "demo.ParityMapper#findById" {
+			path = "src/ParityMapper.java"
+		}
+		err := f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND ?=ANY(full_identifiers)", path, identifier).Scan(&staged).Error
 		require.NoError(t, err)
 		if staged == 0 {
 			t.Errorf("newly staged MyBatis exact identifier is missing: %s", identifier)
 		}
 	}
-	require.NoError(t, f.db.Exec("DELETE FROM source_chunk_search_terms WHERE path=?", "src/ParityMapper.xml").Error)
+	var xmlChunks []struct {
+		Content         string `gorm:"column:content"`
+		FullIdentifiers string `gorm:"column:full_identifiers"`
+	}
+	require.NoError(t, f.db.Table("source_chunk_search_terms terms").
+		Select("chunks.content, array_to_json(terms.full_identifiers)::text AS full_identifiers").
+		Joins("JOIN chunks ON chunks.id=terms.chunk_id").
+		Where("terms.path=?", "src/ParityMapper.xml").Scan(&xmlChunks).Error)
+	for _, chunk := range xmlChunks {
+		switch {
+		case strings.Contains(chunk.Content, "<resultMap"):
+			require.Contains(t, chunk.FullIdentifiers, "demo.ParityMapper#basic_map")
+			require.NotContains(t, chunk.FullIdentifiers, "demo.ParityMapper#base_columns", "out-of-range SQL fragment fact must not leak into the resultMap chunk")
+			require.NotContains(t, chunk.FullIdentifiers, "demo.ParityMapper#find", "out-of-range statement fact must not leak into the resultMap chunk")
+		case strings.Contains(chunk.Content, "<sql "):
+			require.Contains(t, chunk.FullIdentifiers, "demo.ParityMapper#base_columns")
+			require.NotContains(t, chunk.FullIdentifiers, "demo.ParityMapper#basic_map", "out-of-range resultMap fact must not leak into the SQL fragment chunk")
+		case strings.Contains(chunk.Content, "<select "):
+			require.Contains(t, chunk.FullIdentifiers, "demo.ParityMapper#find")
+		}
+	}
+	require.NoError(t, f.db.Exec("DELETE FROM source_chunk_search_terms WHERE path IN ?", paths).Error)
 
 	migrationPath, err := filepath.Abs(filepath.Join("..", "..", "..", "migrations", "versioned", "000111_source_chunk_search_terms.up.sql"))
 	require.NoError(t, err)
@@ -187,9 +267,14 @@ func TestSourceMyBatisResultMapAndSQLFragmentIdentifiersSurviveBackfill(t *testi
 	require.NoError(t, f.db.Exec(string(migration)).Error)
 	for _, identifier := range identifiers {
 		var backfilled int64
-		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND ?=ANY(full_identifiers)", "src/ParityMapper.xml", identifier).Scan(&backfilled).Error)
+		path := "src/ParityMapper.xml"
+		if identifier == "demo.ParityMapper#findById" {
+			path = "src/ParityMapper.java"
+		}
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND ?=ANY(full_identifiers)", path, identifier).Scan(&backfilled).Error)
 		require.Positive(t, backfilled, "migration backfill must preserve MyBatis exact identifier "+identifier)
 	}
+	require.Equal(t, staged, readProjection(), "complete MyBatis and Java mapper projection arrays must match after backfill")
 }
 
 func TestSourceAndOrdinaryDocumentsMixWithoutWideningRepositoryPrompt(t *testing.T) {
@@ -768,4 +853,77 @@ func TestSourceScopesApplyBeforeTopKInRealIndexQueryPlans(t *testing.T) {
 	require.Empty(t, rows)
 	_, err = f.knowledge.GetSourceFile(ctx, selected.KnowledgeID)
 	require.Error(t, err)
+}
+
+func TestSourceSearchProjectionBackfillKeepsEarlyBodyTermAtCap(t *testing.T) {
+	files := make(map[string][]byte)
+	paths := make([]string, 0, 3)
+	for _, size := range []int{255, 256, 257} {
+		tokens := make([]string, size)
+		for i := range tokens {
+			tokens[i] = string([]byte{byte('a' + i/26), byte('a' + i%26)})
+		}
+		path := fmt.Sprintf("src/Boundary%d.java", size)
+		content := fmt.Sprintf("class Boundary%d {\n void process() {\n /* zzTarget %s */\n }\n}\n", size, strings.Join(tokens, " "))
+		files[path] = []byte(content)
+		paths = append(paths, path)
+	}
+	f := newJavaSourceFixture(t, files)
+	syncSourceFixture(t, f)
+	require.NoError(t, repository.NewSourceSnapshotRepository(f.db).CheckReady(f.ctx), "publication readiness requires the shared, versioned projection function")
+
+	type projection struct {
+		FullIdentifiers string `gorm:"column:full_identifiers"`
+		NormalizedTerms string `gorm:"column:normalized_terms"`
+	}
+	readProjection := func() map[string]projection {
+		var rows []struct {
+			Path    string `gorm:"column:path"`
+			ChunkID string `gorm:"column:chunk_id"`
+			projection
+		}
+		require.NoError(t, f.db.Table("source_chunk_search_terms").
+			Select("path, chunk_id, array_to_json(full_identifiers)::text AS full_identifiers, array_to_json(normalized_terms)::text AS normalized_terms").
+			Where("path IN ?", paths).Scan(&rows).Error)
+		result := make(map[string]projection, len(rows))
+		for _, row := range rows {
+			result[row.Path+"#"+row.ChunkID] = row.projection
+		}
+		return result
+	}
+	staged := readProjection()
+	require.Len(t, staged, 3, "each parser-produced boundary method has a staged projection")
+	for _, path := range paths {
+		var maxTerms int
+		require.NoError(t, f.db.Raw("SELECT max(cardinality(normalized_terms)) FROM source_chunk_search_terms WHERE path=?", path).Scan(&maxTerms).Error)
+		require.Equal(t, 256, maxTerms, "the fixture must exercise the actual normalized-term cap at "+path)
+		var before, exact int64
+		predicate := "SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND normalized_terms @> ARRAY['zztarget','zz','target']::text[]"
+		require.NoError(t, f.db.Raw(predicate, path).Scan(&before).Error)
+		require.Positive(t, before, "the new projection must retain the early body-only identifier at "+path)
+		require.NoError(t, f.db.Raw("SELECT count(*) FROM source_chunk_search_terms WHERE path=? AND 'zzTarget'=ANY(full_identifiers)", path).Scan(&exact).Error)
+		require.Zero(t, exact, "a body-only token must not enter the parser-authored exact identifier tier")
+	}
+	require.NoError(t, f.db.Exec("DELETE FROM source_chunk_search_terms WHERE path IN ?", paths).Error)
+
+	migrationPath, err := filepath.Abs(filepath.Join("..", "..", "..", "migrations", "versioned", "000111_source_chunk_search_terms.up.sql"))
+	require.NoError(t, err)
+	migration, err := os.ReadFile(migrationPath)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+
+	require.Equal(t, staged, readProjection(), "the complete staged projection arrays must equal migration backfill arrays")
+	downPath, err := filepath.Abs(filepath.Join("..", "..", "..", "migrations", "versioned", "000111_source_chunk_search_terms.down.sql"))
+	require.NoError(t, err)
+	downMigration, err := os.ReadFile(downPath)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(downMigration)).Error)
+	var downClean bool
+	require.NoError(t, f.db.Raw(`SELECT to_regclass('source_chunk_search_terms') IS NULL
+		AND to_regprocedure('source_chunk_search_projection_v1(character varying)') IS NULL
+		AND to_regclass('source_chunk_references') IS NOT NULL`).Scan(&downClean).Error)
+	require.True(t, downClean, "migration rollback removes only its projection table and function")
+	require.Error(t, repository.NewSourceSnapshotRepository(f.db).CheckReady(f.ctx), "source publication is not ready without its projection function")
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	require.NoError(t, repository.NewSourceSnapshotRepository(f.db).CheckReady(f.ctx), "migration reapply restores the versioned projection")
 }

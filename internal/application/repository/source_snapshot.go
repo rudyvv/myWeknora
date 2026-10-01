@@ -14,7 +14,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -51,10 +50,12 @@ func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
 		to_regclass('source_embedding_artifacts') IS NOT NULL AND
 		to_regclass('source_code_relations') IS NOT NULL AND
 		to_regclass('source_chunk_search_terms') IS NOT NULL AND
+		to_regprocedure('source_chunk_search_projection_v1(character varying)') IS NOT NULL AND
+		obj_description(to_regprocedure('source_chunk_search_projection_v1(character varying)'), 'pg_proc')=? AND
 		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_full_gin') AND
 		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_terms_gin') AND
 		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_file_versions' AND column_name='facts') AND
-		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged')`).Scan(&ready).Error
+		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged')`, source.SourceSearchTermsVersion).Scan(&ready).Error
 	if err != nil {
 		return err
 	}
@@ -97,6 +98,14 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 		if err := tx.Create(version).Error; err != nil {
 			return err
 		}
+		result := tx.Model(&types.SourceSnapshotMember{}).Where("snapshot_id=? AND path=? AND status='included'", version.SnapshotID, file.Path).
+			Updates(map[string]any{"source_file_id": file.ID, "file_version_id": version.ID, "status": "parsed", "encoding": version.Encoding})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("source file is absent from the complete manifest")
+		}
 		if len(chunks) > 0 {
 			if err := tx.Select("*").CreateInBatches(chunks, 100).Error; err != nil {
 				return err
@@ -107,18 +116,6 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 			}
 			if err := tx.CreateInBatches(refs, 100).Error; err != nil {
 				return err
-			}
-			var facts []types.ParsedSourceFact
-			if len(version.Facts) > 0 {
-				if err := json.Unmarshal(version.Facts, &facts); err != nil {
-					return fmt.Errorf("source parser facts are invalid: %w", err)
-				}
-			}
-			var symbols []types.SourceSymbol
-			if len(version.Symbols) > 0 {
-				if err := json.Unmarshal(version.Symbols, &symbols); err != nil {
-					return fmt.Errorf("source parser symbols are invalid: %w", err)
-				}
 			}
 			for _, chunk := range chunks {
 				var metadata struct {
@@ -131,28 +128,20 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 				if evidence.Path != file.Path || evidence.FileVersionID != version.ID || evidence.SnapshotID != version.SnapshotID {
 					return fmt.Errorf("source chunk evidence does not match staged file version")
 				}
-				projection := source.BuildSourceChunkSearchTerms(file.Path, types.ParsedSourceChunk{
-					Content: chunk.Content,
-					Range:   evidence.Range,
-					Symbols: evidence.Symbols,
-				}, symbols, facts)
-				if err := tx.Exec(`INSERT INTO source_chunk_search_terms
+				projection := tx.Exec(`INSERT INTO source_chunk_search_terms
 					(chunk_id,path,full_identifiers,normalized_terms,search_version)
-					VALUES (?,?,?,?,?) ON CONFLICT (chunk_id) DO UPDATE SET
+					SELECT ?, projection.path, projection.full_identifiers, projection.normalized_terms, projection.search_version
+					FROM source_chunk_search_projection_v1(?) projection
+					ON CONFLICT (chunk_id) DO UPDATE SET
 					path=EXCLUDED.path, full_identifiers=EXCLUDED.full_identifiers,
-					normalized_terms=EXCLUDED.normalized_terms, search_version=EXCLUDED.search_version`,
-					chunk.ID, projection.Path, pq.Array(projection.FullIdentifiers), pq.Array(projection.NormalizedTerms), projection.Version).Error; err != nil {
-					return err
+					normalized_terms=EXCLUDED.normalized_terms, search_version=EXCLUDED.search_version`, chunk.ID, chunk.ID)
+				if projection.Error != nil {
+					return projection.Error
+				}
+				if projection.RowsAffected != 1 {
+					return fmt.Errorf("source search projection is unavailable for chunk %s", chunk.ID)
 				}
 			}
-		}
-		result := tx.Model(&types.SourceSnapshotMember{}).Where("snapshot_id=? AND path=? AND status='included'", version.SnapshotID, file.Path).
-			Updates(map[string]any{"source_file_id": file.ID, "file_version_id": version.ID, "status": "parsed", "encoding": version.Encoding})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return fmt.Errorf("source file is absent from the complete manifest")
 		}
 		return nil
 	})

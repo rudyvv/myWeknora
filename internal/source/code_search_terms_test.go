@@ -2,54 +2,7 @@ package source
 
 import (
 	"testing"
-
-	"github.com/Tencent/WeKnora/internal/types"
 )
-
-func TestBuildSourceChunkSearchTermsUsesPathParserEvidenceAndOriginalBody(t *testing.T) {
-	chunk := types.ParsedSourceChunk{
-		Content: "return mapper.findById(id); // getPushSchedule",
-		Range:   types.SourceRange{StartByte: 100, EndByte: 150},
-		Symbols: []string{"demo.UserMapper.findById"},
-	}
-	facts := []types.ParsedSourceFact{
-		{Kind: "mybatis_statement", Namespace: "demo.UserMapper", Name: "findById", Range: types.SourceRange{StartByte: 110, EndByte: 130}},
-		{Kind: "mybatis_statement", Namespace: "demo.UserMapper", StatementID: "outsideChunk", Range: types.SourceRange{StartByte: 10, EndByte: 20}},
-	}
-	symbols := []types.SourceSymbol{
-		{Name: "findById", QualifiedName: "demo.UserMapper.findById", Range: types.SourceRange{StartByte: 105, EndByte: 140}},
-		{Name: "outside", QualifiedName: "demo.UserMapper.outside", Range: types.SourceRange{StartByte: 1, EndByte: 20}},
-	}
-
-	got := BuildSourceChunkSearchTerms("src/main/java/demo/UserMapper.xml", chunk, symbols, facts)
-
-	if got.Path != "src/main/java/demo/UserMapper.xml" {
-		t.Fatalf("Path = %q", got.Path)
-	}
-	if got.Version != SourceSearchTermsVersion {
-		t.Fatalf("Version = %q, want %q", got.Version, SourceSearchTermsVersion)
-	}
-	for _, exact := range []string{
-		"src/main/java/demo/UserMapper.xml",
-		"demo.UserMapper.findById",
-		"demo.UserMapper#findById",
-	} {
-		if !containsString(got.FullIdentifiers, exact) {
-			t.Errorf("full identifiers %q do not contain %q", got.FullIdentifiers, exact)
-		}
-	}
-	if containsString(got.FullIdentifiers, "demo.UserMapper#outsideChunk") {
-		t.Fatalf("out-of-range parser fact was indexed: %q", got.FullIdentifiers)
-	}
-	if containsString(got.FullIdentifiers, "demo.UserMapper.outside") {
-		t.Fatalf("out-of-range parser symbol was indexed: %q", got.FullIdentifiers)
-	}
-	for _, term := range []string{"user", "mapper", "findbyid", "find", "by", "id", "getpushschedule", "push", "schedule"} {
-		if !containsString(got.NormalizedTerms, term) {
-			t.Errorf("normalized terms %q do not contain %q", got.NormalizedTerms, term)
-		}
-	}
-}
 
 func TestParseSourceCodeQueryRecognizesIdentifiersAndPathsButNotChineseBusinessText(t *testing.T) {
 	tests := []struct {
