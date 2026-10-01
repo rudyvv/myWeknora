@@ -156,3 +156,9 @@ T11原60代码审查已过，但实际Flow A发现多wildcard时implements原始
 最新权威：T13最终验收发布 `f040e5e838cfc1d755d332780882758f65610369` 已成功push，#21评论5931892544并实际CLOSED，累计14/22。原T10已明确收到REVIEW_PASSED及T17/#25正式派发，固定base同f040e5e8、分支codex/t17-wiki-attempt-recovery、113预留；#22/#14依赖已实际CLOSED。先给root预算固定上限、unknownusagereservation、epoch/owner、pageCAS有界合并及真实测试提案后实现。T18沿exact attempt ID/raw owner，T17复用其接口负责恢复/调用预算，不改112或重造GC；两worker公共source_wiki.go边界已直接协调。
 
 最新快照三者active：T18 `82e187da-afe3-4f59-9c78-3b4417471064:9`，T11 `ede37483-473c-44e0-92a2-6b249170c218:9`，T17 `12e65bc3-bae2-46ea-aadc-5cd9312d2227:7`。T11根对确定implements原始语法保留的最小producer提案方向已送达，尚未批准功能delta；T18PG继续运行未出现新READY。不把测试进行中或没有failure算PASS，继续等待完整干净冻结结果。根本轮所有PG/Go/发布命令已收取，无遗留root测试进程。
+
+2026-10-01 T17 提案已由完成快照主动收取，跨thread拒绝不需重复私有转发或用户重批。根已批准默认18调用/360000累计token/3分钟绝对wall deadline/最多2修复，模型预检固定持久额度并检查每call context；3分钟包含恢复间隔，续租/恢复不延长deadline，超期保留draft/reason终止，manualretry才新有界attempt。未超期恢复同ID/phase/checkpoint，epochCAS禁止旧worker续租、计费、发布/结束。provider前原子reservation，unknown/crash/error不退款，actual超预留则耗尽，不可旧Save回写降低计数。pageCAS冲突最多2次读新正文/多源provenance重合并+QA，所有调用计同attempt，不重置repairs/counters；目标sourcegeneration/published/modelsettings变化禁止旧写入。具体合同已直接送达Luna继续实现113/types/ledger/受控model与真实PG，不再停于提案。
+
+T18现有dirty接口根只读核对RegisterSourceWikiAttemptEvidence(tx,attemptID,evidence)、ReleaseSourceWikiAttemptEvidence(tx,attemptID)，exact owner与同attempt ID衔接；T17不复制未审112或no-op，先独立实现ledger，source_wiki.go最终pin接入等根验收T18后统一保留两边意图，T17固定reviewbasef040e5e8不变。T18报告聚焦验证完成后额外aggregate既有SQLite header失败；根要求收取结果/明确限制后冻结，不装无关依赖或重复全库。T11新Flow B controller→annotatedMapper→XML certain链及Flow A implementation后端继续只读闭包，尚无完整READY。
+
+最新游标：T18 `82e187da-afe3-4f59-9c78-3b4417471064:11`；T11 `ede37483-473c-44e0-92a2-6b249170c218:11`；T17 `12e65bc3-bae2-46ea-aadc-5cd9312d2227:9`（这是提案final，后续root已批准继续，不重复当新实现READY）。累计14/22保持，本轮只合同动作不发GitHub过程。
