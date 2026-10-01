@@ -29,6 +29,52 @@ func TestSourceAnalysisFactSummariesKeepTypedEvidenceAndBoundPayload(t *testing.
 	require.Len(t, longFacts[0]["include_refs"], maxAgentSummaryListItems)
 }
 
+func TestSourceAnalysisKeepsAuthorizedBusinessFlowFactsAndUncertainty(t *testing.T) {
+	knowledge := &businessFlowSourceAnalysisKnowledge{test: t}
+	ctx, release := source.WithReadScope(context.Background(), types.SourceReadLease{
+		ID: "00000000-0000-4000-8000-000000000001", HasSources: true,
+	}, nil, func() {})
+	defer release()
+	analysis, err := readSourceAnalysis(ctx, knowledge, "vue-file", &types.SourceEvidence{
+		SnapshotID: "snapshot-one", FileVersionID: "vue-version",
+	}, "")
+	require.NoError(t, err)
+	facts := analysis["facts"].([]map[string]interface{})
+	require.Equal(t, "/api/questionnaire/detail", facts[0]["route_path"])
+	require.Equal(t, "GET", facts[0]["http_method"])
+	require.Equal(t, []interface{}{"demo.IQuestionnaireService"}, facts[1]["super_types"])
+	require.NotContains(t, facts[0], "text", "Agent source analysis carries compact facts, not raw parser source text")
+	relations := analysis["relations"].([]map[string]interface{})
+	require.Len(t, relations, 1)
+	require.Equal(t, "uncertain", relations[0]["determinacy"])
+	require.Equal(t, "client prefix/proxy target is not statically verified", relations[0]["resolution_reason"])
+}
+
+type businessFlowSourceAnalysisKnowledge struct {
+	interfaces.KnowledgeService
+	test *testing.T
+}
+
+func (k *businessFlowSourceAnalysisKnowledge) GetSourceFile(ctx context.Context, id string, versionIDs ...string) (*types.SourceFileView, error) {
+	require.True(k.test, source.HasReadScope(ctx), "business facts are read only inside the caller's authorized source scope")
+	require.Equal(k.test, "vue-file", id)
+	require.Equal(k.test, []string{"vue-version"}, versionIDs, "business facts stay pinned to the evidence version")
+	return &types.SourceFileView{
+		KnowledgeID: id, SnapshotID: "snapshot-one", FileVersionID: "vue-version", SHA256: "vue-sha",
+		Path: "src/web/QuestionnaireDetail.vue", RawContent: []byte("GET /api/questionnaire/detail"),
+		Facts: types.JSON(`[
+			{"kind":"api_request","route_path":"/api/questionnaire/detail","http_method":"GET","dynamic":false,"certainty":"certain","quality":"structural","range":{"start_byte":0,"end_byte":3,"start_line":1,"end_line":1},"text":"fixture source"},
+			{"kind":"java_type","name":"QuestionnaireServiceImpl","namespace":"demo.QuestionnaireServiceImpl","super_types":["demo.IQuestionnaireService"],"certainty":"certain","quality":"structural","range":{"start_byte":0,"end_byte":3,"start_line":1,"end_line":1}}
+		]`),
+		Relations: []types.SourceCodeRelation{{
+			ID: "route-candidate", Kind: "http_route", FromFileID: id, FromVersionID: "vue-version",
+			FromPath: "src/web/QuestionnaireDetail.vue", FromKey: "GET /api/questionnaire/detail",
+			Determinacy: "uncertain", Quality: "structural",
+			ResolutionReason: "client prefix/proxy target is not statically verified",
+		}},
+	}, nil
+}
+
 func TestSourceAnalysisRangeSnippetUsesExactVersionBytesAndRejectsInvalidBounds(t *testing.T) {
 	content := []byte("prefix\nSELECT * FROM customers;\nsuffix")
 	rangeJSON := types.JSON(`{"start_byte":7,"end_byte":31,"start_line":2,"end_line":2}`)

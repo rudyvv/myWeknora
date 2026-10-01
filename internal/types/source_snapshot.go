@@ -61,6 +61,8 @@ type ParsedSourceFact struct {
 	Kind            string      `json:"kind"`
 	Name            string      `json:"name,omitempty"`
 	Namespace       string      `json:"namespace,omitempty"`
+	RoutePath       string      `json:"route_path,omitempty"`
+	HTTPMethod      string      `json:"http_method,omitempty"`
 	StatementType   string      `json:"statement_type,omitempty"`
 	StatementID     string      `json:"statement_id,omitempty"`
 	MethodName      string      `json:"method_name,omitempty"`
@@ -74,6 +76,7 @@ type ParsedSourceFact struct {
 	OwnerKind       string      `json:"owner_kind,omitempty"`
 	OwnerName       string      `json:"owner_name,omitempty"`
 	ReferenceKind   string      `json:"reference_kind,omitempty"`
+	SuperTypes      []string    `json:"super_types,omitempty"`
 	Dynamic         bool        `json:"dynamic,omitempty"`
 	Certainty       string      `json:"certainty,omitempty"`
 	Quality         string      `json:"quality"`

@@ -24,6 +24,19 @@ type factOwner struct {
 	fact   types.ParsedSourceFact
 }
 
+type sourceRouteEndpoint struct {
+	owner     factOwner
+	path      string
+	method    string
+	uncertain bool
+}
+
+type sourceRequestRoute struct {
+	path      string
+	uncertain bool
+	reason    string
+}
+
 type mapperDocument struct {
 	member     SourceRelationMember
 	namespace  string
@@ -224,6 +237,7 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 		}
 		relations = append(relations, relation)
 	}
+	relations = append(relations, correlateStaticBusinessFlow(tenant, sourceID, snapshotID, members)...)
 
 	sort.SliceStable(relations, func(i, j int) bool {
 		a, b := relations[i], relations[j]
@@ -231,6 +245,405 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 			fmt.Sprintf("%s|%s|%09d|%s|%s", b.FromPath, b.Kind, rangeStart(b.FromRange), b.ToPath, b.ToKey)
 	})
 	return relations
+}
+
+func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, members []SourceRelationMember) []types.SourceCodeRelation {
+	typeDeclarations := map[string][]factOwner{}
+	methods := map[string][]factOwner{}
+	methodsByType := map[string][]factOwner{}
+	injections := map[string][]factOwner{}
+	importsByFile := map[string][]string{}
+	var calls, mappings, requests, apiPrefixes, apiProxies []factOwner
+	for _, member := range members {
+		if member.FileID == "" || member.VersionID == "" {
+			continue
+		}
+		for _, fact := range member.Facts {
+			owner := factOwner{member, fact}
+			switch fact.Kind {
+			case "java_type":
+				typeDeclarations[fact.Namespace] = append(typeDeclarations[fact.Namespace], owner)
+			case "java_import":
+				key := sourceMemberVersionKey(member)
+				importsByFile[key] = append(importsByFile[key], fact.Name)
+			case "java_method":
+				methods[relationLookupKey(fact.Namespace, fact.Name)] = append(methods[relationLookupKey(fact.Namespace, fact.Name)], owner)
+				methodsByType[fact.Namespace] = append(methodsByType[fact.Namespace], owner)
+			case "java_injection":
+				injections[relationLookupKey(fact.Namespace, fact.Name)] = append(injections[relationLookupKey(fact.Namespace, fact.Name)], owner)
+			case "java_method_call":
+				calls = append(calls, owner)
+			case "spring_mapping":
+				mappings = append(mappings, owner)
+			case "api_request":
+				requests = append(requests, owner)
+			case "api_prefix":
+				apiPrefixes = append(apiPrefixes, owner)
+			case "api_proxy":
+				apiProxies = append(apiProxies, owner)
+			}
+		}
+	}
+	implementersByType := map[string][]factOwner{}
+	for _, declarations := range typeDeclarations {
+		for _, declaration := range declarations {
+			if declaration.fact.Certainty == "uncertain" {
+				continue
+			}
+			for _, superType := range declaration.fact.SuperTypes {
+				implementersByType[superType] = append(implementersByType[superType], declaration)
+			}
+		}
+	}
+
+	var relations []types.SourceCodeRelation
+	for _, injection := range flattenFactOwners(injections) {
+		fact := injection.fact
+		typeName, resolved := resolveSnapshotJavaType(injection, fact, typeDeclarations, importsByFile)
+		if !resolved {
+			if fact.TargetName != "" {
+				relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "dependency_injection",
+					injection.member, fact, fact.Namespace+"."+fact.Name, nil, "", "uncertain",
+					"injected Java type is unresolved or ambiguous in the snapshot"))
+			}
+			continue
+		}
+		targets := typeDeclarations[typeName]
+		key := fact.Namespace + "." + fact.Name
+		if len(targets) == 1 && targets[0].fact.Certainty != "uncertain" {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "dependency_injection",
+				injection.member, fact, key, &targets[0], typeFactKey(targets[0].fact), "certain", ""))
+			continue
+		}
+		reason := "injected Java type is missing"
+		if len(targets) > 1 {
+			reason = "injected Java type is ambiguous"
+		}
+		relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "dependency_injection",
+			injection.member, fact, key, nil, "", "uncertain", reason))
+	}
+
+	// Preserve Java's declared type relation without inventing implementations for interfaces.
+	for _, declarations := range typeDeclarations {
+		for _, declaration := range declarations {
+			fact := declaration.fact
+			for _, superType := range fact.SuperTypes {
+				targets := typeDeclarations[superType]
+				key := typeFactKey(fact) + " -> " + superType
+				if fact.Certainty != "uncertain" && len(targets) == 1 && targets[0].fact.Certainty != "uncertain" {
+					relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "type_supertype",
+						declaration.member, fact, key, &targets[0], typeFactKey(targets[0].fact), "certain", ""))
+					continue
+				}
+				reason := "Java supertype is missing or unresolved"
+				if len(targets) > 1 {
+					reason = "Java supertype is ambiguous"
+				}
+				relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "type_supertype",
+					declaration.member, fact, key, nil, "", "uncertain", reason))
+			}
+		}
+	}
+
+	for _, call := range calls {
+		fact := call.fact
+		receiver := strings.TrimPrefix(fact.Receiver, "this.")
+		bindings := injections[relationLookupKey(fact.Namespace, receiver)]
+		if receiver == "" || len(bindings) == 0 {
+			continue
+		}
+		key := fact.Namespace + "#" + fact.MethodName + " -> " + receiver + "." + fact.Name
+		binding := bindings[0].fact
+		callType, callResolved := resolveSnapshotJavaType(call, fact, typeDeclarations, importsByFile)
+		bindingType, bindingResolved := resolveSnapshotJavaType(bindings[0], binding, typeDeclarations, importsByFile)
+		if !callResolved || !bindingResolved || callType != bindingType || len(bindings) != 1 {
+			reason := "Java call receiver or injected type is unresolved"
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "method_call",
+				call.member, fact, key, nil, "", "uncertain", reason))
+			continue
+		}
+		targets := methods[relationLookupKey(callType, fact.Name)]
+		if len(targets) == 1 {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "method_call",
+				call.member, fact, key, &targets[0], methodFactKey(targets[0].fact), "certain", ""))
+			continue
+		}
+		reason := "declared Java method target is missing"
+		if len(targets) > 1 {
+			reason = "declared Java method target is overloaded or ambiguous"
+		}
+		relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "method_call",
+			call.member, fact, key, nil, "", "uncertain", reason))
+	}
+
+	for _, interfaceDeclarations := range typeDeclarations {
+		for _, contract := range interfaceDeclarations {
+			if contract.fact.OwnerKind != "interface" || contract.fact.Certainty == "uncertain" {
+				continue
+			}
+			implementations := implementersByType[contract.fact.Namespace]
+			if len(implementations) == 0 {
+				continue
+			}
+			for _, method := range methodsByType[contract.fact.Namespace] {
+				var targets []factOwner
+				for _, implementation := range implementations {
+					targets = append(targets, methods[relationLookupKey(implementation.fact.Namespace, method.fact.Name)]...)
+				}
+				key := methodFactKey(method.fact)
+				if len(implementations) == 1 && len(targets) == 1 && len(typeDeclarations[contract.fact.Namespace]) == 1 {
+					relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "implements_method",
+						method.member, method.fact, key, &targets[0], methodFactKey(targets[0].fact), "certain", ""))
+					continue
+				}
+				reason := "Java service method implementation is missing"
+				if len(implementations) > 1 || len(targets) > 1 || len(typeDeclarations[contract.fact.Namespace]) > 1 {
+					reason = "Java service has multiple possible implementations"
+				}
+				relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "implements_method",
+					method.member, method.fact, key, nil, "", "uncertain", reason))
+			}
+		}
+	}
+
+	classRoutes := map[string][]factOwner{}
+	methodRoutes := []factOwner{}
+	for _, mapping := range mappings {
+		if mapping.fact.StatementType == "type" || mapping.fact.OwnerKind == "type" {
+			classRoutes[mapping.fact.Namespace] = append(classRoutes[mapping.fact.Namespace], mapping)
+		} else {
+			methodRoutes = append(methodRoutes, mapping)
+		}
+	}
+	var endpoints []sourceRouteEndpoint
+	for _, mapping := range methodRoutes {
+		fact := mapping.fact
+		if fact.RoutePath == "" || fact.OwnerName == "" {
+			continue
+		}
+		prefixes := classRoutes[fact.Namespace]
+		if len(prefixes) == 0 {
+			endpoints = append(endpoints, sourceRouteEndpoint{mapping, normalizeSourceRoute(fact.RoutePath), fact.HTTPMethod,
+				fact.Dynamic || fact.Certainty == "uncertain"})
+			continue
+		}
+		for _, prefix := range prefixes {
+			if prefix.fact.RoutePath == "" {
+				continue
+			}
+			endpoints = append(endpoints, sourceRouteEndpoint{mapping,
+				normalizeSourceRoute(joinSourceRoute(prefix.fact.RoutePath, fact.RoutePath)), fact.HTTPMethod,
+				prefix.fact.Dynamic || prefix.fact.Certainty == "uncertain" || fact.Dynamic || fact.Certainty == "uncertain"})
+		}
+	}
+	for _, request := range requests {
+		fact := request.fact
+		if fact.RoutePath == "" || fact.Dynamic {
+			continue
+		}
+		requestRoutes := []sourceRequestRoute{{path: normalizeSourceRoute(fact.RoutePath)}}
+		if len(apiPrefixes) > 0 || len(apiProxies) > 0 {
+			// A captured prefix or proxy means the request path must be resolved
+			// through both pieces of configuration. Never fall back to matching
+			// the unprefixed call literal when this evidence is incomplete.
+			requestRoutes = nil
+			for _, prefix := range apiPrefixes {
+				prefixFact := prefix.fact
+				if prefixFact.RoutePath == "" || prefixFact.Dynamic || !strings.HasPrefix(prefixFact.RoutePath, "/") {
+					continue
+				}
+				browserPath := normalizeSourceRoute(joinSourceRoute(prefixFact.RoutePath, fact.RoutePath))
+				for _, proxy := range apiProxies {
+					proxyFact := proxy.fact
+					rewritePrefix := strings.TrimPrefix(proxyFact.TargetName, "^")
+					if proxyFact.Dynamic || proxyFact.Certainty == "uncertain" || proxyFact.Name == "" ||
+						proxyFact.RoutePath == "" || rewritePrefix == "" || rewritePrefix != prefixFact.RoutePath ||
+						!strings.HasPrefix(browserPath, proxyFact.Name) {
+						continue
+					}
+					remainder := strings.TrimPrefix(browserPath, rewritePrefix)
+					if remainder != "" && !strings.HasPrefix(remainder, "/") {
+						continue
+					}
+					resolvedPath := normalizeSourceRoute(joinSourceRoute(proxyFact.RoutePath,
+						joinSourceRoute(proxyFact.Namespace, remainder)))
+					requestRoutes = append(requestRoutes, sourceRequestRoute{path: resolvedPath, uncertain: prefixFact.Certainty != "certain",
+						reason: "frontend prefix or proxy transformation is conditional or unverified"})
+				}
+			}
+			requestRoutes = uniqueRequestRoutes(requestRoutes)
+		}
+		if len(requestRoutes) == 0 {
+			continue
+		}
+		var candidates []sourceRouteEndpoint
+		for _, requestRoute := range requestRoutes {
+			for _, endpoint := range endpoints {
+				exactRoute := endpoint.path == requestRoute.path
+				legacySuffix := endpoint.path == normalizeSourceRoute(strings.TrimSuffix(requestRoute.path, ".do"))
+				if (!exactRoute && !legacySuffix) ||
+					(endpoint.method != "" && fact.HTTPMethod != "" && endpoint.method != fact.HTTPMethod) {
+					continue
+				}
+				endpoint.uncertain = endpoint.uncertain || requestRoute.uncertain || (legacySuffix && !exactRoute)
+				candidates = append(candidates, endpoint)
+			}
+		}
+		candidates = uniqueRouteEndpoints(candidates)
+		if len(candidates) == 1 && !candidates[0].uncertain {
+			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "http_route",
+				request.member, fact, strings.ToUpper(fact.HTTPMethod)+" "+fact.RoutePath,
+				&candidates[0].owner, springEndpointKey(candidates[0].owner.fact, candidates[0].path), "certain", ""))
+			continue
+		}
+		if len(candidates) > 0 {
+			reason := "Spring route target is ambiguous or depends on unresolved mapping metadata"
+			if len(requestRoutes) == 1 && requestRoutes[0].uncertain {
+				reason = requestRoutes[0].reason
+			} else if len(candidates) == 1 && candidates[0].path == normalizeSourceRoute(strings.TrimSuffix(requestRoutes[0].path, ".do")) {
+				reason = "legacy .do route suffix matching is not verified by source configuration"
+			}
+			relation := sourceFactRelation(tenant, sourceID, snapshotID, "http_route", request.member, fact,
+				strings.ToUpper(fact.HTTPMethod)+" "+fact.RoutePath, nil, "", "uncertain", reason)
+			relation.ToKey = springEndpointKey(candidates[0].owner.fact, candidates[0].path)
+			relations = append(relations, relation)
+		}
+	}
+	return relations
+}
+
+func resolveSnapshotJavaType(owner factOwner, fact types.ParsedSourceFact,
+	declarations map[string][]factOwner, importsByFile map[string][]string) (string, bool) {
+	if fact.TypeName != "" && fact.Certainty != "uncertain" && !fact.Dynamic {
+		return fact.TypeName, true
+	}
+	simpleName := fact.TargetName
+	if simpleName == "" {
+		return "", false
+	}
+	if strings.Contains(simpleName, ".") {
+		targets := declarations[simpleName]
+		return simpleName, len(targets) == 1
+	}
+
+	packageName := ""
+	if separator := strings.LastIndex(fact.Namespace, "."); separator >= 0 {
+		packageName = fact.Namespace[:separator]
+	}
+
+	var explicitImports []string
+	for _, imported := range importsByFile[sourceMemberVersionKey(owner.member)] {
+		if !strings.HasSuffix(imported, ".*") && imported[strings.LastIndex(imported, ".")+1:] == simpleName {
+			explicitImports = append(explicitImports, imported)
+		}
+	}
+	if len(explicitImports) > 0 {
+		if len(explicitImports) != 1 || len(declarations[explicitImports[0]]) != 1 {
+			return "", false
+		}
+		return explicitImports[0], true
+	}
+	if packageName != "" {
+		candidate := packageName + "." + simpleName
+		if len(declarations[candidate]) == 1 {
+			return candidate, true
+		}
+	}
+
+	candidates := map[string]struct{}{}
+	for _, imported := range importsByFile[sourceMemberVersionKey(owner.member)] {
+		if !strings.HasSuffix(imported, ".*") {
+			continue
+		}
+		candidate := strings.TrimSuffix(imported, ".*") + "." + simpleName
+		if len(declarations[candidate]) > 0 {
+			candidates[candidate] = struct{}{}
+		}
+	}
+	if len(candidates) != 1 {
+		return "", false
+	}
+	for candidate := range candidates {
+		if len(declarations[candidate]) == 1 {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func sourceMemberVersionKey(member SourceRelationMember) string {
+	return member.FileID + "\x00" + member.VersionID
+}
+
+func uniqueRequestRoutes(routes []sourceRequestRoute) []sourceRequestRoute {
+	seen := make(map[string]int, len(routes))
+	unique := make([]sourceRequestRoute, 0, len(routes))
+	for _, route := range routes {
+		key := route.path
+		if index, exists := seen[key]; exists {
+			unique[index].uncertain = unique[index].uncertain || route.uncertain
+			if unique[index].reason == "" {
+				unique[index].reason = route.reason
+			}
+			continue
+		}
+		seen[key] = len(unique)
+		unique = append(unique, route)
+	}
+	return unique
+}
+
+func uniqueRouteEndpoints(endpoints []sourceRouteEndpoint) []sourceRouteEndpoint {
+	seen := make(map[string]int, len(endpoints))
+	unique := make([]sourceRouteEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		key := endpoint.owner.member.FileID + "\x00" + endpoint.owner.fact.Namespace + "\x00" + endpoint.owner.fact.OwnerName + "\x00" + endpoint.path + "\x00" + endpoint.method
+		if index, exists := seen[key]; exists {
+			unique[index].uncertain = unique[index].uncertain || endpoint.uncertain
+			continue
+		}
+		seen[key] = len(unique)
+		unique = append(unique, endpoint)
+	}
+	return unique
+}
+
+func flattenFactOwners(values map[string][]factOwner) []factOwner {
+	var result []factOwner
+	for _, owners := range values {
+		result = append(result, owners...)
+	}
+	return result
+}
+
+func typeFactKey(fact types.ParsedSourceFact) string {
+	return fact.Namespace
+}
+
+func methodFactKey(fact types.ParsedSourceFact) string {
+	return fact.Namespace + "#" + fact.Name
+}
+
+func springEndpointKey(fact types.ParsedSourceFact, route string) string {
+	return fact.Namespace + "#" + fact.OwnerName + " " + route
+}
+
+func joinSourceRoute(prefix, suffix string) string {
+	left, right := strings.TrimRight(prefix, "/"), strings.TrimLeft(suffix, "/")
+	if left == "" {
+		return "/" + right
+	}
+	if right == "" {
+		return left
+	}
+	return left + "/" + right
+}
+
+func normalizeSourceRoute(route string) string {
+	if route == "" {
+		return "/"
+	}
+	return "/" + strings.Trim(strings.TrimSpace(route), "/")
 }
 
 func referenceFromKey(fact types.ParsedSourceFact) string {

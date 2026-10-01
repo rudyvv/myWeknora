@@ -58,3 +58,17 @@ func TestModelSourceAnalysisIsBoundedAndPreservesContinuationCursor(t *testing.T
 	require.Contains(t, output, "&lt;unsafe&gt;&amp;")
 	require.Contains(t, output, cursor)
 }
+
+func TestModelSourceAnalysisPreservesBoundedBusinessFlowFields(t *testing.T) {
+	analysis := modelSourceAnalysis(map[string]interface{}{
+		"facts": []map[string]interface{}{{
+			"kind": "api_request", "route_path": "/api/questionnaire/detail", "http_method": "GET",
+			"super_types": []string{"demo.IQuestionnaireService"}, "quality": "structural",
+		}},
+	})
+	facts := analysis["facts"].([]map[string]interface{})
+	require.Len(t, facts, 1)
+	require.Equal(t, "/api/questionnaire/detail", facts[0]["route_path"])
+	require.Equal(t, "GET", facts[0]["http_method"])
+	require.Equal(t, []string{"demo.IQuestionnaireService"}, facts[0]["super_types"])
+}

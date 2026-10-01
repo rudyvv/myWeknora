@@ -4,9 +4,9 @@ import type { AuditLog, AuditOutcome, ListAuditLogResponse } from '@/api/tenant/
 
 export interface SourceRange { start_byte: number; end_byte: number; start_line: number; end_line: number }
 export interface SourceFact {
-  kind: string; name?: string; qualified_name?: string; signature?: string; namespace?: string; statement_type?: string; statement_id?: string;
+  kind: string; name?: string; qualified_name?: string; signature?: string; namespace?: string; route_path?: string; http_method?: string; statement_type?: string; statement_id?: string;
   method_name?: string; receiver?: string; type_name?: string; result_map_refs?: string[]; include_refs?: string[];
-  target_namespace?: string; target_name?: string; owner_kind?: string; dynamic?: boolean;
+  target_namespace?: string; target_name?: string; owner_kind?: string; owner_name?: string; reference_kind?: string; super_types?: string[]; dynamic?: boolean;
   certainty?: string; quality: string; range: SourceRange; text?: string; sql?: string;
 }
 export interface SourceDiagnostic { code: string; message: string; range?: SourceRange }

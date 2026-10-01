@@ -18,6 +18,16 @@ JAVA_TYPES = {"class_declaration", "interface_declaration", "enum_declaration", 
 MYBATIS_SQL_ANNOTATIONS = {"Select", "Insert", "Update", "Delete"}
 MYBATIS_PROVIDER_ANNOTATIONS = {"SelectProvider", "InsertProvider", "UpdateProvider", "DeleteProvider"}
 MYBATIS_ANNOTATION_PREFIX = "org.apache.ibatis.annotations."
+SPRING_MAPPING_PREFIX = "org.springframework.web.bind.annotation."
+SPRING_MAPPING_METHODS = {
+    "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
+    "PatchMapping": "PATCH", "DeleteMapping": "DELETE",
+}
+INJECTION_ANNOTATIONS = {
+    "org.springframework.beans.factory.annotation.Autowired",
+    "javax.annotation.Resource", "jakarta.annotation.Resource",
+    "javax.inject.Inject", "jakarta.inject.Inject",
+}
 
 
 class UnsafeMyBatisXML(ValueError):
@@ -126,13 +136,15 @@ def extract_java_facts(raw, tree, path):
         if node.type == "import_declaration":
             name_node = next((child for child in node.named_children
                               if child.type in ("identifier", "scoped_identifier")), None)
-            if name_node is not None:
+            if any(child.type == "asterisk" for child in node.children):
+                prefix = next((text(child) for child in node.named_children
+                               if child.type in ("scoped_identifier", "identifier")), "")
+                if prefix:
+                    imports.setdefault("*", []).append(prefix)
+            elif name_node is not None:
                 imported = text(name_node)
                 short = imported.rsplit(".", 1)[-1]
                 imports.setdefault(short, []).append(imported)
-            elif any(child.type == "asterisk" for child in node.children):
-                prefix = next((text(child) for child in node.named_children if child.type in ("scoped_identifier", "identifier")), "")
-                imports.setdefault("*", []).append(prefix)
         stack.extend(reversed(node.named_children))
 
     constants = {}
@@ -203,6 +215,376 @@ def extract_java_facts(raw, tree, path):
                                 "message": "Mapper annotation identity is not resolved by an explicit MyBatis import or qualified name",
                                 "range": output_range})
         return "unrelated"
+
+    def annotation_fqn(annotation, allowed_prefix):
+        """Resolve a framework annotation only through its qualified name or import."""
+        name_node = annotation.child_by_field_name("name")
+        if name_node is None:
+            return ""
+        name = text(name_node)
+        if name.startswith(allowed_prefix):
+            return name
+        if "." in name:
+            return ""
+        if declared_types.get(name):
+            return ""
+        imported = imports.get(name, [])
+        if len(imported) == 1:
+            return imported[0]
+        if imported:
+            return ""
+        wildcard_matches = [prefix for prefix in imports.get("*", []) if prefix == allowed_prefix.rstrip(".")]
+        return allowed_prefix + name if len(wildcard_matches) == 1 else ""
+
+    def enclosing_java_type(node):
+        current = node
+        while current is not None and current.type not in JAVA_TYPES:
+            current = current.parent
+        return current
+
+    def enclosing_java_method(node):
+        current = node
+        while current is not None and current.type not in ("method_declaration", "method_signature", "constructor_declaration"):
+            current = current.parent
+        return current
+
+    def base_type_node(node):
+        if node is None:
+            return None
+        if node.type in ("identifier", "type_identifier", "scoped_identifier", "scoped_type_identifier"):
+            return node
+        # Generic and array types wrap the declared base type. Never use a
+        # generic argument as the injected receiver's identity.
+        for child in node.named_children:
+            found = base_type_node(child)
+            if found is not None:
+                return found
+        return None
+
+    declared_fqns = set()
+    type_nodes = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type in JAVA_TYPES:
+            qualified = binary_type_name(node)
+            name_node = node.child_by_field_name("name")
+            if qualified and name_node is not None:
+                declared_fqns.add(qualified)
+                type_nodes.append((node, qualified, text(name_node)))
+        stack.extend(reversed(node.named_children))
+
+    def resolve_type_node(node):
+        base = base_type_node(node)
+        if base is None:
+            return "", False
+        value = text(base)
+        if not value or value in {"void", "boolean", "byte", "char", "short", "int", "long", "float", "double"}:
+            return "", False
+        if "." in value:
+            return value, True
+        explicit = imports.get(value, [])
+        if len(explicit) == 1:
+            return explicit[0], True
+        if explicit:
+            return "", False
+        same_package = (package + "." if package else "") + value
+        if same_package in declared_fqns:
+            return same_package, True
+        wildcard = sorted(set(imports.get("*", [])))
+        candidates = [(prefix + "." + value) for prefix in wildcard]
+        source_candidates = [candidate for candidate in candidates if candidate in declared_fqns]
+        if len(source_candidates) == 1:
+            return source_candidates[0], True
+        if len(wildcard) == 1:
+            return candidates[0], True
+        if not wildcard and package:
+            # Same-package resolution is deterministic in Java. The Go
+            # correlator still requires this exact type to exist in the snapshot.
+            return same_package, True
+        return "", False
+
+    def static_string_values(node, owner_type):
+        if node is None:
+            return None
+        if node.type in ("string_literal", "element_value_array_initializer", "array_initializer"):
+            return _java_constant_value(raw, node, constants.get(owner_type.id, {}) if owner_type else {})
+        if node.type == "element_value_pair":
+            return static_string_values(node.child_by_field_name("value"), owner_type)
+        return None
+
+    def mapping_values(annotation, owner_type):
+        args = annotation.child_by_field_name("arguments")
+        path_nodes, method_nodes = [], []
+        if args is not None:
+            for argument in args.named_children:
+                if argument.type == "element_value_pair":
+                    key_node = argument.child_by_field_name("key")
+                    key = text(key_node) if key_node is not None else ""
+                    if key in ("value", "path"):
+                        path_nodes.append(argument)
+                    elif key == "method":
+                        method_nodes.append(argument)
+                else:
+                    path_nodes.append(argument)
+        if not path_nodes:
+            paths = [""]
+            paths_certain = True
+        else:
+            values = [static_string_values(item, owner_type) for item in path_nodes]
+            paths_certain = all(isinstance(value, (str, list)) for value in values)
+            flattened = []
+            for value in values:
+                if isinstance(value, str):
+                    flattened.append(value)
+                elif isinstance(value, list) and all(isinstance(part, str) for part in value):
+                    flattened.extend(value)
+                else:
+                    paths_certain = False
+            paths = flattened or [""]
+        annotation_name = text(annotation.child_by_field_name("name")) if annotation.child_by_field_name("name") else ""
+        simple_name = annotation_name.rsplit(".", 1)[-1]
+        fixed_method = SPRING_MAPPING_METHODS.get(simple_name)
+        methods = [fixed_method] if fixed_method else []
+        methods_certain = True
+        for item in method_nodes:
+            value_node = item.child_by_field_name("value")
+            if value_node is None:
+                methods_certain = False
+                continue
+            raw_method = text(value_node)
+            found = re.findall(r"(?:RequestMethod\s*\.\s*)?([A-Z]+)", raw_method)
+            if not found or any(value not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"} for value in found):
+                methods_certain = False
+            else:
+                methods.extend(found)
+        return paths, sorted(set(methods)), paths_certain and methods_certain
+
+    # Preserve explicit Java imports and declared type hierarchy as syntax facts.
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "import_declaration" and not any(child.type == "static" for child in node.children):
+            name_node = next((child for child in node.named_children if child.type in ("identifier", "scoped_identifier")), None)
+            if name_node is not None:
+                import_name = text(name_node)
+                if any(child.type == "asterisk" for child in node.children):
+                    import_name += ".*"
+                facts.append({"kind": "java_import", "name": import_name, "namespace": package,
+                              "range": _source_range(raw, node.start_byte, node.end_byte, newlines),
+                              "text": text(node), "quality": "structural"})
+        stack.extend(reversed(node.named_children))
+
+    type_fact_by_node = {}
+    for node, qualified, simple in type_nodes:
+        super_nodes = []
+        superclass = node.child_by_field_name("superclass")
+        if superclass is not None:
+            base = base_type_node(superclass)
+            if base is not None:
+                super_nodes.append(base)
+        interfaces_node = node.child_by_field_name("interfaces") or node.child_by_field_name("super_interfaces")
+        if interfaces_node is not None:
+            for child in interfaces_node.named_children:
+                base = base_type_node(child)
+                if base is not None:
+                    super_nodes.append(base)
+        super_types = []
+        hierarchy_certain = True
+        for super_node in super_nodes:
+            name, certain = resolve_type_node(super_node)
+            if name:
+                super_types.append(name)
+            hierarchy_certain = hierarchy_certain and certain
+        name_node = node.child_by_field_name("name")
+        range_node = name_node or node
+        fact = {"kind": "java_type", "name": simple, "namespace": qualified,
+                "owner_kind": "interface" if node.type == "interface_declaration" else "class",
+                "super_types": sorted(set(super_types)), "certainty": "certain" if hierarchy_certain else "uncertain",
+                "range": _source_range(raw, range_node.start_byte, range_node.end_byte, newlines),
+                "text": text(range_node), "quality": "structural"}
+        facts.append(fact)
+        type_fact_by_node[node.id] = fact
+
+    injection_facts = []
+    field_injections = {}
+    method_nodes = []
+    for node, _, _ in type_nodes:
+        body = node.child_by_field_name("body")
+        if body is None:
+            continue
+        for member in body.named_children:
+            if member.type == "field_declaration":
+                modifiers = next((child for child in member.named_children if child.type == "modifiers"), None)
+                annotations = [] if modifiers is None else [child for child in modifiers.named_children if child.type in ("annotation", "marker_annotation")]
+                recognized = [annotation for annotation in annotations
+                              if (annotation_fqn(annotation, "org.springframework.beans.factory.annotation.") == "org.springframework.beans.factory.annotation.Autowired"
+                                  or annotation_fqn(annotation, "javax.annotation.") == "javax.annotation.Resource"
+                                  or annotation_fqn(annotation, "jakarta.annotation.") == "jakarta.annotation.Resource"
+                                  or annotation_fqn(annotation, "javax.inject.") == "javax.inject.Inject"
+                                  or annotation_fqn(annotation, "jakarta.inject.") == "jakarta.inject.Inject")]
+                if not recognized:
+                    continue
+                owner_name = binary_type_name(node)
+                type_node = member.child_by_field_name("type")
+                type_name, type_certain = resolve_type_node(type_node)
+                type_base = base_type_node(type_node)
+                target_name = text(type_base) if type_base is not None else ""
+                for declarator in member.named_children:
+                    if declarator.type != "variable_declarator":
+                        continue
+                    name_node = declarator.child_by_field_name("name")
+                    if name_node is None:
+                        continue
+                    field_name = text(name_node)
+                    fact = {"kind": "java_injection", "name": field_name, "namespace": owner_name,
+                            "type_name": type_name, "target_name": target_name, "owner_kind": "field",
+                            "certainty": "certain" if type_certain else "uncertain",
+                            "dynamic": not type_certain,
+                            "range": _source_range(raw, member.start_byte, member.end_byte, newlines),
+                            "text": text(member), "quality": "structural"}
+                    injection_facts.append(fact)
+                    field_injections.setdefault((owner_name, field_name), []).append(fact)
+            elif member.type in ("method_declaration", "method_signature", "constructor_declaration"):
+                method_nodes.append(member)
+
+    # Mapping, method declaration, injection and call facts are syntax-only.
+    # Calls without a single injected receiver type stay explicitly unresolved.
+    for node, owner_type, simple in type_nodes:
+        owner_name = binary_type_name(node)
+        class_constants = constants.get(node.id, {})
+        body = node.child_by_field_name("body")
+        if body is None:
+            continue
+        for child in node.named_children:
+            if child.type not in ("class_body", "interface_body", "enum_body"):
+                continue
+            for member in child.named_children:
+                if member.type not in ("method_declaration", "method_signature", "constructor_declaration"):
+                    continue
+                method_node = member.child_by_field_name("name")
+                method_name = text(method_node) if method_node is not None else ""
+                modifier_node = next((item for item in member.named_children if item.type == "modifiers"), None)
+                annotations = [] if modifier_node is None else [item for item in modifier_node.named_children if item.type in ("annotation", "marker_annotation")]
+                if method_name:
+                    facts.append({"kind": "java_method", "name": method_name, "namespace": owner_name,
+                                  "type_name": resolve_type_node(member.child_by_field_name("type"))[0],
+                                  "owner_kind": member.type, "range": _source_range(raw, member.start_byte, member.end_byte, newlines),
+                                  "text": "", "quality": "structural"})
+                for annotation in annotations:
+                    annotation_node = annotation.child_by_field_name("name")
+                    annotation_name = text(annotation_node) if annotation_node is not None else ""
+                    simple_annotation = annotation_name.rsplit(".", 1)[-1]
+                    canonical = annotation_fqn(annotation, SPRING_MAPPING_PREFIX)
+                    if simple_annotation not in set(SPRING_MAPPING_METHODS) | {"RequestMapping"}:
+                        continue
+                    paths, methods, certain = mapping_values(annotation, node)
+                    known = canonical == SPRING_MAPPING_PREFIX + simple_annotation
+                    if not known:
+                        diagnostics.append({"code": "spring_mapping_identity_unresolved",
+                                            "message": "Spring mapping annotation is not tied to a unique framework import",
+                                            "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines)})
+                    for route in paths:
+                        facts.append({"kind": "spring_mapping", "name": method_name, "namespace": owner_name,
+                                      "route_path": route if certain else "", "statement_type": "method" if method_name else "type",
+                                      "owner_kind": "method" if method_name else "type", "owner_name": method_name,
+                                      "http_method": methods[0] if len(methods) == 1 else "",
+                                      "dynamic": not (certain and known),
+                                      "certainty": "certain" if certain and known else "uncertain",
+                                      "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines),
+                                      "text": text(annotation), "quality": "structural"})
+        # Type-level mappings use the annotation on the class declaration.
+        modifiers = next((item for item in node.named_children if item.type == "modifiers"), None)
+        annotations = [] if modifiers is None else [item for item in modifiers.named_children if item.type in ("annotation", "marker_annotation")]
+        for annotation in annotations:
+            annotation_node = annotation.child_by_field_name("name")
+            annotation_name = text(annotation_node) if annotation_node is not None else ""
+            simple_annotation = annotation_name.rsplit(".", 1)[-1]
+            if simple_annotation not in set(SPRING_MAPPING_METHODS) | {"RequestMapping"}:
+                continue
+            canonical = annotation_fqn(annotation, SPRING_MAPPING_PREFIX)
+            paths, methods, certain = mapping_values(annotation, node)
+            known = canonical == SPRING_MAPPING_PREFIX + simple_annotation
+            if not known:
+                diagnostics.append({"code": "spring_mapping_identity_unresolved",
+                                    "message": "Spring mapping annotation is not tied to a unique framework import",
+                                    "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines)})
+            for route in paths:
+                facts.append({"kind": "spring_mapping", "name": simple, "namespace": owner_name,
+                              "route_path": route if certain else "", "statement_type": "type", "owner_kind": "type",
+                              "http_method": methods[0] if len(methods) == 1 else "", "dynamic": not (certain and known),
+                              "certainty": "certain" if certain and known else "uncertain",
+                              "range": _source_range(raw, annotation.start_byte, annotation.end_byte, newlines),
+                              "text": text(annotation), "quality": "structural"})
+
+    facts.extend(injection_facts)
+    method_index = {}
+    for fact in facts:
+        if fact.get("kind") == "java_method":
+            method_index.setdefault((fact.get("namespace", ""), fact.get("name", "")), []).append(fact)
+    for method in method_nodes:
+        owner_type = enclosing_java_type(method)
+        if owner_type is None:
+            continue
+        owner_name = binary_type_name(owner_type)
+        method_name_node = method.child_by_field_name("name")
+        caller_name = text(method_name_node) if method_name_node is not None else ""
+        method_parameters = method.child_by_field_name("parameters")
+        shadowed_names = set()
+        local_stack = [method_parameters] if method_parameters is not None else []
+        local_stack.append(method.child_by_field_name("body"))
+        while local_stack:
+            current = local_stack.pop()
+            if current is None:
+                continue
+            if current.type in ("formal_parameter", "spread_parameter", "catch_formal_parameter"):
+                name_node = current.child_by_field_name("name")
+                if name_node is not None:
+                    shadowed_names.add(text(name_node))
+            elif current.type == "variable_declarator":
+                name_node = current.child_by_field_name("name")
+                if name_node is not None:
+                    shadowed_names.add(text(name_node))
+            local_stack.extend(current.named_children)
+        stack = [method]
+        while stack:
+            call = stack.pop()
+            if call.type == "method_invocation":
+                call_name_node = call.child_by_field_name("name")
+                object_node = call.child_by_field_name("object")
+                call_name = text(call_name_node) if call_name_node is not None else ""
+                receiver = text(object_node) if object_node is not None else ""
+                receiver_field = ""
+                if object_node is None:
+                    receiver_field = ""
+                elif object_node.type in ("identifier", "field_identifier"):
+                    receiver_field = receiver
+                elif object_node.type == "field_access" and text(object_node).replace(" ", "").startswith("this."):
+                    candidate = text(object_node).replace(" ", "").split(".")[-1]
+                    if candidate.isidentifier():
+                        receiver_field = candidate
+                binding = field_injections.get((owner_name, receiver_field), []) if receiver_field and receiver_field not in shadowed_names else []
+                type_name = binding[0].get("type_name", "") if len(binding) == 1 and binding[0].get("certainty") == "certain" else ""
+                target_name = binding[0].get("target_name", "") if len(binding) == 1 else ""
+                receiver_certain = bool(type_name)
+                call_start = call.start_byte
+                call_end = call.end_byte
+                dynamic = not receiver_certain
+                facts.append({"kind": "java_method_call", "name": call_name, "namespace": owner_name,
+                              "method_name": caller_name, "receiver": receiver, "type_name": type_name,
+                              "target_name": target_name,
+                              "owner_name": caller_name, "dynamic": dynamic,
+                              "certainty": "certain" if receiver_certain else "uncertain",
+                              "range": _source_range(raw, call_start, call_end, newlines),
+                              "text": text(call), "quality": "structural"})
+                if call_name in {"forName", "getMethod", "getDeclaredMethod", "invoke", "newInstance"}:
+                    facts.append({"kind": "java_dynamic_dispatch", "name": call_name, "namespace": owner_name,
+                                  "method_name": caller_name, "dynamic": True, "certainty": "uncertain",
+                                  "range": _source_range(raw, call_start, call_end, newlines),
+                                  "quality": "structural"})
+            stack.extend(reversed(call.named_children))
+
+    facts.sort(key=lambda fact: (fact["range"]["start_byte"], fact["range"]["end_byte"], fact["kind"], fact.get("name", "")))
 
     interfaces = {}
     stack = [root]

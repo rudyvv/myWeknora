@@ -133,6 +133,115 @@ class JavaHTTPContract(unittest.TestCase):
             span = fact['range']
             self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), fact['text'])
 
+    def test_vue_http_api_requests_are_facts_in_original_sfc_coordinates(self):
+        raw = (b'<template><div /></template>\r\n<script>\r\nexport default { methods: { load() {\r\n'
+               b"  this.$_HTTP.get('/api/questionnaire/detail', { params: {} })\r\n"
+               b'  this.$_HTTP.get(`/api/${this.kind}`)\r\n'
+               b'} } }\r\n</script>')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/web/QuestionnaireDetail.vue', 'language': 'vue',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        requests = [fact for fact in result['facts'] if fact['kind'] == 'api_request']
+        self.assertEqual(len(requests), 2)
+        static = next(fact for fact in requests if not fact['dynamic'])
+        self.assertEqual((static['route_path'], static['http_method']),
+                         ('/api/questionnaire/detail', 'GET'))
+        self.assertTrue(any(fact['dynamic'] and not fact['route_path'] for fact in requests))
+        for fact in requests:
+            span = fact['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), fact['text'])
+
+    def test_spring_mapping_injection_and_call_facts_keep_exact_java_bytes(self):
+        raw = (b'package demo; '
+               b'import org.springframework.stereotype.Controller; '
+               b'import org.springframework.web.bind.annotation.RequestMapping; '
+               b'import org.springframework.web.bind.annotation.RequestMethod; '
+               b'import org.springframework.beans.factory.annotation.Autowired; '
+               b'@Controller @RequestMapping("/api/schedule") class ScheduleController { '
+               b'@Autowired ScheduleService scheduleService; '
+               b'@RequestMapping(value="/push/getPushSchedule", method=RequestMethod.GET) '
+               b'Object getPushSchedule() { return scheduleService.getPushSchedule(); } } '
+               b'interface ScheduleService { Object getPushSchedule(); } '
+               b'class ScheduleServiceImpl implements ScheduleService { '
+               b'public Object getPushSchedule() { return null; } }')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/ScheduleController.java', 'language': 'java',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        mappings = [fact for fact in result['facts'] if fact['kind'] == 'spring_mapping']
+        self.assertEqual({fact['route_path'] for fact in mappings}, {'/api/schedule', '/push/getPushSchedule'})
+        self.assertIn('GET', [fact['http_method'] for fact in mappings])
+        injection = next(fact for fact in result['facts'] if fact['kind'] == 'java_injection')
+        self.assertEqual((injection['name'], injection['type_name']), ('scheduleService', 'demo.ScheduleService'))
+        call = next(fact for fact in result['facts'] if fact['kind'] == 'java_method_call')
+        self.assertEqual((call['name'], call['type_name'], call['certainty']),
+                         ('getPushSchedule', 'demo.ScheduleService', 'certain'))
+        implementation = next(fact for fact in result['facts']
+                              if fact['kind'] == 'java_type' and fact['name'] == 'ScheduleServiceImpl')
+        self.assertEqual(implementation['super_types'], ['demo.ScheduleService'])
+        for fact in mappings + [injection, call]:
+            span = fact['range']
+            self.assertEqual(raw[span['start_byte']:span['end_byte']].decode(), fact['text'])
+
+    def test_wildcard_framework_import_resolves_routes_but_ambiguous_type_stays_uncertain(self):
+        raw = (b'package demo; '
+               b'import org.springframework.web.bind.annotation.*; '
+               b'import org.springframework.beans.factory.annotation.*; '
+               b'import demo.dao.*; import demo.model.*; '
+               b'@RequestMapping("/api") class DetailController { '
+               b'@Autowired Mapper mapper; '
+               b'@RequestMapping(value="/detail", method=RequestMethod.GET) '
+               b'Object detail() { return mapper.find(); } }')
+        status, result = self.request('/v1/parse', {
+            'path': 'src/DetailController.java', 'language': 'java',
+            'sha256': hashlib.sha256(raw).hexdigest(), 'content_base64': base64.b64encode(raw).decode(),
+        })
+        self.assertEqual(status, 200, result)
+        mappings = [fact for fact in result['facts'] if fact['kind'] == 'spring_mapping']
+        self.assertEqual({fact['route_path'] for fact in mappings}, {'/api', '/detail'})
+        self.assertTrue(all(fact['certainty'] == 'certain' and not fact['dynamic'] for fact in mappings))
+        injection = next(fact for fact in result['facts'] if fact['kind'] == 'java_injection')
+        self.assertEqual((injection['type_name'], injection['target_name']), ('', 'Mapper'))
+        self.assertEqual((injection['certainty'], injection['dynamic']), ('uncertain', True))
+        call = next(fact for fact in result['facts'] if fact['kind'] == 'java_method_call')
+        self.assertEqual((call['receiver'], call['name'], call['target_name'], call['certainty'], call['dynamic']),
+                         ('mapper', 'find', 'Mapper', 'uncertain', True))
+
+    def test_static_frontend_prefix_and_proxy_are_separate_evidence(self):
+        prefix_raw = (b"const configure = () => process.env.NODE_ENV === 'production' "
+                      b"? config.url = '/prod/api' + config.url "
+                      b": config.url = '/apiroot' + config.url;")
+        status, prefix_result = self.request('/v1/parse', {
+            'path': 'src/service/interceptor.js', 'language': 'javascript',
+            'sha256': hashlib.sha256(prefix_raw).hexdigest(),
+            'content_base64': base64.b64encode(prefix_raw).decode(),
+        })
+        self.assertEqual(status, 200, prefix_result)
+        prefixes = [fact for fact in prefix_result['facts'] if fact['kind'] == 'api_prefix']
+        self.assertEqual({fact['route_path'] for fact in prefixes}, {'/prod/api', '/apiroot'})
+        for fact in prefixes:
+            span = fact['range']
+            self.assertEqual(prefix_raw[span['start_byte']:span['end_byte']].decode(), fact['text'])
+
+        proxy_raw = (b"module.exports = { devServer: { proxy: { '/api': { "
+                     b"target: 'https://example.invalid/api', "
+                     b"pathRewrite: { '^/apiroot': '' } } } } };")
+        status, proxy_result = self.request('/v1/parse', {
+            'path': 'vue.config.js', 'language': 'javascript',
+            'sha256': hashlib.sha256(proxy_raw).hexdigest(),
+            'content_base64': base64.b64encode(proxy_raw).decode(),
+        })
+        self.assertEqual(status, 200, proxy_result)
+        proxies = [fact for fact in proxy_result['facts'] if fact['kind'] == 'api_proxy']
+        self.assertEqual(len(proxies), 1)
+        self.assertEqual((proxies[0]['name'], proxies[0]['route_path'], proxies[0]['target_name'], proxies[0]['namespace']),
+                         ('/api', '/api', '^/apiroot', ''))
+        span = proxies[0]['range']
+        self.assertEqual(proxy_raw[span['start_byte']:span['end_byte']].decode(), proxies[0]['text'])
+
     def test_java_mapper_sql_annotations_use_ast_literals_and_known_constants(self):
         raw = (b'package demo; import org.apache.ibatis.annotations.Select; '
                b'import org.apache.ibatis.annotations.SelectProvider; '

@@ -145,6 +145,7 @@ func boundedFactSummaries(raw types.JSON, limit int) ([]map[string]interface{}, 
 	allowed := map[string]bool{
 		"kind": true, "name": true, "namespace": true, "statement_type": true,
 		"statement_id": true, "method_name": true, "receiver": true, "type_name": true,
+		"route_path": true, "http_method": true, "super_types": true,
 		"result_map_refs": true, "include_refs": true, "target_namespace": true,
 		"target_name": true, "owner_kind": true, "dynamic": true, "certainty": true,
 		"quality": true, "range": true,

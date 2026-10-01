@@ -1,6 +1,7 @@
 package source
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -9,6 +10,228 @@ import (
 func relationFact(kind, name, namespace string, start, end int) types.ParsedSourceFact {
 	return types.ParsedSourceFact{Kind: kind, Name: name, Namespace: namespace, Quality: "structural",
 		Range: types.SourceRange{StartByte: start, EndByte: end, StartLine: 1, EndLine: 1}}
+}
+
+func TestCorrelateBusinessFlowsAcrossRoutesInjectedServicesAndMapperStatements(t *testing.T) {
+	type flowSpec struct {
+		label, route, routeSuffix, controller, handler, serviceAPI, serviceImpl, mapper, method string
+	}
+	flows := []flowSpec{
+		{"push", "/api/schedule/push/getPushSchedule", "/push/getPushSchedule", "demo.ScheduleController", "getPushSchedule", "demo.IScheduleService", "demo.ScheduleServiceImpl", "demo.PushScheduleMapper", "getPushSchedule"},
+		{"questionnaire", "/api/questionnaire/detail", "/detail", "demo.QuestionnaireController", "getQuestionnaireDetail", "demo.IQuestionnaireService", "demo.QuestionnaireServiceImpl", "demo.QuestionnaireMapper", "getDetail"},
+	}
+	var members []SourceRelationMember
+	for index, flow := range flows {
+		base := index * 100
+		vue := SourceRelationMember{Path: "web/" + flow.label + ".vue", FileID: flow.label + "-vue", VersionID: flow.label + "-vue-v1", Facts: []types.ParsedSourceFact{
+			relationFact("api_request", flow.handler, "", base, base+8),
+		}}
+		vue.Facts[0].RoutePath, vue.Facts[0].HTTPMethod = flow.route, "GET"
+		controller := SourceRelationMember{Path: "server/" + flow.controller + ".java", FileID: flow.label + "-controller", VersionID: flow.label + "-controller-v1", Facts: []types.ParsedSourceFact{
+			relationFact("java_type", "Controller", flow.controller, base, base+4),
+			relationFact("spring_mapping", "Controller", flow.controller, base+5, base+10),
+			relationFact("spring_mapping", flow.handler, flow.controller, base+11, base+16),
+			relationFact("java_injection", "service", flow.controller, base+17, base+20),
+			relationFact("java_method", flow.handler, flow.controller, base+21, base+25),
+			relationFact("java_method_call", flow.method, flow.controller, base+26, base+30),
+		}}
+		controller.Facts[1].RoutePath = strings.TrimSuffix(flow.route, flow.routeSuffix)
+		controller.Facts[1].StatementType, controller.Facts[1].OwnerKind = "type", "type"
+		controller.Facts[2].RoutePath = flow.routeSuffix
+		controller.Facts[2].StatementType, controller.Facts[2].OwnerKind, controller.Facts[2].OwnerName = "method", "method", flow.handler
+		controller.Facts[3].TypeName = flow.serviceAPI
+		controller.Facts[5].MethodName, controller.Facts[5].Receiver, controller.Facts[5].TypeName = flow.handler, "service", flow.serviceAPI
+		contract := SourceRelationMember{Path: "server/" + flow.serviceAPI + ".java", FileID: flow.label + "-contract", VersionID: flow.label + "-contract-v1", Facts: []types.ParsedSourceFact{
+			relationFact("java_type", "Service", flow.serviceAPI, base, base+4),
+			relationFact("java_method", flow.method, flow.serviceAPI, base+5, base+10),
+		}}
+		contract.Facts[0].OwnerKind = "interface"
+		implementation := SourceRelationMember{Path: "server/" + flow.serviceImpl + ".java", FileID: flow.label + "-service", VersionID: flow.label + "-service-v1", Facts: []types.ParsedSourceFact{
+			relationFact("java_type", "ServiceImpl", flow.serviceImpl, base, base+4),
+			relationFact("java_method", flow.method, flow.serviceImpl, base+5, base+10),
+			relationFact("java_injection", "mapper", flow.serviceImpl, base+11, base+14),
+			relationFact("java_method_call", flow.method, flow.serviceImpl, base+15, base+20),
+		}}
+		implementation.Facts[0].SuperTypes = []string{flow.serviceAPI}
+		implementation.Facts[0].OwnerKind = "class"
+		implementation.Facts[2].TypeName = flow.mapper
+		implementation.Facts[3].MethodName, implementation.Facts[3].Receiver, implementation.Facts[3].TypeName = flow.method, "mapper", flow.mapper
+		mapper := SourceRelationMember{Path: "server/" + flow.mapper + ".java", FileID: flow.label + "-mapper", VersionID: flow.label + "-mapper-v1", Facts: []types.ParsedSourceFact{
+			relationFact("java_type", "Mapper", flow.mapper, base, base+4),
+			relationFact("java_method", flow.method, flow.mapper, base+5, base+10),
+			relationFact("java_mapper_method", flow.method, flow.mapper, base+11, base+16),
+		}}
+		xml := SourceRelationMember{Path: "server/" + flow.mapper + ".xml", FileID: flow.label + "-xml", VersionID: flow.label + "-xml-v1", Facts: []types.ParsedSourceFact{
+			relationFact("mybatis_mapper", "", flow.mapper, base, base+25),
+			relationFact("mybatis_statement", flow.method, flow.mapper, base+5, base+20),
+		}}
+		vue.Facts[0].Text = "GET " + flow.route
+		vue.Facts[0].Range = types.SourceRange{StartByte: base, EndByte: base + 8, StartLine: 1, EndLine: 1}
+		for _, member := range []SourceRelationMember{vue, controller, contract, implementation, mapper, xml} {
+			members = append(members, member)
+		}
+	}
+
+	relations := CorrelateSourceFacts(1, "source", "snapshot", members)
+	find := func(kind, fromPath string) *types.SourceCodeRelation {
+		t.Helper()
+		for index := range relations {
+			if relations[index].Kind == kind && relations[index].FromPath == fromPath {
+				return &relations[index]
+			}
+		}
+		return nil
+	}
+	for _, flow := range flows {
+		apiPath := "web/" + flow.label + ".vue"
+		controllerPath := "server/" + flow.controller + ".java"
+		servicePath := "server/" + flow.serviceImpl + ".java"
+		mapperPath := "server/" + flow.mapper + ".java"
+		if relation := find("http_route", apiPath); relation == nil || relation.Determinacy != "certain" || relation.ToPath != controllerPath {
+			t.Fatalf("API request did not resolve to its same-flow handler: %#v", relation)
+		}
+		if relation := find("method_call", controllerPath); relation == nil || relation.Determinacy != "certain" || relation.ToPath != "server/"+flow.serviceAPI+".java" {
+			t.Fatalf("controller did not resolve through its injected service contract: %#v", relation)
+		}
+		if relation := find("implements_method", "server/"+flow.serviceAPI+".java"); relation == nil || relation.Determinacy != "certain" || relation.ToPath != servicePath {
+			t.Fatalf("service contract did not resolve to its unique implementation: %#v", relation)
+		}
+		if relation := find("method_call", servicePath); relation == nil || relation.Determinacy != "certain" || relation.ToPath != mapperPath {
+			t.Fatalf("service did not resolve through its injected mapper: %#v", relation)
+		}
+		if relation := find("mapper_statement", mapperPath); relation == nil || relation.Determinacy != "certain" || relation.ToPath != "server/"+flow.mapper+".xml" || relation.SnapshotID != "snapshot" {
+			t.Fatalf("mapper statement was not pinned to its flow's XML member: %#v", relation)
+		}
+	}
+}
+
+func TestCorrelateFrontendPrefixAndProxyOnlyProducesUncertainRouteCandidate(t *testing.T) {
+	request := relationFact("api_request", "detail", "", 1, 10)
+	request.RoutePath, request.HTTPMethod = "/questionnaire/detail.do", "GET"
+	prefix := relationFact("api_prefix", "/apiroot", "", 1, 12)
+	prefix.RoutePath, prefix.Certainty = "/apiroot", "uncertain"
+	proxy := relationFact("api_proxy", "/api", "", 1, 70)
+	proxy.RoutePath, proxy.TargetName, proxy.Namespace, proxy.Certainty = "/api", "^/apiroot", "", "certain"
+	controllerType := relationFact("java_type", "Controller", "demo.QuestionnaireController", 1, 5)
+	controllerType.OwnerKind = "class"
+	classMapping := relationFact("spring_mapping", "Controller", "demo.QuestionnaireController", 6, 15)
+	classMapping.RoutePath, classMapping.OwnerKind, classMapping.StatementType = "/api", "type", "type"
+	handler := relationFact("spring_mapping", "detail", "demo.QuestionnaireController", 16, 30)
+	handler.RoutePath, handler.OwnerKind, handler.OwnerName, handler.HTTPMethod = "/questionnaire/detail", "method", "detail", "GET"
+	members := []SourceRelationMember{
+		{Path: "web/detail.vue", FileID: "request-file", VersionID: "request-v1", Facts: []types.ParsedSourceFact{request}},
+		{Path: "web/interceptor.js", FileID: "prefix-file", VersionID: "prefix-v1", Facts: []types.ParsedSourceFact{prefix}},
+		{Path: "web/config.js", FileID: "proxy-file", VersionID: "proxy-v1", Facts: []types.ParsedSourceFact{proxy}},
+		{Path: "server/QuestionnaireController.java", FileID: "controller-file", VersionID: "controller-v1", Facts: []types.ParsedSourceFact{controllerType, classMapping, handler}},
+	}
+	findRoute := func(values []SourceRelationMember) *types.SourceCodeRelation {
+		t.Helper()
+		for _, relation := range CorrelateSourceFacts(1, "source", "snapshot", values) {
+			if relation.Kind == "http_route" {
+				return &relation
+			}
+		}
+		return nil
+	}
+
+	relation := findRoute(members)
+	if relation == nil || relation.Determinacy != "uncertain" || relation.ToFileID != "" || relation.ToVersionID != "" ||
+		relation.ToPath != "" || relation.ToKey == "" || !strings.Contains(relation.ToKey, "/api/questionnaire/detail") ||
+		relation.ResolutionReason != "frontend prefix or proxy transformation is conditional or unverified" {
+		t.Fatalf("conditional frontend rewrite became a navigable route or lost its candidate: %#v", relation)
+	}
+
+	// If the prefix has no corresponding proxy rewrite, even a backend path
+	// equal to the raw call literal must not be linked as a direct route.
+	withoutProxy := append([]SourceRelationMember(nil), members[:2]...)
+	withoutProxy = append(withoutProxy, members[3])
+	withoutProxy[2].Facts = []types.ParsedSourceFact{controllerType, handler}
+	if relation := findRoute(withoutProxy); relation != nil {
+		t.Fatalf("request bypassed incomplete prefix/proxy evidence: %#v", relation)
+	}
+
+	mismatchedProxy := proxy
+	mismatchedProxy.TargetName = "^/other"
+	mismatched := append([]SourceRelationMember(nil), members...)
+	mismatched[2].Facts = []types.ParsedSourceFact{mismatchedProxy}
+	mismatched[3].Facts = []types.ParsedSourceFact{controllerType, handler}
+	if relation := findRoute(mismatched); relation != nil {
+		t.Fatalf("request bypassed mismatched prefix rewrite evidence: %#v", relation)
+	}
+}
+
+func TestCorrelateStaticRouteWithUnresolvedSpringIdentityIsNotNavigable(t *testing.T) {
+	request := relationFact("api_request", "detail", "", 1, 10)
+	request.RoutePath, request.HTTPMethod = "/api/detail", "GET"
+	controllerType := relationFact("java_type", "Controller", "demo.DetailController", 1, 5)
+	controllerType.OwnerKind = "class"
+	classMapping := relationFact("spring_mapping", "Controller", "demo.DetailController", 6, 15)
+	classMapping.RoutePath, classMapping.OwnerKind, classMapping.StatementType = "/api", "type", "type"
+	classMapping.Dynamic, classMapping.Certainty = true, "uncertain"
+	handler := relationFact("spring_mapping", "detail", "demo.DetailController", 16, 30)
+	handler.RoutePath, handler.OwnerKind, handler.OwnerName, handler.HTTPMethod = "/detail", "method", "detail", "GET"
+	relations := CorrelateSourceFacts(1, "source", "snapshot", []SourceRelationMember{
+		{Path: "web/detail.js", FileID: "request-file", VersionID: "request-v1", Facts: []types.ParsedSourceFact{request}},
+		{Path: "server/DetailController.java", FileID: "controller-file", VersionID: "controller-v1", Facts: []types.ParsedSourceFact{controllerType, classMapping, handler}},
+	})
+	for _, relation := range relations {
+		if relation.Kind != "http_route" {
+			continue
+		}
+		if relation.Determinacy != "uncertain" || relation.ToFileID != "" || relation.ToVersionID != "" ||
+			relation.ToPath != "" || relation.ToKey == "" || relation.ResolutionReason == "" {
+			t.Fatalf("unresolved Spring identity became a navigable route: %#v", relation)
+		}
+		return
+	}
+	t.Fatal("literal Spring route with unresolved mapping identity was discarded")
+}
+
+func TestCorrelateResolvesWildcardImportedTypesOnlyWhenSnapshotCandidateIsUnique(t *testing.T) {
+	service := SourceRelationMember{Path: "service/Service.java", FileID: "service-file", VersionID: "service-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_import", "demo.dao.*", "demo.service", 1, 15),
+		relationFact("java_import", "demo.model.*", "demo.service", 16, 30),
+		relationFact("java_injection", "mapper", "demo.service.Service", 31, 40),
+		relationFact("java_method", "run", "demo.service.Service", 41, 50),
+		relationFact("java_method_call", "find", "demo.service.Service", 51, 60),
+	}}
+	service.Facts[2].TargetName, service.Facts[2].Certainty, service.Facts[2].Dynamic = "Mapper", "uncertain", true
+	service.Facts[4].TargetName, service.Facts[4].Certainty, service.Facts[4].Dynamic = "Mapper", "uncertain", true
+	service.Facts[4].Receiver, service.Facts[4].MethodName = "mapper", "run"
+	mapper := SourceRelationMember{Path: "dao/Mapper.java", FileID: "mapper-file", VersionID: "mapper-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Mapper", "demo.dao.Mapper", 1, 8),
+		relationFact("java_method", "find", "demo.dao.Mapper", 9, 18),
+	}}
+	other := SourceRelationMember{Path: "model/Other.java", FileID: "other-file", VersionID: "other-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Other", "demo.model.Other", 1, 8),
+	}}
+	findRelations := func(members ...SourceRelationMember) map[string]types.SourceCodeRelation {
+		t.Helper()
+		result := map[string]types.SourceCodeRelation{}
+		for _, relation := range CorrelateSourceFacts(1, "source", "snapshot", members) {
+			result[relation.Kind] = relation
+		}
+		return result
+	}
+
+	unique := findRelations(service, mapper, other)
+	if relation := unique["dependency_injection"]; relation.Determinacy != "certain" || relation.ToFileID != mapper.FileID || relation.ToVersionID != mapper.VersionID {
+		t.Fatalf("unique imported snapshot type was not resolved: %#v", relation)
+	}
+	if relation := unique["method_call"]; relation.Determinacy != "certain" || relation.ToFileID != mapper.FileID || relation.ToVersionID != mapper.VersionID {
+		t.Fatalf("call through a uniquely imported snapshot type was not resolved: %#v", relation)
+	}
+
+	ambiguousMapper := SourceRelationMember{Path: "model/Mapper.java", FileID: "model-mapper-file", VersionID: "model-mapper-v1", Facts: []types.ParsedSourceFact{
+		relationFact("java_type", "Mapper", "demo.model.Mapper", 1, 8),
+		relationFact("java_method", "find", "demo.model.Mapper", 9, 18),
+	}}
+	ambiguous := findRelations(service, mapper, ambiguousMapper)
+	for _, kind := range []string{"dependency_injection", "method_call"} {
+		if relation := ambiguous[kind]; relation.Determinacy != "uncertain" || relation.ToFileID != "" || relation.ToVersionID != "" || relation.ResolutionReason == "" {
+			t.Fatalf("ambiguous wildcard type %s became navigable: %#v", kind, relation)
+		}
+	}
 }
 
 func TestCorrelateSourceFactsBindsOnlyUniqueSameSnapshotMembers(t *testing.T) {
