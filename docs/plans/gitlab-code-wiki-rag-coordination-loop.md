@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 原 T06，现 T18 修订证据与引用回收 | 01a0ebfe-56df-7223-8644-ca717bd658bd | C:/Users/28211/.codex/worktrees/b0df/WeKnora；codex/t18-revision-evidence-gc |
 | 原 T09，现 T11 业务调用链 | 01a0ebfe-8153-70e0-898e-2b7ffa91eaad | C:/Users/28211/.codex/worktrees/a8ea/WeKnora；codex/t11-business-chain |
-| 原 T10，现 T13 代码检索排序 | 01a0ebfe-da20-71d2-a963-fa965754b497 | C:/Users/28211/.codex/worktrees/2119/WeKnora；codex/t13-code-retrieval |
+| 原 T10，现 T17 Wiki 持久预算与生成恢复 | 01a0ebfe-da20-71d2-a963-fa965754b497 | C:/Users/28211/.codex/worktrees/2119/WeKnora；codex/t17-wiki-attempt-recovery |
 
 ## 通信规则
 
@@ -152,3 +152,7 @@ T18/T17已协调exact(attempt_id,file_version_id,snapshot_id)耐久原文owner�
 2026-10-01 T13新干净0135cbd976cccec9396746bbba220cf239677161主动READY转发被应用拒绝，根已从完成记录收取，无需用户人工转告或重复绕过发送。批准basefa0dcad7两独立Sol/high正式复审Standards硬0/判断2P3，Spec0；根四PG49.504s及原cap反例PASS9.17s。合并仅fixture110/111加载冲突，保留按序两项，合并后Hook/预算/terms三PG PASS36.423s、Go三个实际包通过。集成ee05f5a9通过，详见t13-0135cbd9-review.md，允许发布/关#21，累计14/22；发布后原T10对话接续T17/#25，base为本轮验收发布HEAD、migration113（112属T18），先给根持久预算/owner/CAS提案再实现。
 
 T11原60代码审查已过，但实际Flow A发现多wildcard时implements原始声明丢失/接口签名unresolved；根已要求继续明确实现到Mapper后端audit，声明即使无法限定也保留fact+uncertainty原因，不把snapshot唯一当完整classpath确定性。必要最小producer修复先提案，不自行改冻结60或把missing伪绿。T18继续实际并发pruning/历史pin/共享owner/回滚PG，尚无新READY。最新游标T18 `82e187da-afe3-4f59-9c78-3b4417471064:8`、T11 `ede37483-473c-44e0-92a2-6b249170c218:8`、T13 `12e65bc3-bae2-46ea-aadc-5cd9312d2227:6`（其后root已收完成并开始review，无需重复审该SHA）。
+
+最新权威：T13最终验收发布 `f040e5e838cfc1d755d332780882758f65610369` 已成功push，#21评论5931892544并实际CLOSED，累计14/22。原T10已明确收到REVIEW_PASSED及T17/#25正式派发，固定base同f040e5e8、分支codex/t17-wiki-attempt-recovery、113预留；#22/#14依赖已实际CLOSED。先给root预算固定上限、unknownusagereservation、epoch/owner、pageCAS有界合并及真实测试提案后实现。T18沿exact attempt ID/raw owner，T17复用其接口负责恢复/调用预算，不改112或重造GC；两worker公共source_wiki.go边界已直接协调。
+
+最新快照三者active：T18 `82e187da-afe3-4f59-9c78-3b4417471064:9`，T11 `ede37483-473c-44e0-92a2-6b249170c218:9`，T17 `12e65bc3-bae2-46ea-aadc-5cd9312d2227:7`。T11根对确定implements原始语法保留的最小producer提案方向已送达，尚未批准功能delta；T18PG继续运行未出现新READY。不把测试进行中或没有failure算PASS，继续等待完整干净冻结结果。根本轮所有PG/Go/发布命令已收取，无遗留root测试进程。
