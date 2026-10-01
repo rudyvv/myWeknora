@@ -77,4 +77,6 @@ type SourceWikiEvidenceRef struct {
 	SourceFileID  string `gorm:"type:varchar(36)"`
 	FileVersionID string `gorm:"type:varchar(36)"`
 	SnapshotID    string `gorm:"type:varchar(36)"`
+	Path          string `gorm:"type:text"`
+	CommitSHA     string `gorm:"type:text"`
 }

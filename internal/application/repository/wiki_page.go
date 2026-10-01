@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
@@ -123,6 +124,12 @@ func (r *wikiPageRepository) UpdateWithRevision(
 	ctx context.Context, page *types.WikiPage, rev *types.WikiPageRevision,
 ) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if r.sourceWiki {
+			if err := enqueueWikiEvidenceGCCandidates(tx,
+				tx.Table("source_wiki_evidence_refs").Where("page_id=? AND revision_id IS NULL", page.ID)); err != nil {
+				return err
+			}
+		}
 		if rev != nil {
 			// An already-present (page_id, version) pair means a concurrent
 			// writer snapshotted the same version first; its copy is
@@ -237,9 +244,27 @@ func (r *wikiPageRepository) GetRevision(
 	ctx context.Context, kbID string, pageID string, version int,
 ) (*types.WikiPageRevision, error) {
 	var rev types.WikiPageRevision
-	if err := r.readDB(ctx, "wiki_page_revisions").
-		Where("knowledge_base_id = ? AND page_id = ? AND version = ?", kbID, pageID, version).
-		First(&rev).Error; err != nil {
+	load := func(db *gorm.DB) error {
+		return readWikiPageDB(ctx, db, r.sourceWiki, "wiki_page_revisions").
+			Clauses(clause.Locking{Strength: "SHARE"}).
+			Where("knowledge_base_id = ? AND page_id = ? AND version = ?", kbID, pageID, version).
+			First(&rev).Error
+	}
+	var err error
+	if r.sourceWiki {
+		err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := load(tx); err != nil {
+				return err
+			}
+			if leaseID, ok := source.ReadLeaseID(ctx); ok {
+				return pinSourceWikiEvidenceOwner(tx, ctx, leaseID, rev.PageID, &rev.ID, rev.Version)
+			}
+			return nil
+		})
+	} else {
+		err = load(r.db)
+	}
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrWikiPageNotFound
 		}
@@ -255,23 +280,45 @@ func (r *wikiPageRepository) PruneRevisions(ctx context.Context, req types.WikiR
 	if req.PageID == "" {
 		return nil
 	}
-	db := r.db.WithContext(ctx)
-	if req.KeepFromVersion > 0 && len(req.PrunableSources) > 0 {
-		if err := db.
-			Where("page_id = ? AND version < ? AND edit_source IN ?",
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if r.sourceWiki {
+			prune := tx.Model(&types.WikiPageRevision{}).Select("id").Where("page_id=?", req.PageID)
+			var soft, hard *gorm.DB
+			if req.KeepFromVersion > 0 && len(req.PrunableSources) > 0 {
+				soft = tx.Model(&types.WikiPageRevision{}).Select("id").Where("page_id=? AND version<? AND edit_source IN ?", req.PageID, req.KeepFromVersion, req.PrunableSources)
+			}
+			if req.HardKeepFromVersion > 0 {
+				hard = tx.Model(&types.WikiPageRevision{}).Select("id").Where("page_id=? AND version<?", req.PageID, req.HardKeepFromVersion)
+			}
+			if soft != nil && hard != nil {
+				prune = tx.Model(&types.WikiPageRevision{}).Select("id").Where("id IN (?) OR id IN (?)", soft, hard)
+			} else if soft != nil {
+				prune = soft
+			} else if hard != nil {
+				prune = hard
+			}
+			if soft != nil || hard != nil {
+				refs := tx.Table("source_wiki_evidence_refs wr").Where("wr.revision_id IN (?)", prune)
+				if err := enqueueWikiEvidenceGCCandidates(tx, refs); err != nil {
+					return err
+				}
+			}
+		}
+		if req.KeepFromVersion > 0 && len(req.PrunableSources) > 0 {
+			if err := tx.Where("page_id = ? AND version < ? AND edit_source IN ?",
 				req.PageID, req.KeepFromVersion, req.PrunableSources).
-			Delete(&types.WikiPageRevision{}).Error; err != nil {
-			return err
+				Delete(&types.WikiPageRevision{}).Error; err != nil {
+				return err
+			}
 		}
-	}
-	if req.HardKeepFromVersion > 0 {
-		if err := db.
-			Where("page_id = ? AND version < ?", req.PageID, req.HardKeepFromVersion).
-			Delete(&types.WikiPageRevision{}).Error; err != nil {
-			return err
+		if req.HardKeepFromVersion > 0 {
+			if err := tx.Where("page_id = ? AND version < ?", req.PageID, req.HardKeepFromVersion).
+				Delete(&types.WikiPageRevision{}).Error; err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // DeleteRevisionsByPage hard-deletes a page's whole snapshot history. Pages
@@ -282,9 +329,18 @@ func (r *wikiPageRepository) DeleteRevisionsByPage(ctx context.Context, pageID s
 	if pageID == "" {
 		return nil
 	}
-	return r.db.WithContext(ctx).
-		Where("page_id = ?", pageID).
-		Delete(&types.WikiPageRevision{}).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if r.sourceWiki {
+			refs := tx.Table("source_wiki_evidence_refs").Where("page_id=?", pageID)
+			if err := enqueueWikiEvidenceGCCandidates(tx, refs); err != nil {
+				return err
+			}
+			if err := tx.Exec("DELETE FROM source_wiki_evidence_refs WHERE page_id=?", pageID).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("page_id = ?", pageID).Delete(&types.WikiPageRevision{}).Error
+	})
 }
 
 // UpdateAutoLinkedContent persists content changes produced by the automatic
@@ -1317,7 +1373,25 @@ func (r *wikiPageRepository) DeleteFoldersByKnowledgeBaseID(
 func (r *wikiPageRepository) DeleteRevisionsByKnowledgeBaseID(
 	ctx context.Context, tenantID uint64, kbID string,
 ) error {
-	return r.deleteByTenantAndKnowledgeBase(ctx, tenantID, kbID, &types.WikiPageRevision{})
+	if kbID == "" {
+		return nil
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if r.sourceWiki {
+			refs := tx.Table("source_wiki_evidence_refs wr").Select("wr.snapshot_id").
+				Joins("JOIN wiki_pages wp ON wp.id=wr.page_id").
+				Where("wp.tenant_id=? AND wp.knowledge_base_id=?", tenantID, kbID)
+			if err := enqueueWikiEvidenceGCCandidates(tx, refs); err != nil {
+				return err
+			}
+			if err := tx.Exec(`DELETE FROM source_wiki_evidence_refs WHERE page_id IN
+				(SELECT id FROM wiki_pages WHERE tenant_id=? AND knowledge_base_id=?)`, tenantID, kbID).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
+			Delete(&types.WikiPageRevision{}).Error
+	})
 }
 
 // DeleteIssuesByKnowledgeBaseID soft-deletes all wiki page issues in a

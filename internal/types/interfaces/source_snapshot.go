@@ -9,6 +9,7 @@ import (
 // transaction on the built-in PostgreSQL index database.
 type SourceSnapshotRepository interface {
 	CheckReady(context.Context) error
+	CollectRetiredSourceVersions(context.Context, int) (int, error)
 	RelaySourcePublicationOutbox(context.Context, int) (int, error)
 	GetPublished(context.Context, uint64, string) (*types.SourceRunResult, error)
 	GetParsedArtifact(context.Context, uint64, string, string) (*types.ParsedSourceFile, error)
