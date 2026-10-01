@@ -392,10 +392,9 @@ func (s *wikiPageService) GetRevision(
 }
 
 // RevertPageToVersion rolls the page back to a stored revision by applying
-// that revision's content fields as a regular edit: the pre-revert state is
-// snapshotted, version advances, links are re-parsed. Placement (folder,
-// sort order) and provenance refs keep their current values — a revert is
-// about content, not about undoing directory moves.
+// that revision's content and provenance as a regular edit: the pre-revert
+// state is snapshotted, version advances, and links are re-parsed. Placement
+// (folder, sort order) remains current because a revert is not a directory move.
 func (s *wikiPageService) RevertPageToVersion(
 	ctx context.Context, kbID string, slug string, version int,
 ) (*types.WikiPage, error) {
@@ -424,11 +423,34 @@ func (s *wikiPageService) RevertPageToVersion(
 	target.PageType = rev.PageType
 	target.Status = rev.Status
 	target.Aliases = append(types.StringArray(nil), rev.Aliases...)
+	if rev.SourceProvenance != nil {
+		provenance := *rev.SourceProvenance
+		provenance.Evidence = append([]types.SourceWikiEvidence(nil), rev.SourceProvenance.Evidence...)
+		target.SourceProvenance = &provenance
+		// An unverified edit is never promoted based only on source membership.
+		// Previously validated revisions may become current again after a source
+		// rollback, so recompute applicability instead of blindly forcing stale.
+		if provenance.State == "ready" || provenance.State == "stale" {
+			applicable := false
+			if repo, ok := s.repo.(interfaces.WikiSourceApplicabilityRepository); ok {
+				applicable, err = repo.WikiSourceApplicable(ctx, &target)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if applicable {
+				provenance.State = "ready"
+			} else {
+				provenance.State = "stale"
+			}
+		}
+	} else {
+		target.SourceProvenance = nil
+	}
 	if rev.SourceProvenance != nil || page.SourceProvenance != nil {
 		target.SourceRefs = append(types.StringArray(nil), rev.SourceRefs...)
 		target.ChunkRefs = append(types.StringArray(nil), rev.ChunkRefs...)
 		target.PageMetadata = append(types.JSON(nil), rev.PageMetadata...)
-		target.SourceProvenance = rev.SourceProvenance
 		ctx = sourceWikiVerifiedWrite(ctx)
 	}
 

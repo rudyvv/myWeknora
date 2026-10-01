@@ -141,7 +141,17 @@ func (s *sourceWikiService) GenerateModule(ctx context.Context, req types.Source
 		attempt.UpdatedAt = time.Now()
 		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer stop()
-		if saveErr := s.db.WithContext(cleanup).Save(attempt).Error; saveErr != nil {
+		if saveErr := s.db.WithContext(cleanup).Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&types.SourceWikiAttempt{}).Where("id=? AND status='running'", attempt.ID).
+				Updates(map[string]any{"status": attempt.Status, "reason": attempt.Reason, "updated_at": attempt.UpdatedAt})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("source Wiki attempt is no longer running")
+			}
+			return repository.ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
+		}); saveErr != nil {
 			return attempt, saveErr
 		}
 		return attempt, nil
@@ -164,6 +174,27 @@ func (s *sourceWikiService) GenerateModule(ctx context.Context, req types.Source
 	attempt.SnapshotID = evidence[0].Evidence.SnapshotID
 	for _, e := range evidence {
 		attempt.EvidenceKnowledgeIDs = append(attempt.EvidenceKnowledgeIDs, e.Evidence.KnowledgeID)
+	}
+	if err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var owner types.SourceWikiAttempt
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND status='running'", attempt.ID).Take(&owner).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&types.SourceWikiAttempt{}).Where("id=? AND status='running'", attempt.ID).
+			Updates(map[string]any{"snapshot_id": attempt.SnapshotID, "evidence_knowledge_ids": attempt.EvidenceKnowledgeIDs, "updated_at": attempt.UpdatedAt})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("source Wiki attempt is no longer running")
+		}
+		all := make([]types.SourceWikiEvidence, len(evidence))
+		for i := range evidence {
+			all[i] = evidence[i].Evidence
+		}
+		return repository.RegisterSourceWikiAttemptEvidence(tx, attempt.ID, all)
+	}); err != nil {
+		return finish("cannot retain the exact source versions for this attempt")
 	}
 	prompts := make([]sourceWikiPromptEvidence, len(evidence))
 	registry := map[string]collectedWikiEvidence{}
@@ -469,8 +500,15 @@ func (s *sourceWikiService) publishCard(ctx context.Context, kb *types.Knowledge
 		if writeErr != nil {
 			return writeErr
 		}
+		var running types.SourceWikiAttempt
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND status='running'", attempt.ID).Take(&running).Error; err != nil {
+			return fmt.Errorf("source Wiki attempt is no longer running")
+		}
 		attempt.Status, attempt.Reason, attempt.UpdatedAt = "ready", "", time.Now()
-		return tx.Save(attempt).Error
+		if err := tx.Save(attempt).Error; err != nil {
+			return err
+		}
+		return repository.ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
 	})
 }
 

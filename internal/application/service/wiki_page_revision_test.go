@@ -230,3 +230,30 @@ func TestDeletePageDropsRevisionHistory(t *testing.T) {
 	require.NoError(t, db.Model(&types.WikiPageRevision{}).Where("page_id = ?", page.ID).Count(&after).Error)
 	require.Zero(t, after, "a deleted page must not leave unreachable content snapshots behind")
 }
+
+func TestOrdinaryWikiRollbackPreservesCurrentReferences(t *testing.T) {
+	ctx, h, _ := newWikiRevisionTestService(t)
+	created, err := h.svc.CreatePage(types.WithWikiEditSource(ctx, types.WikiEditSourceUser), &types.WikiPage{
+		KnowledgeBaseID: "kb-ordinary-rollback", TenantID: 1, Slug: "concept/ordinary",
+		Title: "Ordinary", PageType: types.WikiPageTypeConcept, Content: "old body",
+		SourceRefs: types.StringArray{"doc-old"}, ChunkRefs: types.StringArray{"chunk-old"},
+		PageMetadata: types.JSON(`{"current":false}`),
+	})
+	require.NoError(t, err)
+
+	edit := *created
+	edit.Content = "new body"
+	edit.SourceRefs = types.StringArray{"doc-current"}
+	edit.ChunkRefs = types.StringArray{"chunk-current"}
+	edit.PageMetadata = types.JSON(`{"current":true}`)
+	_, err = h.svc.UpdatePage(types.WithWikiEditSource(ctx, types.WikiEditSourceUser), &edit)
+	require.NoError(t, err)
+
+	restored, err := h.svc.RevertPageToVersion(ctx, created.KnowledgeBaseID, created.Slug, 1)
+	require.NoError(t, err)
+	require.Equal(t, "old body", restored.Content)
+	require.Nil(t, restored.SourceProvenance)
+	require.Equal(t, types.StringArray{"doc-current"}, restored.SourceRefs)
+	require.Equal(t, types.StringArray{"chunk-current"}, restored.ChunkRefs)
+	require.JSONEq(t, `{"current":true}`, string(restored.PageMetadata))
+}

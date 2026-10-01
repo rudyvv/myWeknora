@@ -86,6 +86,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 	s.recoverSourceTriggers(ctx, dataSources)
 	s.relaySourcePublicationOutbox(ctx)
+	s.collectRetiredSourceVersions(ctx)
 	if _, err := s.cron.AddFunc("@every 30s", func() { s.reconcileSourceTriggers(context.Background()) }); err != nil {
 		logger.Warnf(ctx, "[Scheduler] failed to register source-trigger reconciliation: %v", err)
 	}
@@ -219,6 +220,7 @@ func (s *Scheduler) recoverQueuedSourceRuns(ctx context.Context, ds *types.DataS
 
 func (s *Scheduler) reconcileSourceTriggers(ctx context.Context) {
 	s.relaySourcePublicationOutbox(ctx)
+	s.collectRetiredSourceVersions(ctx)
 	if _, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
 		// Durable retries are not conditional on cron eligibility or status.
 		s.recoverSourceTriggers(ctx, nil)
@@ -284,6 +286,20 @@ func (s *Scheduler) relaySourcePublicationOutbox(ctx context.Context) {
 	}
 	if accepted > 0 {
 		logger.Infof(ctx, "[Scheduler] accepted %d published source Wiki update(s)", accepted)
+	}
+}
+
+func (s *Scheduler) collectRetiredSourceVersions(ctx context.Context) {
+	if s.sourceSnapshots == nil {
+		return
+	}
+	collected, err := s.sourceSnapshots.CollectRetiredSourceVersions(ctx, 100)
+	if err != nil {
+		logger.Errorf(ctx, "[Scheduler] failed to collect retired source versions: %v", err)
+		return
+	}
+	if collected > 0 {
+		logger.Infof(ctx, "[Scheduler] processed %d retired source snapshot candidate(s)", collected)
 	}
 }
 

@@ -1,6 +1,6 @@
 # T18：[CodeWiki] 技术 Wiki 修订证据、回滚与引用回收
 
-已发布：[Issue #26](https://github.com/rudyvv/myWeknora/issues/26)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；未实施。
+已发布：[Issue #26](https://github.com/rudyvv/myWeknora/issues/26)；父 Spec：[Issue #8](https://github.com/rudyvv/myWeknora/issues/8)。标签 ready-for-agent；实现待审。
 
 ## What to build
 
@@ -19,3 +19,10 @@
 
 - [Issue #22 — 单模块技术 WikiPage 的生成、证据校验与范围阅读](https://github.com/rudyvv/myWeknora/issues/22)
 - [Issue #12 — 源码增删改、重命名与配置变化的完整版本更新](https://github.com/rudyvv/myWeknora/issues/12)
+
+## Retention implementation seam
+
+- `source_wiki_evidence_refs` owns exact raw versions for current pages and retained revisions. `source_read_wiki_evidence_refs` pins the exact body evidence under an authorized, expiring read lease; its copied page/revision/evidence identity and path let an already-started read finish if pruning wins afterward.
+- `source_wiki_attempt_evidence_refs` owns exact `(attempt, file version, snapshot)` selections independently of ordinary read-lease expiry. Register it transactionally after evidence collection and before model calls; transfer to page/revision refs or release it in the same transaction as a terminal attempt status.
+- Retiring a publication queues `source_snapshot_gc_candidates`. `SourceSnapshotRepository.CollectRetiredSourceVersions` is the bounded retryable collector, run at startup and by source-trigger reconciliation. It serializes with publication/read acquisition, removes old chunks/embeddings/relations/membership first, rechecks exact raw owners, and deletes raw versions/snapshot metadata only after the last owner releases. Owner-release generations wake dormant candidates without periodic owner polling, including releases racing collection; restrictive foreign keys remain the final safety fence.
+- Historical evidence reads use the revision-owned exact raw row and current authorization; they do not require old search membership, embeddings, Git cache, or remote reachability. Unbind alone does not revoke existing knowledge; actual permission revocation or explicit purge remains authoritative.
