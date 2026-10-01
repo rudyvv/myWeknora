@@ -128,3 +128,11 @@ T13 干净8cfd15cc全票双轴完：Standards硬0/判断2P3，Spec2P2；实际PG
 最新权威：T20 集成 `a1d11b956f2292290c70f08c1c18bdaa60ed8a39` 已 push；#28 实际 CLOSED，累计13/22。已向原T06执行对话送达 REVIEW_PASSED 后派发T18/#26，固定新起点同a1d11b95、分支codex/t18-revision-evidence-gc，候选migration112须先提案，T13的111保留。T18已active开始现有修订/保护owner接口映射；T13返修active；T11新干净a12b2f9b已见但尚待worker完整READY冻结确认和本地匿名真实链可复验脚本，不提前标验收。最近游标T18 a0da71ed-ed49-406c-bef8-5e9d34149090:6；T11 72cc410b-07c6-49fe-bf0c-1014db92a623:7；T13 d26eae24-5fd6-4de0-acb6-eae9b78a346f:4。root本轮所有测试会话已收取，没有遗留root测试或共享服务重启。
 
 T11 精确a12b2f9b已完成独立两轴：Standards硬1P2/判断2P3，Spec0。root真实parser facts→Go旧3反例全PASS，新同包String遮蔽java.lang反例实际FAIL（包3.704s）；见t11-a12b2f9b-review.md。该一项针对性类型绑定finding已交原worker；若其后报告同a12 READY，需告知已返修，不能重复审或集成。worker本机匿名审计脚本恢复于Temp/weknora-t11-local-flow-audit/revalidate.ps1，当前仍跑，未记完成；root已要求复用热cache与两链有界闭包。T11最近游标72cc410b-07c6-49fe-bf0c-1014db92a623:9。root新增反例所有测试会话已收取；首次临时overlay少json import已修，仅setup失败不报产品finding。
+
+2026-10-01 最新恢复协调：三个原执行对话均 active，无新增对话。T11 新干净 `60f2b0a1` 两轴复审 Standards 硬0/判断2P3、Spec代码 finding 0，但 T11 AC13 两条真实代表业务链验收仍 partial。此前全仓审计的两个随机 route 候选与全为 no_candidate 的后端不能冒充指定链验收；10分钟全仓闭包超时亦不计PASS。根已明确只围绕用户指定两链的 frontend/controller/service/interface/implementation/Mapper/table 有界闭包，真实条件改写保持 uncertain，同时独立核验后端已知链，不因前端不确定而省略后端。60代码保持冻结，功能变更先问根；不做全仓重扫或冷缓存，不发布私有业务源码/SQL。
+
+T13 干净 `0af8e564` 旧两个问题已修；新词数上限选择造成新建/回填规范化检索不一致，根真实PG反例FAIL10.46s，已交原执行对话按单一有界SQL派生函数修复，详见 t13-0af8e564-review.md。0af不集成/关票，111保留该票；不用部分PASS或行数计数替代完整词数组一致性。根本轮旧语义与scope/queryplan真实PG均通过，未扩大重测。
+
+T18 接续合同已由根批准并直接送达：固定 base `a1d11b956f2292290c70f08c1c18bdaa60ed8a39`，migration112，repository保留/回收接口优先。现有 source_wiki_evidence_refs 为 current page/retained revision 的耐久 exact file-version owner；当前发布快照、活动问答/历史阅读lease、运行中生成attempt各自为owner。历史阅读先授权，再在同事务锁定并pin exact版本，防修订并发裁剪；pin只保护寿命不授予权限。owner释放与候选入队同事务、幂等；collector有界领取、锁定并重查全部owner及限制FK，失败可重试。暂停/解绑保留知识，只有实际权限撤销或明确清除优先于pin。原始证据保留与旧索引寿命分离，若现有FK耦合需先向根提最小拆分；历史来源不能扩张当前RAG范围。rollback同时恢复正文/source refs/provenance/evidence/validation metadata，再按当前发布版本重算适用性，不一律标stale。沿用既有50自动修订/200全部修订窗口，不接T15/T16生成或T19多源清除。执行者已确认合同并active红绿实现。
+
+最新游标：T18 `a0da71ed-ed49-406c-bef8-5e9d34149090:8`；T11 `72cc410b-07c6-49fe-bf0c-1014db92a623:11`；T13 `d26eae24-5fd6-4de0-acb6-eae9b78a346f:5`。累计13/22，根审查文档仅本地保存，下一有效验收里程碑再push/评论，减少GitHub过程开销。
