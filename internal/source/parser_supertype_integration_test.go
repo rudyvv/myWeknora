@@ -94,6 +94,56 @@ func TestUnresolvedJavaSupertypeHTTPToGoConsumptionStaysNonNavigable(t *testing.
 	}
 }
 
+func TestResolvedAndUnresolvedJavaImplementationsRemainAmbiguousCandidates(t *testing.T) {
+	python := os.Getenv("SOURCE_TEST_PYTHON")
+	cache := os.Getenv("SOURCE_PARSER_CACHE")
+	if python == "" || cache == "" {
+		t.Skip("SOURCE_TEST_PYTHON and SOURCE_PARSER_CACHE are required for the real parser HTTP integration")
+	}
+	endpoint := startSupertypeParserHTTP(t, python, cache)
+	parse := func(path, content string) SourceRelationMember {
+		t.Helper()
+		parsed, err := ParseFile(context.Background(), endpoint, path, []byte(content))
+		if err != nil {
+			t.Fatalf("ParseFile(%s): %v", path, err)
+		}
+		return SourceRelationMember{Path: path, FileID: strings.ReplaceAll(path, "/", "-"),
+			VersionID: strings.ReplaceAll(path, "/", "-") + "-v1", Facts: parsed.Facts}
+	}
+
+	contract := parse("src/left/Contract.java", "package left; public interface Contract { int fetch(); }")
+	other := parse("src/right/Contract.java", "package right; public interface Contract { int fetch(); }")
+	known := parse("src/known/Known.java", "package known; import left.Contract; public class Known implements Contract { public int fetch() { return 1; } }")
+	unresolved := parse("src/unknown/Worker.java", "package unknown; import left.*; import right.*; public class Worker implements Contract { public int fetch() { return 2; } }")
+
+	relations := CorrelateSourceFacts(1, "source", "snapshot", []SourceRelationMember{contract, other, known, unresolved})
+	var knownTypeCertain bool
+	methodCandidates := map[string]types.SourceCodeRelation{}
+	for _, relation := range relations {
+		if relation.Kind == "type_supertype" && relation.FromPath == known.Path && relation.ToPath == contract.Path && relation.ToFileID != "" {
+			knownTypeCertain = relation.Determinacy == "certain"
+		}
+		if relation.Kind == "implements_method" && relation.FromPath == contract.Path {
+			if strings.HasSuffix(relation.ToKey, "Known#fetch") || strings.HasSuffix(relation.ToKey, "Worker#fetch") {
+				methodCandidates[relation.ToKey] = relation
+			}
+		}
+	}
+	if !knownTypeCertain {
+		t.Fatal("the explicitly imported Known supertype declaration should remain certain")
+	}
+	for _, candidate := range []string{"known.Known#fetch", "unknown.Worker#fetch"} {
+		relation, ok := methodCandidates[candidate]
+		if !ok {
+			t.Errorf("interface method candidate %q was dropped", candidate)
+			continue
+		}
+		if relation.Determinacy != "uncertain" || relation.ToFileID != "" || relation.ToVersionID != "" || relation.ToPath != "" || relation.ResolutionReason == "" {
+			t.Errorf("ambiguous implementation candidate %q became navigable or lost its reason: %#v", candidate, relation)
+		}
+	}
+}
+
 func startSupertypeParserHTTP(t *testing.T, python, cache string) string {
 	t.Helper()
 	_, testFile, _, ok := runtime.Caller(0)

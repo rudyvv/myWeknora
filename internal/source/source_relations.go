@@ -449,16 +449,46 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 					}
 				}
 				if len(unresolvedMethodCandidates) > 0 {
-					for _, candidate := range unresolvedMethodCandidates {
-						reason := "Java implementation is only a candidate because its supertype identity is unresolved"
-						if !method.fact.SignatureCertain || !candidate.implementation.fact.SignatureCertain {
+					seenCandidates := map[struct {
+						fileID    string
+						versionID string
+						startByte int
+						endByte   int
+					}]bool{}
+					appendUncertainCandidate := func(candidate factOwner, reason string) {
+						key := struct {
+							fileID    string
+							versionID string
+							startByte int
+							endByte   int
+						}{candidate.member.FileID, candidate.member.VersionID, candidate.fact.Range.StartByte, candidate.fact.Range.EndByte}
+						if seenCandidates[key] {
+							return
+						}
+						seenCandidates[key] = true
+						if !method.fact.SignatureCertain || !candidate.fact.SignatureCertain {
 							reason = "Java method parameter signature is unresolved"
-						} else if candidate.reference.fact.Reason != "" {
-							reason = "Java implementation candidate: " + candidate.reference.fact.Reason
 						}
 						relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "implements_method",
 							method.member, method.fact, methodFactKey(method.fact), nil,
-							methodFactKey(candidate.implementation.fact), "uncertain", reason))
+							methodFactKey(candidate.fact), "uncertain", reason))
+					}
+					for _, candidate := range unresolvedMethodCandidates {
+						reason := "Java implementation is only a candidate because its supertype identity is unresolved"
+						if candidate.reference.fact.Reason != "" {
+							reason = "Java implementation candidate: " + candidate.reference.fact.Reason
+						}
+						appendUncertainCandidate(candidate.implementation, reason)
+					}
+					for _, implementation := range implementations {
+						for _, candidate := range methods[relationLookupKey(implementation.fact.Namespace, method.fact.Name)] {
+							if candidate.fact.IsAbstract || method.fact.SignatureCertain && candidate.fact.SignatureCertain &&
+								!slices.Equal(method.fact.ParameterTypes, candidate.fact.ParameterTypes) {
+								continue
+							}
+							appendUncertainCandidate(candidate,
+								"Java implementation is not unique because an unresolved supertype candidate may implement the same contract")
+						}
 					}
 					continue
 				}
