@@ -22,3 +22,7 @@ Independent GPT-6 Sol/high axis: **0 new findings**. Producer refs describe fact
 ## Disposition
 
 Candidate passes both axes and necessary independent checks. Root may integrate and perform bounded merge validation, then publish the T15 acceptance milestone and close #23. Only after that acceptance may the original a8ea Luna/xhigh chat start T16/#24 from the accepted integration SHA. T19 remains dependent on T16.
+
+## Integration validation
+
+Root merged the complete clean candidate without conflicts as `116647828f96989082410a92de4cd35d2779dbc5`. `git diff cf3455a4 HEAD -- internal frontend migrations` was empty: integration introduced no additional application/schema changes. Bounded merged-tree checks passed: source package (4.343s), types (3.826s), selected Wiki permission/router tests (4.394s); handler compiled with no matching tests, not claimed as handler assertions. Actual merged Vue tests passed 6/6 (2.720s), and `vue-tsc --build` exited 0. Diff checking passed and the integrated tree stayed clean. Existing unresolved TDesign component stub warnings in the revision-drawer harness did not cause failures. No repeat PG run was needed for an identical application/schema tree.
