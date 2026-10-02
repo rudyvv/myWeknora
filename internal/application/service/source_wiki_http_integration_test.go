@@ -18,7 +18,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
@@ -34,6 +37,9 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	attemptLedgerMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000113_source_wiki_attempt_ledger.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.DB.Exec(string(attemptLedgerMigration)).Error)
+	batchMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(batchMigration)).Error)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Messages []struct {
@@ -69,6 +75,9 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	group.POST("/source/generate", h.GenerateSourceModule)
 	group.GET("/source/evidence", h.ReadSourceWikiEvidence)
 	group.GET("/source/attempts", h.ListSourceWikiAttempts)
+	group.GET("/source/batches", h.ListSourceWikiBatches)
+	group.GET("/source/batches/:batch_id", h.GetSourceWikiBatch)
+	group.GET("/source/coverage", h.ListSourceWikiCoverage)
 	group.GET("/pages/*slug", h.GetPage)
 	group.GET("/index", h.GetIndex)
 	group.GET("/search", h.SearchPages)
@@ -91,6 +100,37 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	page, err := wiki.GetPageBySlug(f.Ctx, f.KB.ID, response.Data.Slug)
 	require.NoError(t, err)
 	require.Len(t, page.SourceProvenance.Evidence, 2)
+	var publication types.SourcePublication
+	require.NoError(t, f.DB.Where("data_source_id = ?", f.Source.ID).Take(&publication).Error)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := &types.SourceWikiBatch{
+		ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: f.KB.ID, SourceID: f.Source.ID, SnapshotID: publication.SnapshotID,
+		SourceConfigFingerprint: strings.Repeat("a", 64), SourceUpdatedAt: f.Source.UpdatedAt,
+		ModelID: model.ID, ModelSettingsFingerprint: strings.Repeat("b", 64), ModelContextWindow: 65536,
+		MaxCompletionTokens: types.SourceWikiBatchMaxCompletionTokens, Status: "running", Phase: "skeleton",
+		MaxCalls: types.SourceWikiBatchMaxCalls, MaxTokens: types.SourceWikiBatchMaxTokens,
+		MaxElapsedMS: types.SourceWikiBatchMaxElapsed.Milliseconds(), MaxInitialTopics: types.SourceWikiBatchMaxInitialTopics,
+		SkeletonMaxCalls: types.SourceWikiBatchSkeletonMaxCalls, SkeletonMaxTokens: types.SourceWikiBatchSkeletonMaxTokens,
+		QAMaxCalls: types.SourceWikiBatchQAMaxCalls, QAMaxTokens: types.SourceWikiBatchQAMaxTokens,
+		DeadlineAt: now.Add(types.SourceWikiBatchMaxElapsed), CreatedAt: now, UpdatedAt: now,
+	}
+	batchLedger := repository.NewSourceWikiBatchLedger(f.DB)
+	require.NoError(t, batchLedger.Create(f.Ctx, batch))
+	topics := []types.SourceWikiTopic{
+		{SourceID: f.Source.ID, SnapshotID: publication.SnapshotID, TopicKey: "system", Kind: "system", Title: "System overview", Priority: 120, Status: "planned"},
+		{SourceID: f.Source.ID, SnapshotID: publication.SnapshotID, TopicKey: "module/src", Kind: "module", ModulePath: "src", Title: "src", Priority: 90, Status: "planned"},
+	}
+	require.NoError(t, batchLedger.SavePlan(f.Ctx, batch.ID, topics, now.Add(time.Second)))
+	out = invoke(http.MethodGet, "/source/coverage?source_id="+url.QueryEscape(f.Source.ID), nil)
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), `"topic_key":"module/src"`)
+	require.Contains(t, out.Body.String(), `"status":"planned"`)
+	out = invoke(http.MethodGet, "/source/batches?source_id="+url.QueryEscape(f.Source.ID), nil)
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), batch.ID)
+	out = invoke(http.MethodGet, "/source/batches/"+batch.ID+"?source_id="+url.QueryEscape(f.Source.ID), nil)
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), `"deadline_at"`)
 	query := "?slug=" + url.QueryEscape(page.Slug) + "&evidence_id=e001&version=1"
 	out = invoke(http.MethodGet, "/source/evidence"+query, nil)
 	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
@@ -104,4 +144,80 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, out.Code, out.Body.String())
 	out = invoke(http.MethodGet, "/source/evidence?slug="+url.QueryEscape(page.Slug)+"&evidence_id=e001&version=999", nil)
 	require.Equal(t, http.StatusNotFound, out.Code)
+}
+
+func TestSourceWikiBatchPreflightHTTPIsScopedAndStartPersistsBatch(t *testing.T) {
+	f := service.NewSourceIntegrationFixture(t)
+	f.Sync()
+	var providerCalls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		http.Error(w, "preflight must not dispatch", http.StatusInternalServerError)
+	}))
+	t.Cleanup(provider.Close)
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(migration)).Error)
+
+	models := service.NewModelService(repository.NewModelRepository(f.DB), repository.NewKnowledgeBaseRepository(f.DB), nil, nil, nil, nil)
+	model := &types.Model{
+		ID: uuid.NewString(), TenantID: 1, Name: "wiki-preflight-http", Type: types.ModelTypeKnowledgeQA,
+		Source: types.ModelSourceRemote, Status: types.ModelStatusActive,
+		Parameters: types.ModelParameters{BaseURL: provider.URL, Provider: "openai", InterfaceType: "openai", ContextWindow: 8192, MaxOutputTokens: 4096},
+	}
+	require.NoError(t, models.CreateModel(f.Ctx, model))
+	f.KB.SummaryModelID = model.ID
+	f.KB.IndexingStrategy.WikiEnabled = true
+	require.NoError(t, f.DB.Save(f.KB).Error)
+	wiki := service.NewWikiPageService(repository.NewWikiPageRepository(f.DB), nil, f.KBs, nil, nil)
+	generator := service.NewSourceWikiService(wiki, f.KBs, f.Knowledge, models, f.DB)
+	h := handler.NewWikiPageHandler(wiki, f.KBs, nil, nil, nil, generator)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set(types.TenantIDContextKey.String(), uint64(1))
+		c.Request = c.Request.WithContext(f.Ctx)
+		c.Next()
+	})
+	group := r.Group("/api/v1/knowledgebase/:kb_id/wiki", h.WikiReadScope)
+	group.POST("/source/batches/preflight", h.PreflightSourceWikiBatch)
+	group.POST("/source/batches/start", h.StartSourceWikiBatch)
+	path := "/api/v1/knowledgebase/" + f.KB.ID + "/wiki/source/batches/preflight?source_id=" + url.QueryEscape(f.Source.ID)
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var result struct {
+		Data types.SourceWikiBatchPreflight `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+	require.True(t, result.Data.PreflightPassed)
+	require.True(t, result.Data.StartAvailable)
+	require.Equal(t, f.Source.ID, result.Data.SourceID)
+	require.Equal(t, types.SourceWikiBatchMaxInitialTopics, result.Data.MaxInitialTopics)
+	require.NotContains(t, response.Body.String(), "source_config_fingerprint")
+	require.NotContains(t, response.Body.String(), "model_settings_fingerprint")
+	var batchCount int64
+	require.NoError(t, f.DB.Model(&types.SourceWikiBatch{}).Where("source_id = ?", f.Source.ID).Count(&batchCount).Error)
+	require.Zero(t, batchCount)
+	require.Zero(t, providerCalls.Load())
+	startPath := "/api/v1/knowledgebase/" + f.KB.ID + "/wiki/source/batches/start?source_id=" + url.QueryEscape(f.Source.ID)
+	startRequest := httptest.NewRequest(http.MethodPost, startPath, strings.NewReader(`{}`))
+	startRequest.Header.Set("Content-Type", "application/json")
+	startResponse := httptest.NewRecorder()
+	r.ServeHTTP(startResponse, startRequest)
+	require.Equal(t, http.StatusAccepted, startResponse.Code, startResponse.Body.String())
+	var started struct {
+		Data types.SourceWikiBatch `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(startResponse.Body.Bytes(), &started))
+	require.NotEmpty(t, started.Data.ID)
+	require.Equal(t, "running", started.Data.Status)
+	require.NoError(t, f.DB.Model(&types.SourceWikiBatch{}).Where("id = ?", started.Data.ID).Count(&batchCount).Error)
+	require.EqualValues(t, 1, batchCount, "HTTP start durably writes the parent before accepting the request")
+	runner, ok := generator.(interface{ StopSourceWikiBatches() })
+	require.True(t, ok)
+	t.Cleanup(runner.StopSourceWikiBatches)
 }

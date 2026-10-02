@@ -29,7 +29,9 @@ func (h *WikiPageHandler) WikiReadScope(c *gin.Context) {
 		}
 		return values
 	}
-	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: c.Param("kb_id"), SourceIDs: split("source_ids"), KnowledgeIDs: split("knowledge_ids"), TagIDs: split("tag_ids")}}
+	sourceIDs := split("source_ids")
+	sourceIDs = append(sourceIDs, split("source_id")...)
+	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: c.Param("kb_id"), SourceIDs: sourceIDs, KnowledgeIDs: split("knowledge_ids"), TagIDs: split("tag_ids")}}
 	ctx, release, err := reader.BeginWikiRead(c.Request.Context(), targets)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": err.Error()})
@@ -100,4 +102,61 @@ func (h *WikiPageHandler) ReadSourceWikiEvidence(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": file})
+}
+
+func (h *WikiPageHandler) ListSourceWikiBatches(c *gin.Context) {
+	kbID, _, err := h.validateWikiKB(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	service, ok := h.sourceWiki.(interfaces.SourceWikiBatchReadService)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source Wiki batch service unavailable"})
+		return
+	}
+	batches, err := service.ListSourceWikiBatches(c.Request.Context(), kbID, c.Query("source_id"))
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": batches})
+}
+
+func (h *WikiPageHandler) GetSourceWikiBatch(c *gin.Context) {
+	kbID, _, err := h.validateWikiKB(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	service, ok := h.sourceWiki.(interfaces.SourceWikiBatchReadService)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source Wiki batch service unavailable"})
+		return
+	}
+	batch, err := service.GetSourceWikiBatch(c.Request.Context(), kbID, c.Query("source_id"), c.Param("batch_id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "source Wiki batch is unavailable in this scope"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": batch})
+}
+
+func (h *WikiPageHandler) ListSourceWikiCoverage(c *gin.Context) {
+	kbID, _, err := h.validateWikiKB(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	service, ok := h.sourceWiki.(interfaces.SourceWikiBatchReadService)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source Wiki batch service unavailable"})
+		return
+	}
+	topics, err := service.ListSourceWikiCoverage(c.Request.Context(), kbID, c.Query("source_id"))
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": topics})
 }

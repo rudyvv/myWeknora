@@ -358,12 +358,66 @@ export function rebuildWikiLinks(kbId: string) {
 export interface SourceWikiAttempt {
  id: string; source_id: string; module_path: string; title: string; slug: string;
  status: string; reason: string; calls: number; tokens: number; repairs: number;
+ result_kind?: 'insufficient_evidence';
 }
 export function generateSourceWikiModule(kbId: string, request: { source_id: string; module_path: string; title: string }) {
  return post(`/api/v1/knowledgebase/${kbId}/wiki/source/generate`, request, { timeout: 190000 });
 }
 export function listSourceWikiAttempts(kbId: string) {
  return get(`/api/v1/knowledgebase/${kbId}/wiki/source/attempts`);
+}
+export type SourceWikiTopicStatus = 'planned' | 'ready' | 'draft' | 'failed' | 'insufficient_evidence' | 'expansion';
+export interface SourceWikiCoverageTopic {
+ source_id: string; topic_key: string; snapshot_id: string; kind: 'system' | 'module' | 'flow';
+ module_path?: string; title: string; priority: number; status: SourceWikiTopicStatus; uncertain: boolean;
+ uncertainty_reasons: string[]; batch_id?: string; attempt_id?: string; wiki_slug?: string;
+ last_ready_snapshot_id?: string; reason?: string;
+}
+export interface SourceWikiBatch {
+ id: string; source_id: string; snapshot_id: string; status: string; phase: string;
+ current_topic_key?: string; cursor: number; qa_cursor: number; publish_cursor: number; candidate_count: number; initial_count: number;
+ calls_reserved: number; tokens_reserved: number; skeleton_calls_reserved: number;
+ skeleton_tokens_reserved: number; qa_calls_reserved: number; qa_tokens_reserved: number;
+ deadline_at: string; qa_deadline_at?: string; reason?: string; created_at: string; updated_at: string; finished_at?: string;
+}
+export interface SourceWikiBatchPreflight {
+  preflight_passed: boolean; start_available: boolean; dispatch_reason?: string;
+  source_id: string; snapshot_id: string; commit_sha: string; source_updated_at: string;
+  model_id: string; model_updated_at: string; model_context_window: number; model_context_known: boolean; max_completion_tokens: number;
+ candidate_count: number; initial_count: number; expansion_count: number; module_count: number; flow_count: number;
+ initial_topics: Array<Pick<SourceWikiCoverageTopic, 'topic_key' | 'kind' | 'title' | 'priority' | 'status' | 'uncertain'> & { uncertainty_reasons?: string[] }>;
+ restart_from?: Pick<SourceWikiBatch, 'id' | 'status' | 'snapshot_id' | 'phase' | 'cursor' | 'candidate_count' | 'initial_count' | 'calls_reserved' | 'tokens_reserved'>;
+ warnings?: string[]; max_calls: number; max_tokens: number; max_elapsed_ms: number; max_initial_topics: number;
+ skeleton_max_calls: number; skeleton_max_tokens: number; qa_max_calls: number; qa_max_tokens: number;
+}
+export function listSourceWikiCoverage(kbId: string, sourceId: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/coverage?${query.toString()}`);
+}
+export function preflightSourceWikiBatch(kbId: string, sourceId: string, restartOfBatchId?: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return post(`/api/v1/knowledgebase/${kbId}/wiki/source/batches/preflight?${query.toString()}`,
+  restartOfBatchId ? { restart_of_batch_id: restartOfBatchId } : {}, { timeout: 190000 });
+}
+ export function startSourceWikiBatch(kbId: string, sourceId: string, preview?: SourceWikiBatchPreflight) {
+   const query = new URLSearchParams({ source_id: sourceId });
+   const body = preview ? {
+    restart_of_batch_id: preview.restart_from?.id,
+    expected_snapshot_id: preview.snapshot_id,
+    expected_source_updated_at: preview.source_updated_at,
+    expected_model_id: preview.model_id,
+    expected_model_updated_at: preview.model_updated_at,
+   } : {};
+   return post(`/api/v1/knowledgebase/${kbId}/wiki/source/batches/start?${query.toString()}`,
+    body, { timeout: 190000 });
+ }
+export function listSourceWikiBatches(kbId: string, sourceId: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/batches?${query.toString()}`);
+}
+export function getSourceWikiBatch(kbId: string, sourceId: string, batchId: string) {
+ const query = new URLSearchParams({ source_id: sourceId });
+ return get(`/api/v1/knowledgebase/${kbId}/wiki/source/batches/${encodeURIComponent(batchId)}?${query.toString()}`);
 }
 export function readSourceWikiEvidence(kbId: string, slug: string, evidenceId: string, version = 0) {
  const query = new URLSearchParams({ slug, evidence_id: evidenceId, version: String(version) });

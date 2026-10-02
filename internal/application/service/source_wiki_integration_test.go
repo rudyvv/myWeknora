@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,12 +43,15 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 	require.NoError(t, err)
 	require.NoError(t, f.db.Exec(string(attemptLedgerMigration)).Error)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		require.NoError(t, readErr)
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		var request struct {
 			Messages []struct {
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.NoError(t, json.Unmarshal(body, &request))
 		stage := ""
 		if len(request.Messages) > 0 {
 			stage = request.Messages[0].Content
@@ -54,6 +59,7 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 		r.Header.Set("X-Source-Wiki-Test-Stage", stage)
 		qa := stage == "source_wiki_qa"
 		if len(override) > 0 {
+			r.Body = io.NopCloser(bytes.NewReader(body))
 			override[0](w, r, qa)
 			return
 		}
@@ -81,7 +87,7 @@ func TestSourceWikiModuleGeneratesValidatedCardThroughExistingWikiTools(t *testi
 	})
 	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"})
 	require.NoError(t, err)
-	require.Equal(t, "ready", attempt.Status)
+	require.Equal(t, "ready", attempt.Status, attempt.Reason)
 	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
 	require.NoError(t, err)
 	require.Equal(t, 1, page.Version)

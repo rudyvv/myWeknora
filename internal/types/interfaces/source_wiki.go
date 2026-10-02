@@ -12,6 +12,14 @@ type SourceWikiService interface {
 	ListAttempts(context.Context, string) ([]*types.SourceWikiAttempt, error)
 	ReadEvidence(context.Context, string, string, int, string) (*types.SourceFileView, error)
 }
+
+// SourceWikiBatchExecutionService is an internal extension used only by the
+// durable batch worker; HTTP clients cannot provide its trusted topic fields.
+type SourceWikiBatchExecutionService interface {
+	GenerateTopic(context.Context, types.SourceWikiGenerateRequest) (*types.SourceWikiAttempt, error)
+	ResumeSourceWikiBatch(context.Context, string)
+	StopSourceWikiBatches()
+}
 type WikiReadService interface {
 	BeginWikiRead(context.Context, types.SearchTargets) (context.Context, func(), error)
 }
