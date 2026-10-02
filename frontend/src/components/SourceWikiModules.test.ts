@@ -49,6 +49,7 @@ test('module failure reason is visible and manual retry uses a fresh bounded att
 test('Wiki body owner opens exact evidence in the source viewer and rejects SHA substitution', async () => {
  const requests: any[] = []
  const view = component('./SourceCodeView.vue', {
+  '@/components/SourceRegionBadge.vue': { render: () => null },
   '@/api/knowledge-base': { async getSourceFile() { throw new Error('unexpected ordinary source read') } },
   '@/api/wiki': { async readSourceWikiEvidence(...args: any[]) { requests.push(args); return { data: { knowledge_id: 'file-one', file_version_id: 'version-one', commit_sha: 'a'.repeat(40), path: 'src/Service.java', repository_url: 'https://gitlab.local/team/repo', content: 'class Service {\r\n String getPushSchedule() { return "scheduled"; }\r\n}', symbols: [], encoding: 'utf-8', quality: 'structural' } } } }
  })
