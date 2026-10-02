@@ -33,12 +33,14 @@ type sourceRouteEndpoint struct {
 	methodRestricted bool
 	methodUncertain  bool
 	uncertain        bool
+	supportingFacts  []types.SourceRelationFactRef
 }
 
 type sourceRequestRoute struct {
-	path      string
-	uncertain bool
-	reason    string
+	path            string
+	uncertain       bool
+	reason          string
+	supportingFacts []types.SourceRelationFactRef
 }
 
 type mapperDocument struct {
@@ -571,10 +573,15 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			if !hasMethods {
 				continue
 			}
+			var supportingFacts []types.SourceRelationFactRef
+			if !sourceRangeCovers(fact.Range, prefix.fact.Range) {
+				supportingFacts = []types.SourceRelationFactRef{sourceRelationFactRef(sourceID, snapshotID, prefix, "spring_class_mapping")}
+			}
 			endpoints = append(endpoints, sourceRouteEndpoint{owner: mapping,
 				path:    normalizeSourceRoute(joinSourceRoute(prefix.fact.RoutePath, fact.RoutePath)),
 				methods: combinedMethods, methodRestricted: combinedRestricted, methodUncertain: combinedUncertain,
-				uncertain: prefix.fact.Dynamic || prefix.fact.Certainty == "uncertain" || fact.Dynamic || fact.Certainty == "uncertain"})
+				uncertain:       prefix.fact.Dynamic || prefix.fact.Certainty == "uncertain" || fact.Dynamic || fact.Certainty == "uncertain",
+				supportingFacts: supportingFacts})
 		}
 	}
 	for _, request := range requests {
@@ -618,7 +625,11 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 					resolvedPath := normalizeSourceRoute(joinSourceRoute(proxyFact.RoutePath,
 						joinSourceRoute(proxyFact.Namespace, remainder)))
 					requestRoutes = append(requestRoutes, sourceRequestRoute{path: resolvedPath, uncertain: prefixFact.Certainty != "certain",
-						reason: "frontend prefix or proxy transformation is conditional or unverified"})
+						reason: "frontend prefix or proxy transformation is conditional or unverified",
+						supportingFacts: []types.SourceRelationFactRef{
+							sourceRelationFactRef(sourceID, snapshotID, prefix, "api_prefix"),
+							sourceRelationFactRef(sourceID, snapshotID, proxy, "api_proxy"),
+						}})
 				}
 			}
 			requestRoutes = uniqueRequestRoutes(requestRoutes)
@@ -635,15 +646,19 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 				if (!exactRoute && !legacySuffix) || !methodMatches {
 					continue
 				}
-				endpoint.uncertain = endpoint.uncertain || requestRoute.uncertain || methodUncertain || (legacySuffix && !exactRoute)
-				candidates = append(candidates, endpoint)
+				candidate := endpoint
+				candidate.uncertain = endpoint.uncertain || requestRoute.uncertain || methodUncertain || (legacySuffix && !exactRoute)
+				candidate.supportingFacts = mergeSourceRelationFactRefs(endpoint.supportingFacts, requestRoute.supportingFacts)
+				candidates = append(candidates, candidate)
 			}
 		}
 		candidates = uniqueRouteEndpoints(candidates)
 		if len(candidates) == 1 && !candidates[0].uncertain {
-			relations = append(relations, sourceFactRelation(tenant, sourceID, snapshotID, "http_route",
+			relation := sourceFactRelation(tenant, sourceID, snapshotID, "http_route",
 				request.member, fact, strings.ToUpper(fact.HTTPMethod)+" "+fact.RoutePath,
-				&candidates[0].owner, springEndpointKey(candidates[0].owner.fact, candidates[0].path), "certain", ""))
+				&candidates[0].owner, springEndpointKey(candidates[0].owner.fact, candidates[0].path), "certain", "")
+			setSourceRelationFactRefs(&relation, candidates[0].supportingFacts)
+			relations = append(relations, relation)
 			continue
 		}
 		if len(candidates) > 0 {
@@ -656,6 +671,11 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			relation := sourceFactRelation(tenant, sourceID, snapshotID, "http_route", request.member, fact,
 				strings.ToUpper(fact.HTTPMethod)+" "+fact.RoutePath, nil, "", "uncertain", reason)
 			relation.ToKey = springEndpointKey(candidates[0].owner.fact, candidates[0].path)
+			var supportingFacts []types.SourceRelationFactRef
+			for _, candidate := range candidates {
+				supportingFacts = mergeSourceRelationFactRefs(supportingFacts, candidate.supportingFacts)
+			}
+			setSourceRelationFactRefs(&relation, supportingFacts)
 			relations = append(relations, relation)
 		}
 	}
@@ -804,6 +824,7 @@ func uniqueRequestRoutes(routes []sourceRequestRoute) []sourceRequestRoute {
 			if unique[index].reason == "" {
 				unique[index].reason = route.reason
 			}
+			unique[index].supportingFacts = mergeSourceRelationFactRefs(unique[index].supportingFacts, route.supportingFacts)
 			continue
 		}
 		seen[key] = len(unique)
@@ -820,12 +841,72 @@ func uniqueRouteEndpoints(endpoints []sourceRouteEndpoint) []sourceRouteEndpoint
 			strings.Join(endpoint.methods, ",") + fmt.Sprint(endpoint.methodRestricted) + fmt.Sprint(endpoint.methodUncertain)
 		if index, exists := seen[key]; exists {
 			unique[index].uncertain = unique[index].uncertain || endpoint.uncertain
+			unique[index].supportingFacts = mergeSourceRelationFactRefs(unique[index].supportingFacts, endpoint.supportingFacts)
 			continue
 		}
 		seen[key] = len(unique)
 		unique = append(unique, endpoint)
 	}
 	return unique
+}
+
+func sourceRelationFactRef(sourceID, snapshotID string, owner factOwner, role string) types.SourceRelationFactRef {
+	return types.SourceRelationFactRef{DataSourceID: sourceID, SnapshotID: snapshotID,
+		FileID: owner.member.FileID, FileVersionID: owner.member.VersionID, Path: owner.member.Path,
+		Kind: owner.fact.Kind, Role: role, Quality: owner.fact.Quality, Range: owner.fact.Range}
+}
+
+func sourceRangeCovers(outer, inner types.SourceRange) bool {
+	return outer.StartByte <= inner.StartByte && outer.EndByte >= inner.EndByte &&
+		outer.StartLine <= inner.StartLine && outer.EndLine >= inner.EndLine
+}
+
+func mergeSourceRelationFactRefs(existing, incoming []types.SourceRelationFactRef) []types.SourceRelationFactRef {
+	if len(incoming) == 0 {
+		return existing
+	}
+	seen := make(map[types.SourceRelationFactRef]bool, len(existing)+len(incoming))
+	merged := make([]types.SourceRelationFactRef, 0, len(existing)+len(incoming))
+	for _, ref := range append(append([]types.SourceRelationFactRef(nil), existing...), incoming...) {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		merged = append(merged, ref)
+	}
+	return merged
+}
+
+func setSourceRelationFactRefs(relation *types.SourceCodeRelation, refs []types.SourceRelationFactRef) {
+	if relation == nil || len(refs) == 0 {
+		return
+	}
+	ordered := append([]types.SourceRelationFactRef(nil), refs...)
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		for _, field := range [][2]string{
+			{a.Role, b.Role}, {a.DataSourceID, b.DataSourceID}, {a.SnapshotID, b.SnapshotID},
+			{a.FileID, b.FileID}, {a.FileVersionID, b.FileVersionID}, {a.Path, b.Path},
+			{a.Kind, b.Kind}, {a.Quality, b.Quality},
+		} {
+			if field[0] != field[1] {
+				return field[0] < field[1]
+			}
+		}
+		for _, field := range [][2]int{
+			{a.Range.StartByte, b.Range.StartByte}, {a.Range.EndByte, b.Range.EndByte},
+			{a.Range.StartLine, b.Range.StartLine}, {a.Range.EndLine, b.Range.EndLine},
+		} {
+			if field[0] != field[1] {
+				return field[0] < field[1]
+			}
+		}
+		return false
+	})
+	encoded, err := json.Marshal(ordered)
+	if err == nil {
+		relation.Context = types.JSON(encoded)
+	}
 }
 
 func flattenFactOwners(values map[string][]factOwner) []factOwner {

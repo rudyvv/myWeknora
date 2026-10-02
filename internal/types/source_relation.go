@@ -2,6 +2,23 @@ package types
 
 import "time"
 
+// SourceRelationFactRef identifies an immutable parsed fact that causally
+// contributed to a source relation. It deliberately carries identity and
+// coordinates, not source text; the enclosing relation binds it to a source
+// snapshot and the repeated IDs allow readers to reject copied cross-snapshot
+// context.
+type SourceRelationFactRef struct {
+	DataSourceID  string      `json:"data_source_id"`
+	SnapshotID    string      `json:"snapshot_id"`
+	FileID        string      `json:"file_id"`
+	FileVersionID string      `json:"file_version_id"`
+	Path          string      `json:"path"`
+	Kind          string      `json:"kind"`
+	Role          string      `json:"role"`
+	Quality       string      `json:"quality"`
+	Range         SourceRange `json:"range"`
+}
+
 // SourceCodeRelation is an immutable, snapshot-scoped static edge. Ranges are
 // JSONB so the relation keeps the same byte/line contract as SourceEvidence;
 // no relation is valid without the source snapshot and source version IDs.
