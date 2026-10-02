@@ -101,12 +101,16 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 		return nil, apperrors.NewBadRequestError("Wiki model context window must fit the bounded prompt and completion budgets")
 	}
 
-	files, relations, err := repository.LoadSourceWikiSkeletonEvidence(ctx, s.db, kb.TenantID, kb.ID, sourceID, snapshot.ID)
+	skeletonSnapshot, err := repository.LoadSourceWikiSkeletonSnapshot(ctx, s.db, kb.TenantID, kb.ID, sourceID, snapshot.ID)
 	if err != nil {
 		return nil, err
 	}
-	skeletonFiles := make([]sourceWikiSkeletonFile, len(files))
-	for i, file := range files {
+	relations, err := s.resolveSourceWikiRelations(ctx, kb.TenantID, kb.ID, sourceID, snapshot.ID, skeletonSnapshot, skeletonSnapshot.Relations)
+	if err != nil {
+		return nil, err
+	}
+	skeletonFiles := make([]sourceWikiSkeletonFile, len(skeletonSnapshot.Files))
+	for i, file := range skeletonSnapshot.Files {
 		skeletonFiles[i] = sourceWikiSkeletonFile{Path: file.Path, Generated: file.Generated, Facts: file.Facts}
 	}
 	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{

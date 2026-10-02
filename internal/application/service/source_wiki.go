@@ -71,6 +71,24 @@ func sourceWikiFlowEvidenceRanges(relations []types.SourceCodeRelation, sourceID
 		} else if !sourceWikiFlowHasNoTargetRange(relation.ToRange) {
 			return nil, fmt.Errorf("flow relation has a target range without an exact source endpoint")
 		}
+		if relation.Kind == "http_route" && len(relation.Context) > 0 {
+			var refs []types.SourceRelationFactRef
+			if err := json.Unmarshal(relation.Context, &refs); err != nil || refs == nil {
+				return nil, fmt.Errorf("HTTP route relation fact references are invalid")
+			}
+			for _, ref := range refs {
+				if ref.DataSourceID != sourceID || ref.SnapshotID != snapshotID {
+					return nil, fmt.Errorf("HTTP route relation fact reference crosses the fixed source snapshot")
+				}
+				rawRange, err := json.Marshal(ref.Range)
+				if err != nil {
+					return nil, fmt.Errorf("HTTP route relation fact range is invalid")
+				}
+				if err := addEndpoint(ref.FileID, ref.FileVersionID, ref.Path, types.JSON(rawRange)); err != nil {
+					return nil, fmt.Errorf("HTTP route relation fact reference is incomplete: %w", err)
+				}
+			}
+		}
 	}
 	return targets, nil
 }
@@ -154,13 +172,14 @@ func sourceWikiRangeForBytes(raw []byte, start, end int) types.SourceRange {
 }
 
 type sourceWikiService struct {
-	wiki      interfaces.WikiPageService
-	kb        interfaces.KnowledgeBaseService
-	knowledge interfaces.KnowledgeService
-	models    interfaces.ModelService
-	db        *gorm.DB
-	batchMu   sync.Mutex
-	batchWork map[string]sourceWikiBatchWorker
+	wiki          interfaces.WikiPageService
+	kb            interfaces.KnowledgeBaseService
+	knowledge     interfaces.KnowledgeService
+	models        interfaces.ModelService
+	db            *gorm.DB
+	batchMu       sync.Mutex
+	batchWork     map[string]sourceWikiBatchWorker
+	relationFacts sourceWikiRelationFactResolverCache
 }
 
 func NewSourceWikiService(wiki interfaces.WikiPageService, kb interfaces.KnowledgeBaseService, knowledge interfaces.KnowledgeService, models interfaces.ModelService, db *gorm.DB) interfaces.SourceWikiService {
@@ -233,9 +252,12 @@ func (s *sourceWikiService) collectTopicEvidence(ctx context.Context, kbID strin
 	var flowTargets map[sourceWikiFlowEvidenceTarget][]types.SourceRange
 	q := s.db.WithContext(ctx).Table("source_snapshot_members sm").Select("sm.*").
 		Joins("JOIN source_snapshots ss ON ss.id=sm.snapshot_id AND ss.data_source_id=? AND ss.knowledge_base_id=? AND ss.state='published'", attempt.SourceID, kbID).
-		Where("sm.status='parsed' AND NOT sm.generated").
+		Where("sm.status='parsed'").
 		Where("sm.snapshot_id = ?", attempt.SnapshotID).
 		Where(source.SnapshotSQL(ctx, "sm.snapshot_id", "ss.data_source_id", "sm.source_file_id"))
+	if attempt.TopicKind != "flow" {
+		q = q.Where("NOT sm.generated")
+	}
 	if attempt.TopicKind == "module" || attempt.TopicKind == "" {
 		q = q.Where("sm.path LIKE ? ESCAPE '!'", strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(attempt.ModulePath)+"/%")
 	} else if attempt.TopicKind == "flow" {
@@ -250,7 +272,19 @@ func (s *sourceWikiService) collectTopicEvidence(ctx context.Context, kbID strin
 		if err := json.Unmarshal(coverage.Relations, &relations); err != nil {
 			return nil, fmt.Errorf("planned flow relations are invalid")
 		}
-		var err error
+		tenantID := attempt.TenantID
+		if tenantID == 0 {
+			var snapshot types.SourceSnapshot
+			if err := s.db.WithContext(ctx).Where("id = ? AND data_source_id = ? AND knowledge_base_id = ? AND state = 'published'",
+				attempt.SnapshotID, attempt.SourceID, kbID).Take(&snapshot).Error; err != nil {
+				return nil, fmt.Errorf("flow evidence snapshot identity is unavailable")
+			}
+			tenantID = snapshot.TenantID
+		}
+		relations, err := s.resolveSourceWikiRelations(ctx, tenantID, kbID, attempt.SourceID, attempt.SnapshotID, nil, relations)
+		if err != nil {
+			return nil, fmt.Errorf("planned flow relation facts cannot be verified")
+		}
 		flowTargets, err = sourceWikiFlowEvidenceRanges(relations, attempt.SourceID, attempt.SnapshotID)
 		if err != nil {
 			return nil, err

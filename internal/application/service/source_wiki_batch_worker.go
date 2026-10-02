@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -564,6 +565,10 @@ func (s *sourceWikiService) sourceWikiBatchConsistencyCard(ctx context.Context, 
 			return nil, fmt.Errorf("planned topic relations are invalid")
 		}
 	}
+	relations, err := s.resolveSourceWikiRelations(ctx, batch.TenantID, batch.KnowledgeBaseID, batch.SourceID, batch.SnapshotID, nil, relations)
+	if err != nil {
+		return nil, fmt.Errorf("planned topic relations lack verifiable exact source-fact references")
+	}
 	identity := map[string]any{
 		"topic_key": topic.TopicKey, "topic_kind": topic.Kind, "module_path": topic.ModulePath,
 		"snapshot_id": topic.SnapshotID, "priority": topic.Priority, "title": topic.Title,
@@ -586,13 +591,41 @@ func (s *sourceWikiService) sourceWikiBatchConsistencyCard(ctx context.Context, 
 			if err := json.Unmarshal(attempt.Checkpoint, &checkpoint); err != nil || len(checkpoint.Evidence) == 0 {
 				return nil, fmt.Errorf("batch candidate evidence checkpoint is invalid")
 			}
+			checkpointRelations, err := s.resolveSourceWikiRelations(ctx, batch.TenantID, batch.KnowledgeBaseID, batch.SourceID, batch.SnapshotID, nil, checkpoint.Relations)
+			if err != nil {
+				return nil, fmt.Errorf("batch candidate relation facts cannot be verified")
+			}
+			plannedRelationsJSON, _ := json.Marshal(relations)
+			checkpointRelationsJSON, _ := json.Marshal(checkpointRelations)
+			if string(plannedRelationsJSON) != string(checkpointRelationsJSON) {
+				return nil, repository.ErrSourceWikiBatchInvalidState
+			}
+			flowDiagram := checkpoint.FlowDiagram
+			if topic.Kind == "flow" {
+				evidenceRecords := make([]types.SourceWikiEvidence, 0, len(checkpoint.Evidence))
+				for _, item := range checkpoint.Evidence {
+					evidenceRecords = append(evidenceRecords, item.Evidence)
+				}
+				flowDiagram, err = BuildSourceWikiFlowDiagram(checkpointRelations, evidenceRecords)
+				if err != nil {
+					return nil, fmt.Errorf("batch candidate flow diagram cannot be verified against its exact evidence")
+				}
+				if err := sourceWikiValidateDiagramFactEvidence(checkpointRelations, evidenceRecords, flowDiagram); err != nil {
+					return nil, fmt.Errorf("batch candidate flow diagram omits exact referenced fact evidence")
+				}
+				expectedDiagramJSON, _ := json.Marshal(flowDiagram)
+				storedDiagramJSON, _ := json.Marshal(checkpoint.FlowDiagram)
+				if !checkpoint.FlowDiagramBuilt || !bytes.Equal(expectedDiagramJSON, storedDiagramJSON) {
+					return nil, repository.ErrSourceWikiBatchInvalidState
+				}
+			}
 			evidence := make([]map[string]any, 0, len(checkpoint.Evidence))
 			for _, item := range checkpoint.Evidence {
 				evidence = append(evidence, map[string]any{"record": item.Evidence, "text": item.Text})
 			}
-			return map[string]any{"identity": identity, "draft": draft, "evidence": evidence, "relations": checkpoint.Relations, "flow_diagram": map[string]any{
-				"markdown": checkpoint.FlowDiagram.Markdown, "evidence_ids": checkpoint.FlowDiagram.EvidenceIDs,
-				"uncertain": checkpoint.FlowDiagram.Uncertain,
+			return map[string]any{"identity": identity, "draft": draft, "evidence": evidence, "relations": checkpointRelations, "flow_diagram": map[string]any{
+				"markdown": flowDiagram.Markdown, "evidence_ids": flowDiagram.EvidenceIDs,
+				"uncertain": flowDiagram.Uncertain,
 			}}, nil
 		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
@@ -609,9 +642,22 @@ func (s *sourceWikiService) sourceWikiBatchConsistencyCard(ctx context.Context, 
 		page.SourceProvenance.ApplicableSnapshotID != batch.SnapshotID || page.SourceProvenance.State != "ready" {
 		return nil, repository.ErrSourceWikiBatchInvalidState
 	}
-	return map[string]any{"identity": identity, "existing_ready_page": map[string]any{
+	readyPage := map[string]any{
 		"title": page.Title, "summary": page.Summary, "content": page.Content, "evidence": page.SourceProvenance.Evidence,
-	}}, nil
+	}
+	if topic.Kind == "flow" {
+		diagram, err := BuildSourceWikiFlowDiagram(relations, page.SourceProvenance.Evidence)
+		if err != nil {
+			return nil, fmt.Errorf("existing flow page diagram cannot be verified against its exact evidence")
+		}
+		if err := sourceWikiValidateDiagramFactEvidence(relations, page.SourceProvenance.Evidence, diagram); err != nil {
+			return nil, fmt.Errorf("existing flow page omits exact referenced fact evidence")
+		}
+		readyPage["flow_diagram"] = map[string]any{
+			"markdown": diagram.Markdown, "evidence_ids": diagram.EvidenceIDs, "uncertain": diagram.Uncertain,
+		}
+	}
+	return map[string]any{"identity": identity, "existing_ready_page": readyPage}, nil
 }
 
 func (s *sourceWikiService) processSourceWikiBatchPublish(ctx context.Context, ledger *repository.SourceWikiBatchLedger, batch *types.SourceWikiBatch) (bool, error) {

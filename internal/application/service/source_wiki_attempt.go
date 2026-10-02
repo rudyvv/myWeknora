@@ -178,13 +178,32 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			return cleanup("attempt checkpoint is invalid")
 		}
 	}
+	req.Relations, err = s.resolveSourceWikiRelations(workCtx, kb.TenantID, kb.ID, attempt.SourceID, attempt.SnapshotID, nil, req.Relations)
+	if err != nil {
+		return cleanup("planned source relations lack verifiable exact source-fact references")
+	}
 	requestedRelations, _ := json.Marshal(req.Relations)
 	if len(checkpoint.Relations) == 0 {
 		checkpoint.Relations = append([]types.SourceCodeRelation(nil), req.Relations...)
+		if len(checkpoint.Evidence) > 0 {
+			checkpoint.Evidence = nil
+			checkpoint.FlowDiagram = SourceWikiFlowDiagram{}
+			checkpoint.FlowDiagramBuilt = false
+		}
 	} else {
+		originalRelations, _ := json.Marshal(checkpoint.Relations)
+		checkpoint.Relations, err = s.resolveSourceWikiRelations(workCtx, kb.TenantID, kb.ID, attempt.SourceID, attempt.SnapshotID, nil, checkpoint.Relations)
+		if err != nil {
+			return cleanup("saved source relations lack verifiable exact source-fact references")
+		}
 		storedRelations, _ := json.Marshal(checkpoint.Relations)
 		if !bytes.Equal(storedRelations, requestedRelations) {
 			return cleanup("planned source relations changed during topic generation")
+		}
+		if !bytes.Equal(originalRelations, storedRelations) {
+			checkpoint.Evidence = nil
+			checkpoint.FlowDiagram = SourceWikiFlowDiagram{}
+			checkpoint.FlowDiagramBuilt = false
 		}
 	}
 	if len(checkpoint.Evidence) == 0 {
@@ -225,6 +244,9 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			if !knownEvidence[evidenceID] {
 				return cleanup("static flow diagram refers to unowned evidence")
 			}
+		}
+		if err = sourceWikiValidateDiagramFactEvidence(checkpoint.Relations, evidence, checkpoint.FlowDiagram); err != nil {
+			return cleanup("static flow diagram does not cite the exact referenced source facts")
 		}
 		checkpoint.FlowDiagramBuilt = true
 		if err = s.saveSourceWikiProgress(workCtx, ledger, lease, attempt, &checkpoint, attempt.Phase, attempt.Draft, attempt.Repairs); err != nil {

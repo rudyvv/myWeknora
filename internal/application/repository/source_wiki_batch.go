@@ -929,42 +929,128 @@ func (l *SourceWikiBatchLedger) CompleteBatchRevalidationCandidate(ctx context.C
 	})
 }
 
-// LoadSourceWikiSkeletonEvidence reads parser-authored facts and static
-// relations only from the requested published snapshot. Hard row bounds make
-// the local scan finite; exceeding them fails the skeleton rather than
-// silently omitting components or business flows.
+// SourceWikiSkeletonFactMember binds parser facts to one exact parsed member
+// in a published snapshot. It is deliberately repository-owned data; the
+// source relation resolver consumes the same identity without broadening the
+// files that a topic may read.
+type SourceWikiSkeletonFactMember struct {
+	FileID    string
+	VersionID string
+	Path      string
+	Generated bool
+	Facts     []types.ParsedSourceFact
+}
+
+// SourceWikiSkeletonSnapshot is a complete, bounded read of the parser facts
+// and relations used to plan source Wiki topics. Complete is true only after
+// every parsed member was returned and its path and immutable file identity
+// were verified as unique.
+type SourceWikiSkeletonSnapshot struct {
+	TenantID     uint64
+	DataSourceID string
+	SnapshotID   string
+	Complete     bool
+	Members      []SourceWikiSkeletonFactMember
+	Files        []types.SourceWikiSkeletonFile
+	Relations    []types.SourceCodeRelation
+}
+
+// LoadSourceWikiSkeletonEvidence preserves the original API for callers that
+// only need files and relations. New fact-reference consumers should use
+// LoadSourceWikiSkeletonSnapshot so they also receive exact member identities
+// and an explicit completeness result.
 func LoadSourceWikiSkeletonEvidence(ctx context.Context, db *gorm.DB, tenantID uint64, knowledgeBaseID, sourceID, snapshotID string) ([]types.SourceWikiSkeletonFile, []types.SourceCodeRelation, error) {
-	if db == nil || tenantID == 0 || knowledgeBaseID == "" || sourceID == "" || snapshotID == "" {
-		return nil, nil, fmt.Errorf("source Wiki skeleton requires a fixed source snapshot")
-	}
-	type factRow struct {
-		Path      string
-		Generated bool
-		Facts     types.JSON
-	}
-	var rows []factRow
-	err := db.WithContext(ctx).Table("source_snapshot_members sm").
-		Select("sm.path, sm.generated, sv.facts").
-		Joins("JOIN source_file_versions sv ON sv.id = sm.file_version_id AND sv.snapshot_id = sm.snapshot_id").
-		Joins("JOIN source_snapshots ss ON ss.id = sm.snapshot_id AND ss.data_source_id = ? AND ss.tenant_id = ? AND ss.knowledge_base_id = ? AND ss.state = 'published'", sourceID, tenantID, knowledgeBaseID).
-		Joins("JOIN source_publications sp ON sp.snapshot_id = ss.id AND sp.data_source_id = ss.data_source_id AND sp.tenant_id = ss.tenant_id AND sp.knowledge_base_id = ss.knowledge_base_id").
-		Where("sm.snapshot_id = ? AND sm.status = 'parsed' AND sm.file_version_id <> ''", snapshotID).
-		Order("sm.path ASC").Limit(types.SourceWikiSkeletonMaxFiles + 1).Find(&rows).Error
+	evidence, err := LoadSourceWikiSkeletonSnapshot(ctx, db, tenantID, knowledgeBaseID, sourceID, snapshotID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(rows) > types.SourceWikiSkeletonMaxFiles {
-		return nil, nil, fmt.Errorf("source inventory exceeds the %d-file skeleton scan bound", types.SourceWikiSkeletonMaxFiles)
+	return evidence.Files, evidence.Relations, nil
+}
+
+// LoadSourceWikiSkeletonSnapshot reads parser-authored facts and static
+// relations only from the requested published snapshot. Hard row bounds make
+// the local scan finite; exceeding them fails the skeleton rather than
+// silently omitting components, business flows, or fact-reference members.
+func LoadSourceWikiSkeletonSnapshot(ctx context.Context, db *gorm.DB, tenantID uint64, knowledgeBaseID, sourceID, snapshotID string) (*SourceWikiSkeletonSnapshot, error) {
+	if db == nil || tenantID == 0 || knowledgeBaseID == "" || sourceID == "" || snapshotID == "" {
+		return nil, fmt.Errorf("source Wiki skeleton requires a fixed source snapshot")
 	}
-	files := make([]types.SourceWikiSkeletonFile, 0, len(rows))
+	var publishedSnapshot types.SourceSnapshot
+	if err := db.WithContext(ctx).Where("id = ? AND data_source_id = ? AND tenant_id = ? AND knowledge_base_id = ? AND state = 'published' AND manifest_complete = TRUE",
+		snapshotID, sourceID, tenantID, knowledgeBaseID).Take(&publishedSnapshot).Error; err != nil {
+		return nil, fmt.Errorf("source Wiki skeleton snapshot is not a complete published snapshot")
+	}
+	var publication types.SourcePublication
+	if err := db.WithContext(ctx).Where("snapshot_id = ? AND data_source_id = ? AND tenant_id = ? AND knowledge_base_id = ?",
+		snapshotID, sourceID, tenantID, knowledgeBaseID).Take(&publication).Error; err != nil {
+		return nil, fmt.Errorf("source Wiki skeleton snapshot is not the published source")
+	}
+	type factRow struct {
+		Path                      string
+		SourceFileID              string
+		FileVersionID             string
+		JoinedFileID              string
+		JoinedFileTenantID        uint64
+		JoinedFileKnowledgeBaseID string
+		JoinedFileDataSourceID    string
+		JoinedSourceFileID        string
+		JoinedVersionID           string
+		Generated                 bool
+		Facts                     types.JSON
+	}
+	var rows []factRow
+	err := db.WithContext(ctx).Table("source_snapshot_members sm").
+		Joins("LEFT JOIN source_files sf ON sf.id = sm.source_file_id").
+		Joins("LEFT JOIN source_file_versions sv ON sv.id = sm.file_version_id AND sv.snapshot_id = sm.snapshot_id").
+		Select("sm.path, sm.source_file_id, sm.file_version_id, sf.id AS joined_file_id, sf.tenant_id AS joined_file_tenant_id, sf.knowledge_base_id AS joined_file_knowledge_base_id, sf.data_source_id AS joined_file_data_source_id, sv.source_file_id AS joined_source_file_id, sv.id AS joined_version_id, sm.generated, sv.facts").
+		Joins("JOIN source_snapshots ss ON ss.id = sm.snapshot_id AND ss.data_source_id = ? AND ss.tenant_id = ? AND ss.knowledge_base_id = ? AND ss.state = 'published'", sourceID, tenantID, knowledgeBaseID).
+		Joins("JOIN source_publications sp ON sp.snapshot_id = ss.id AND sp.data_source_id = ss.data_source_id AND sp.tenant_id = ss.tenant_id AND sp.knowledge_base_id = ss.knowledge_base_id").
+		Where("sm.snapshot_id = ? AND sm.status = 'parsed'", snapshotID).
+		Order("sm.path ASC").Limit(types.SourceWikiSkeletonMaxFiles + 1).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) > types.SourceWikiSkeletonMaxFiles {
+		return nil, fmt.Errorf("source inventory exceeds the %d-file skeleton scan bound", types.SourceWikiSkeletonMaxFiles)
+	}
+	snapshot := &SourceWikiSkeletonSnapshot{
+		TenantID:     tenantID,
+		DataSourceID: sourceID,
+		SnapshotID:   snapshotID,
+		Members:      make([]SourceWikiSkeletonFactMember, 0, len(rows)),
+		Files:        make([]types.SourceWikiSkeletonFile, 0, len(rows)),
+	}
+	seenPaths := make(map[string]struct{}, len(rows))
+	seenFileIDs := make(map[string]struct{}, len(rows))
+	seenVersionIDs := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
+		if row.Path == "" || row.SourceFileID == "" || row.FileVersionID == "" || row.JoinedFileID != row.SourceFileID ||
+			row.JoinedFileTenantID != tenantID || row.JoinedFileKnowledgeBaseID != knowledgeBaseID || row.JoinedFileDataSourceID != sourceID ||
+			row.JoinedSourceFileID != row.SourceFileID || row.JoinedVersionID != row.FileVersionID {
+			return nil, fmt.Errorf("parsed source snapshot member has incomplete immutable identity")
+		}
+		if _, exists := seenPaths[row.Path]; exists {
+			return nil, fmt.Errorf("parsed source snapshot contains a duplicate path")
+		}
+		if _, exists := seenFileIDs[row.SourceFileID]; exists {
+			return nil, fmt.Errorf("parsed source snapshot contains a duplicate file identity")
+		}
+		if _, exists := seenVersionIDs[row.FileVersionID]; exists {
+			return nil, fmt.Errorf("parsed source snapshot contains a duplicate file identity")
+		}
+		seenPaths[row.Path] = struct{}{}
+		seenFileIDs[row.SourceFileID] = struct{}{}
+		seenVersionIDs[row.FileVersionID] = struct{}{}
 		var facts []types.ParsedSourceFact
 		if len(row.Facts) > 0 {
 			if err := json.Unmarshal(row.Facts, &facts); err != nil {
-				return nil, nil, fmt.Errorf("parser facts for a snapshot member are invalid")
+				return nil, fmt.Errorf("parser facts for a snapshot member are invalid")
 			}
 		}
-		files = append(files, types.SourceWikiSkeletonFile{Path: row.Path, Generated: row.Generated, Facts: facts})
+		snapshot.Members = append(snapshot.Members, SourceWikiSkeletonFactMember{
+			FileID: row.SourceFileID, VersionID: row.FileVersionID, Path: row.Path, Generated: row.Generated, Facts: facts,
+		})
+		snapshot.Files = append(snapshot.Files, types.SourceWikiSkeletonFile{Path: row.Path, Generated: row.Generated, Facts: facts})
 	}
 	var relations []types.SourceCodeRelation
 	err = db.WithContext(ctx).Table("source_code_relations r").
@@ -974,12 +1060,14 @@ func LoadSourceWikiSkeletonEvidence(ctx context.Context, db *gorm.DB, tenantID u
 		Order("r.from_path ASC, r.kind ASC, r.from_key ASC, r.to_path ASC, r.to_key ASC").
 		Limit(types.SourceWikiSkeletonMaxRelations + 1).Find(&relations).Error
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if len(relations) > types.SourceWikiSkeletonMaxRelations {
-		return nil, nil, fmt.Errorf("source relations exceed the %d-edge skeleton scan bound", types.SourceWikiSkeletonMaxRelations)
+		return nil, fmt.Errorf("source relations exceed the %d-edge skeleton scan bound", types.SourceWikiSkeletonMaxRelations)
 	}
-	return files, relations, nil
+	snapshot.Relations = relations
+	snapshot.Complete = len(snapshot.Members) == len(rows) && len(snapshot.Files) == len(rows)
+	return snapshot, nil
 }
 
 func (l *SourceWikiBatchLedger) ReserveCall(ctx context.Context, req types.SourceWikiBatchReserveCallRequest) (*types.SourceWikiBatchCallReservation, error) {

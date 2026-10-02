@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
@@ -1240,4 +1242,228 @@ func TestSourceWikiFlowEvidenceCapturesLateRelationRanges(t *testing.T) {
 		BatchID: batch.ID, TopicKey: coverage.TopicKey, TopicKind: "flow", ModelContextWindow: 800, MaxCompletionTokens: 100,
 	})
 	require.ErrorContains(t, err, "complete source evidence exceeds the bounded model context")
+}
+
+func TestSourceWikiFlowEvidencePinsParticipatingCrossFileConfigurationFacts(t *testing.T) {
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"web/app/views/detail.js": []byte("http.get('/detail')\n"),
+		"web/app/api.js":          []byte("export const apiRoot = '/app'\n"),
+		"web/app/vue.config.js":   []byte("module.exports = { proxy: '/app' }\n"),
+		"web/app/unused.js":       []byte("export const unused = '/unused'\n"),
+		"web/other/vue.config.js": []byte("module.exports = { proxy: '/app' }\n"),
+		"server/Controller.java":  []byte("@RequestMapping(\"/svc\")\n@GetMapping(\"/detail\")\npublic String detail() { return \"ok\"; }\n"),
+	})
+	require.NoError(t, f.db.Exec(`UPDATE data_sources SET config = jsonb_set(config, '{settings,projects,0,paths}', '["src","web","server"]'::jsonb) WHERE id = ?`, f.ds.ID).Error)
+	require.NoError(t, f.db.Where("id = ?", f.ds.ID).Take(f.ds).Error)
+	syncSourceFixture(t, f)
+	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` })
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	var members []types.SourceSnapshotMember
+	require.NoError(t, f.db.Where("snapshot_id = ? AND status = 'parsed'", publication.SnapshotID).Find(&members).Error)
+	memberByPath := make(map[string]types.SourceSnapshotMember, len(members))
+	for _, member := range members {
+		memberByPath[member.Path] = member
+	}
+	member := func(filePath string) types.SourceSnapshotMember {
+		t.Helper()
+		found, ok := memberByPath[filePath]
+		require.True(t, ok, "fixture snapshot is missing %s", filePath)
+		require.NotEmpty(t, found.SourceFileID)
+		require.NotEmpty(t, found.FileVersionID)
+		return found
+	}
+	rangeFor := func(filePath, snippet string) types.SourceRange {
+		t.Helper()
+		raw := map[string][]byte{
+			"web/app/views/detail.js": []byte("http.get('/detail')\n"),
+			"web/app/api.js":          []byte("export const apiRoot = '/app'\n"),
+			"web/app/vue.config.js":   []byte("module.exports = { proxy: '/app' }\n"),
+			"web/app/unused.js":       []byte("export const unused = '/unused'\n"),
+			"web/other/vue.config.js": []byte("module.exports = { proxy: '/app' }\n"),
+			"server/Controller.java":  []byte("@RequestMapping(\"/svc\")\n@GetMapping(\"/detail\")\npublic String detail() { return \"ok\"; }\n"),
+		}[filePath]
+		start := bytes.Index(raw, []byte(snippet))
+		require.GreaterOrEqual(t, start, 0, "range fixture %q not found in %s", snippet, filePath)
+		end := start + len(snippet)
+		return types.SourceRange{
+			StartByte: start, EndByte: end,
+			StartLine: 1 + bytes.Count(raw[:start], []byte("\n")),
+			EndLine:   1 + bytes.Count(raw[:end-1], []byte("\n")),
+		}
+	}
+	requestMember := member("web/app/views/detail.js")
+	apiFact := types.ParsedSourceFact{Kind: "api_request", Name: "detail", RoutePath: "/detail", HTTPMethod: "GET", Quality: "structural",
+		Range: rangeFor(requestMember.Path, "http.get('/detail')")}
+	prefixMember := member("web/app/api.js")
+	foreignFileID, foreignVersionID := uuid.NewString(), uuid.NewString()
+	require.NoError(t, f.db.Create(&types.SourceFile{ID: foreignFileID, TenantID: f.kb.TenantID,
+		KnowledgeBaseID: f.kb.ID, DataSourceID: uuid.NewString(), Path: "foreign/facts.js"}).Error)
+	require.NoError(t, f.db.Create(&types.SourceFileVersion{ID: foreignVersionID, SourceFileID: foreignFileID,
+		SnapshotID: publication.SnapshotID, BlobSHA: "foreign", SHA256: strings.Repeat("f", 64), Content: []byte{},
+		Encoding: "utf-8", ParserVersion: "fixture", Quality: "structural", Symbols: types.JSON(`[]`),
+		Facts: types.JSON(`[]`), Diagnostics: types.JSON(`[]`), CreatedAt: time.Now().UTC()}).Error)
+	require.NoError(t, f.db.Table("source_snapshot_members").
+		Where("snapshot_id = ? AND path = ?", publication.SnapshotID, prefixMember.Path).
+		Updates(map[string]any{"source_file_id": foreignFileID, "file_version_id": foreignVersionID}).Error)
+	_, err = repository.LoadSourceWikiSkeletonSnapshot(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.ErrorContains(t, err, "incomplete immutable identity", "members cannot borrow an otherwise valid same-snapshot version from another source")
+	require.NoError(t, f.db.Table("source_snapshot_members").
+		Where("snapshot_id = ? AND path = ?", publication.SnapshotID, prefixMember.Path).
+		Updates(map[string]any{"source_file_id": prefixMember.SourceFileID, "file_version_id": prefixMember.FileVersionID}).Error)
+	prefixFact := types.ParsedSourceFact{Kind: "api_prefix", Name: "/app", RoutePath: "/app", Certainty: "certain", Quality: "structural",
+		Range: rangeFor(prefixMember.Path, "apiRoot = '/app'")}
+	proxyMember := member("web/app/vue.config.js")
+	proxyFact := types.ParsedSourceFact{Kind: "api_proxy", Name: "/app", RoutePath: "/svc", TargetName: "^/app", OwnerName: "web/app", Certainty: "certain", Quality: "structural",
+		Range: rangeFor(proxyMember.Path, "proxy: '/app'")}
+	unusedMember := member("web/app/unused.js")
+	unusedFact := types.ParsedSourceFact{Kind: "api_prefix", Name: "/unused", RoutePath: "/unused", Certainty: "certain", Quality: "structural",
+		Range: rangeFor(unusedMember.Path, "unused = '/unused'")}
+	siblingProxyMember := member("web/other/vue.config.js")
+	require.NoError(t, f.db.Table("source_snapshot_members").
+		Where("snapshot_id = ? AND path = ?", publication.SnapshotID, prefixMember.Path).
+		Update("file_version_id", siblingProxyMember.FileVersionID).Error)
+	_, err = repository.LoadSourceWikiSkeletonSnapshot(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.ErrorContains(t, err, "incomplete immutable identity", "a member must not borrow facts from another file's version")
+	require.NoError(t, f.db.Table("source_snapshot_members").
+		Where("snapshot_id = ? AND path = ?", publication.SnapshotID, prefixMember.Path).
+		Update("file_version_id", prefixMember.FileVersionID).Error)
+	siblingProxyFact := proxyFact
+	siblingProxyFact.OwnerName = "web/other"
+	siblingProxyFact.Range = rangeFor(siblingProxyMember.Path, "proxy: '/app'")
+	controllerMember := member("server/Controller.java")
+	classFact := types.ParsedSourceFact{Kind: "spring_mapping", Name: "Controller", Namespace: "demo.Controller", RoutePath: "/svc",
+		StatementType: "type", OwnerKind: "type", Quality: "structural", Range: rangeFor(controllerMember.Path, `@RequestMapping("/svc")`)}
+	handlerFact := types.ParsedSourceFact{Kind: "spring_mapping", Name: "detail", Namespace: "demo.Controller", RoutePath: "/detail",
+		StatementType: "method", OwnerKind: "method", OwnerName: "detail", HTTPMethod: "GET", Quality: "structural",
+		Range: rangeFor(controllerMember.Path, `@GetMapping("/detail")`)}
+	factsByVersion := map[string][]types.ParsedSourceFact{
+		requestMember.FileVersionID:      {apiFact},
+		prefixMember.FileVersionID:       {prefixFact},
+		proxyMember.FileVersionID:        {proxyFact},
+		unusedMember.FileVersionID:       {unusedFact},
+		siblingProxyMember.FileVersionID: {siblingProxyFact},
+		controllerMember.FileVersionID:   {classFact, handlerFact},
+	}
+	for versionID, facts := range factsByVersion {
+		encoded, err := json.Marshal(facts)
+		require.NoError(t, err)
+		require.NoError(t, f.db.Table("source_file_versions").Where("id = ?", versionID).Update("facts", types.JSON(encoded)).Error)
+	}
+	correlationMembers := []source.SourceRelationMember{
+		{Path: requestMember.Path, FileID: requestMember.SourceFileID, VersionID: requestMember.FileVersionID, Facts: []types.ParsedSourceFact{apiFact}},
+		{Path: prefixMember.Path, FileID: prefixMember.SourceFileID, VersionID: prefixMember.FileVersionID, Facts: []types.ParsedSourceFact{prefixFact, unusedFact}},
+		{Path: proxyMember.Path, FileID: proxyMember.SourceFileID, VersionID: proxyMember.FileVersionID, Facts: []types.ParsedSourceFact{proxyFact}},
+		{Path: siblingProxyMember.Path, FileID: siblingProxyMember.SourceFileID, VersionID: siblingProxyMember.FileVersionID, Facts: []types.ParsedSourceFact{siblingProxyFact}},
+		{Path: controllerMember.Path, FileID: controllerMember.SourceFileID, VersionID: controllerMember.FileVersionID, Facts: []types.ParsedSourceFact{classFact, handlerFact}},
+	}
+	correlated := source.CorrelateSourceFacts(f.kb.TenantID, f.ds.ID, publication.SnapshotID, correlationMembers)
+	var routeRelations []types.SourceCodeRelation
+	for _, relation := range correlated {
+		if relation.Kind == "http_route" {
+			routeRelations = append(routeRelations, relation)
+		}
+	}
+	require.Len(t, routeRelations, 1)
+	route := routeRelations[0]
+	require.Equal(t, "certain", route.Determinacy)
+	var routeRefs []types.SourceRelationFactRef
+	require.NoError(t, json.Unmarshal(route.Context, &routeRefs))
+	require.Len(t, routeRefs, 3)
+	roles := make(map[string]string, len(routeRefs))
+	for _, ref := range routeRefs {
+		roles[ref.Role] = ref.Path
+	}
+	require.Equal(t, "web/app/api.js", roles["api_prefix"])
+	require.Equal(t, "web/app/vue.config.js", roles["api_proxy"])
+	require.Equal(t, "server/Controller.java", roles["spring_class_mapping"])
+	for _, path := range roles {
+		require.NotContains(t, path, "unused")
+		require.NotContains(t, path, "web/other")
+	}
+	require.NoError(t, f.db.Where("snapshot_id = ?", publication.SnapshotID).Delete(&types.SourceCodeRelation{}).Error)
+	require.NoError(t, f.db.Create(&route).Error)
+
+	snapshotEvidence, err := repository.LoadSourceWikiSkeletonSnapshot(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.NoError(t, err)
+	require.True(t, snapshotEvidence.Complete)
+	service := generator.(*sourceWikiService)
+	resolvedRelations, err := service.resolveSourceWikiRelations(f.ctx, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID,
+		snapshotEvidence, snapshotEvidence.Relations)
+	require.NoError(t, err)
+	targets, err := sourceWikiFlowEvidenceRanges(resolvedRelations, f.ds.ID, publication.SnapshotID)
+	require.NoError(t, err)
+	require.Len(t, targets, 4, "only the request, handler, and three causal config fact files are eligible")
+	for target := range targets {
+		require.NotContains(t, target.Path, "unused")
+		require.NotContains(t, target.Path, "web/other")
+	}
+
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, now)
+	topic := types.SourceWikiTopic{SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "flow/GET /detail", Kind: "flow",
+		Title: "GET /detail", Priority: 100, Status: "planned", Relations: resolvedRelations}
+	require.NoError(t, ledger.CreateWithPlan(f.ctx, batch, []types.SourceWikiTopic{topic}, now))
+	var coverage types.SourceWikiCoverageTopic
+	require.NoError(t, f.db.Where("batch_id = ? AND topic_key = ?", batch.ID, topic.TopicKey).Take(&coverage).Error)
+	evidence, err := service.collectTopicEvidence(f.ctx, f.kb.ID, &types.SourceWikiAttempt{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID,
+		BatchID: batch.ID, TopicKey: topic.TopicKey, TopicKind: "flow", ModelContextWindow: 65536, MaxCompletionTokens: 1024,
+	})
+	require.NoError(t, err)
+	records := make([]types.SourceWikiEvidence, 0, len(evidence))
+	seenPaths := make(map[string]bool, len(evidence))
+	for _, item := range evidence {
+		records = append(records, item.Evidence)
+		seenPaths[item.Evidence.Path] = true
+	}
+	require.Len(t, records, 4)
+	for _, path := range []string{"web/app/views/detail.js", "web/app/api.js", "web/app/vue.config.js", "server/Controller.java"} {
+		require.True(t, seenPaths[path], "missing exact relation/config evidence for %s", path)
+	}
+	require.False(t, seenPaths["web/app/unused.js"])
+	require.False(t, seenPaths["web/other/vue.config.js"])
+	for _, ref := range routeRefs {
+		covered := false
+		for _, record := range records {
+			if record.DataSourceID == ref.DataSourceID && record.SnapshotID == ref.SnapshotID && record.KnowledgeID == ref.FileID &&
+				record.FileVersionID == ref.FileVersionID && record.Path == ref.Path && sourceWikiFlowRangeCovers(record.Range, ref.Range) {
+				covered = true
+				break
+			}
+		}
+		require.True(t, covered, "exact referenced config fact range was not included: %s", ref.Path)
+	}
+	diagram, err := BuildSourceWikiFlowDiagram(resolvedRelations, records)
+	require.NoError(t, err)
+	require.NotEmpty(t, diagram.Markdown, "the verified route remains renderable after exact config evidence is collected")
+	require.NoError(t, sourceWikiValidateDiagramFactEvidence(resolvedRelations, records, diagram))
+	for _, ref := range routeRefs {
+		var coveringEvidenceID string
+		for _, record := range records {
+			if record.DataSourceID == ref.DataSourceID && record.SnapshotID == ref.SnapshotID && record.KnowledgeID == ref.FileID &&
+				record.FileVersionID == ref.FileVersionID && record.Path == ref.Path && sourceWikiFlowRangeCovers(record.Range, ref.Range) {
+				coveringEvidenceID = record.ID
+				break
+			}
+		}
+		require.NotEmpty(t, coveringEvidenceID, "fact evidence must have a stable ID")
+		require.Contains(t, diagram.EvidenceIDs, coveringEvidenceID, "the diagram itself must cite every causal config fact")
+	}
+	ownerAttempt, err := service.loadOrCreateSourceWikiAttempt(f.ctx, repository.NewSourceWikiAttemptLedger(f.db), f.kb,
+		types.SourceWikiGenerateRequest{SourceID: f.ds.ID, ModulePath: "src", Title: "Cross-file flow evidence"}, "src")
+	require.NoError(t, err)
+	require.NoError(t, f.db.Transaction(func(tx *gorm.DB) error {
+		return repository.RegisterSourceWikiAttemptEvidence(tx, ownerAttempt.ID, records)
+	}))
+	t.Cleanup(func() {
+		_ = f.db.Transaction(func(tx *gorm.DB) error { return repository.ReleaseSourceWikiAttemptEvidence(tx, ownerAttempt.ID) })
+	})
+	var pinCount int64
+	require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id = ?", ownerAttempt.ID).Count(&pinCount).Error)
+	require.EqualValues(t, 4, pinCount, "exact config fact files remain pinned with the flow endpoint evidence")
 }
