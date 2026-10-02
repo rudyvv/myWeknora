@@ -21,6 +21,7 @@ var (
 	ErrSourceWikiBatchBudgetExhausted = errors.New("source Wiki batch budget exhausted")
 	ErrSourceWikiBatchInvalidState    = errors.New("invalid source Wiki batch state")
 	ErrSourceWikiBatchAlreadyActive   = errors.New("a source Wiki batch is already active")
+	ErrSourceWikiBatchQACursorChanged = errors.New("source Wiki batch QA cursor changed")
 )
 
 // SourceWikiBatchLedger owns the durable batch parent, stable topic coverage,
@@ -40,6 +41,22 @@ func (l *SourceWikiBatchLedger) Create(ctx context.Context, batch *types.SourceW
 		return fmt.Errorf("%w: invalid immutable batch target or limits", ErrSourceWikiBatchInvalidState)
 	}
 	return l.db.WithContext(ctx).Create(batch).Error
+}
+
+// CreateWithPlan binds the immutable parent and its entire server-generated
+// candidate set in one transaction. A process crash cannot leave a live batch
+// without its frozen coverage inventory, or publish a partial candidate plan.
+func (l *SourceWikiBatchLedger) CreateWithPlan(ctx context.Context, batch *types.SourceWikiBatch, topics []types.SourceWikiTopic, now time.Time) error {
+	if l == nil || l.db == nil || !validSourceWikiBatch(batch) || now.IsZero() || len(topics) == 0 {
+		return fmt.Errorf("%w: batch start requires a valid immutable parent and complete plan", ErrSourceWikiBatchInvalidState)
+	}
+	return l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		transactional := NewSourceWikiBatchLedger(tx)
+		if err := transactional.Create(ctx, batch); err != nil {
+			return err
+		}
+		return transactional.SavePlan(ctx, batch.ID, topics, now)
+	})
 }
 
 func validSourceWikiBatch(batch *types.SourceWikiBatch) bool {
@@ -122,11 +139,13 @@ func (l *SourceWikiBatchLedger) SavePlan(ctx context.Context, batchID string, to
 				SourceID: topic.SourceID, TopicKey: topic.TopicKey, SnapshotID: topic.SnapshotID,
 				Kind: topic.Kind, ModulePath: topic.ModulePath, Title: topic.Title, Priority: topic.Priority,
 				Status: topic.Status, Uncertain: topic.Uncertain, UncertaintyReasons: types.JSON(reasons), Relations: types.JSON(relations),
+				Initial: topic.Status == "planned",
 				BatchID: &batch.ID, WikiSlug: sourceWikiTopicSlug(topic), UpdatedAt: now,
 			}
 			updates := map[string]any{
 				"knowledge_base_id": row.KnowledgeBaseID, "snapshot_id": row.SnapshotID, "kind": row.Kind,
 				"module_path": row.ModulePath, "title": row.Title, "priority": row.Priority,
+				"initial":   row.Initial,
 				"status":    gorm.Expr("CASE WHEN source_wiki_topics.status = 'ready' AND source_wiki_topics.last_ready_snapshot_id = EXCLUDED.snapshot_id THEN 'ready' ELSE EXCLUDED.status END"),
 				"uncertain": row.Uncertain, "uncertainty_reasons": row.UncertaintyReasons, "relations": row.Relations,
 				"batch_id": row.BatchID, "wiki_slug": gorm.Expr("CASE WHEN source_wiki_topics.wiki_slug = '' THEN EXCLUDED.wiki_slug ELSE source_wiki_topics.wiki_slug END"),
@@ -188,6 +207,9 @@ func (l *SourceWikiBatchLedger) UpdateProgress(ctx context.Context, batchID, pha
 		if (status == "failed" || status == "expired") && reason == "" {
 			return ErrSourceWikiBatchInvalidState
 		}
+		if status == "failed" {
+			return failSourceWikiBatchInTx(tx, &batch, reason, now)
+		}
 		updates := map[string]any{
 			"phase": phase, "status": status, "cursor": cursor,
 			"current_topic_key": currentTopicKey, "reason": reason, "updated_at": now,
@@ -229,13 +251,44 @@ func expireSourceWikiBatchInTx(tx *gorm.DB, batch *types.SourceWikiBatch, now ti
 	}).Error; err != nil {
 		return err
 	}
-	if err := tx.Model(&types.SourceWikiBatchCallReservation{}).
-		Where("batch_id = ? AND outcome = 'reserved'", batch.ID).
-		Updates(map[string]any{"outcome": "unknown", "completed_at": now}).Error; err != nil {
+	if err := failRunningBatchChildrenInTx(tx, batch.ID, reason, now); err != nil {
 		return err
 	}
 	return tx.Model(&types.SourceWikiCoverageTopic{}).
 		Where("batch_id = ? AND status = 'planned'", batch.ID).
+		Updates(map[string]any{"status": "failed", "reason": reason, "updated_at": now}).Error
+}
+
+func failRunningBatchChildrenInTx(tx *gorm.DB, batchID, reason string, now time.Time) error {
+	if err := tx.Model(&types.SourceWikiAttempt{}).
+		Where("batch_id = ? AND status = 'running'", batchID).
+		Updates(map[string]any{"status": "failed", "reason": reason, "lease_owner": "", "lease_expires_at": nil, "updated_at": now}).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&types.SourceWikiAttemptCall{}).
+		Where("attempt_id IN (SELECT id FROM source_wiki_attempts WHERE batch_id = ?) AND outcome = 'reserved'", batchID).
+		Updates(map[string]any{"outcome": "unknown", "completed_at": now}).Error; err != nil {
+		return err
+	}
+	if err := tx.Exec("DELETE FROM source_wiki_attempt_evidence_refs WHERE attempt_id IN (SELECT id FROM source_wiki_attempts WHERE batch_id = ?)", batchID).Error; err != nil {
+		return err
+	}
+	return tx.Model(&types.SourceWikiBatchCallReservation{}).
+		Where("batch_id = ? AND outcome = 'reserved'", batchID).
+		Updates(map[string]any{"outcome": "unknown", "completed_at": now}).Error
+}
+
+func failSourceWikiBatchInTx(tx *gorm.DB, batch *types.SourceWikiBatch, reason string, now time.Time) error {
+	if err := tx.Model(batch).Updates(map[string]any{
+		"status": "failed", "phase": "finished", "reason": reason, "finished_at": now, "updated_at": now,
+	}).Error; err != nil {
+		return err
+	}
+	if err := failRunningBatchChildrenInTx(tx, batch.ID, reason, now); err != nil {
+		return err
+	}
+	return tx.Model(&types.SourceWikiCoverageTopic{}).
+		Where("batch_id = ? AND status IN ('planned', 'draft')", batch.ID).
 		Updates(map[string]any{"status": "failed", "reason": reason, "updated_at": now}).Error
 }
 
@@ -373,6 +426,141 @@ func (l *SourceWikiBatchLedger) Coverage(ctx context.Context, knowledgeBaseID, s
 	return topics, nil
 }
 
+type SourceWikiBatchQATopicResult struct {
+	TopicKey string
+	Ready    bool
+	Reason   string
+}
+
+// CompleteBatchQACall atomically settles one parent QA dispatch, records its
+// verdicts, advances the QA cursor, and marks the parent complete or failed.
+func (l *SourceWikiBatchLedger) CompleteBatchQACall(ctx context.Context, batchID, reservationID string, actualTokens *int, results []SourceWikiBatchQATopicResult, now time.Time) error {
+	if l == nil || l.db == nil || batchID == "" || reservationID == "" || now.IsZero() || len(results) == 0 || len(results) > 4 {
+		return fmt.Errorf("%w: invalid batch QA settlement", ErrSourceWikiBatchInvalidState)
+	}
+	deadlineReached := false
+	cursorChanged := false
+	transactionErr := l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch types.SourceWikiBatch
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", batchID).Take(&batch).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiBatchNotFound
+			}
+			return err
+		}
+		if batch.Status != "running" || batch.Phase != "batch_qa" {
+			return ErrSourceWikiBatchInvalidState
+		}
+		if !now.Before(batch.DeadlineAt) {
+			if err := expireSourceWikiBatchInTx(tx, &batch, now); err != nil {
+				return err
+			}
+			deadlineReached = true
+			return nil
+		}
+		var reservation types.SourceWikiBatchCallReservation
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND batch_id = ? AND phase = 'batch_qa'", reservationID, batch.ID).Take(&reservation).Error; err != nil {
+			return ErrSourceWikiBatchInvalidState
+		}
+		if reservation.ExpectedQACursor == nil || *reservation.ExpectedQACursor < 0 {
+			return ErrSourceWikiBatchInvalidState
+		}
+		if err := l.RecordCallInTx(tx, reservation.ID, "succeeded", actualTokens, now); err != nil {
+			return err
+		}
+		if *reservation.ExpectedQACursor != batch.QACursor {
+			cursorChanged = true
+			return nil
+		}
+		groupSize := batch.InitialCount - batch.QACursor
+		if groupSize > 4 {
+			groupSize = 4
+		}
+		if groupSize <= 0 || len(results) != groupSize {
+			return ErrSourceWikiBatchInvalidState
+		}
+		seen := make(map[string]bool, len(results))
+		for _, result := range results {
+			if result.TopicKey == "" || seen[result.TopicKey] || (!result.Ready && result.Reason == "") {
+				return ErrSourceWikiBatchInvalidState
+			}
+			seen[result.TopicKey] = true
+		}
+		var expectedTopics []types.SourceWikiCoverageTopic
+		if err := tx.Where("batch_id = ? AND initial = TRUE", batch.ID).
+			Order("priority DESC, topic_key ASC").Offset(batch.QACursor).Limit(len(results)).Find(&expectedTopics).Error; err != nil {
+			return err
+		}
+		if len(expectedTopics) != len(results) {
+			return ErrSourceWikiBatchInvalidState
+		}
+		for i, result := range results {
+			if expectedTopics[i].TopicKey != result.TopicKey {
+				return ErrSourceWikiBatchInvalidState
+			}
+		}
+		for _, result := range results {
+			var topic types.SourceWikiCoverageTopic
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+				"source_id = ? AND topic_key = ? AND batch_id = ? AND snapshot_id = ? AND initial = TRUE",
+				batch.SourceID, result.TopicKey, batch.ID, batch.SnapshotID,
+			).Take(&topic).Error; err != nil {
+				return ErrSourceWikiBatchInvalidState
+			}
+			if topic.WikiSlug == "" {
+				return ErrSourceWikiBatchInvalidState
+			}
+			status, reason := "ready", ""
+			updates := map[string]any{"status": status, "reason": reason, "updated_at": now, "last_ready_snapshot_id": batch.SnapshotID}
+			if !result.Ready {
+				status, reason = "failed", result.Reason
+				updates["status"], updates["reason"] = status, reason
+			}
+			if err := tx.Model(&topic).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		nextCursor := batch.QACursor + len(results)
+		if nextCursor > batch.InitialCount {
+			return ErrSourceWikiBatchInvalidState
+		}
+		for _, result := range results {
+			if !result.Ready {
+				return failSourceWikiBatchInTx(tx, &batch, "whole-batch QA rejected one or more cards", now)
+			}
+		}
+		updates := map[string]any{"qa_cursor": nextCursor, "updated_at": now}
+		if nextCursor == batch.InitialCount {
+			var readyCount int64
+			if err := tx.Model(&types.SourceWikiCoverageTopic{}).
+				Where("batch_id = ? AND initial = TRUE AND status = 'ready' AND last_ready_snapshot_id = ?", batch.ID, batch.SnapshotID).
+				Count(&readyCount).Error; err != nil {
+				return err
+			}
+			if int(readyCount) != batch.InitialCount {
+				return failSourceWikiBatchInTx(tx, &batch, "one or more initial cards are not ready after batch QA", now)
+			}
+			updates["phase"], updates["status"], updates["finished_at"] = "finished", "completed", now
+			if err := tx.Model(&types.SourceWikiBatchCallReservation{}).
+				Where("batch_id = ? AND outcome = 'reserved'", batch.ID).
+				Updates(map[string]any{"outcome": "unknown", "completed_at": now}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&batch).Updates(updates).Error
+	})
+	if transactionErr != nil {
+		return transactionErr
+	}
+	if deadlineReached {
+		return ErrSourceWikiBatchDeadline
+	}
+	if cursorChanged {
+		return ErrSourceWikiBatchQACursorChanged
+	}
+	return nil
+}
+
 // LoadSourceWikiSkeletonEvidence reads parser-authored facts and static
 // relations only from the requested published snapshot. Hard row bounds make
 // the local scan finite; exceeding them fails the skeleton rather than
@@ -464,6 +652,9 @@ func (l *SourceWikiBatchLedger) ReserveCallInTx(tx *gorm.DB, req types.SourceWik
 		(req.Phase != "card" && (req.BatchID == "" || req.AttemptID != "" || req.AttemptCallID != "")) {
 		return nil, fmt.Errorf("%w: invalid batch call reservation", ErrSourceWikiBatchInvalidState)
 	}
+	if (req.Phase == "batch_qa") != (req.ExpectedQACursor != nil) {
+		return nil, fmt.Errorf("%w: QA reservations require their expected cursor", ErrSourceWikiBatchInvalidState)
+	}
 	batchID := req.BatchID
 	var child struct {
 		ID         string
@@ -501,6 +692,9 @@ func (l *SourceWikiBatchLedger) ReserveCallInTx(tx *gorm.DB, req types.SourceWik
 	if req.Phase == "skeleton" && batch.Phase != "skeleton" || req.Phase == "card" && batch.Phase != "cards" || req.Phase == "batch_qa" && batch.Phase != "batch_qa" {
 		return nil, ErrSourceWikiBatchInvalidState
 	}
+	if req.Phase == "batch_qa" && *req.ExpectedQACursor != batch.QACursor {
+		return nil, ErrSourceWikiBatchQACursorChanged
+	}
 	if !req.Now.Before(batch.DeadlineAt) {
 		return nil, ErrSourceWikiBatchDeadline
 	}
@@ -530,6 +724,10 @@ func (l *SourceWikiBatchLedger) ReserveCallInTx(tx *gorm.DB, req types.SourceWik
 		ID: uuid.NewString(), BatchID: batch.ID,
 		Phase: req.Phase, ProviderPhase: req.ProviderPhase, ReservedTokens: req.ReservedTokens,
 		Outcome: "reserved", CreatedAt: req.Now,
+	}
+	if req.ExpectedQACursor != nil {
+		cursor := *req.ExpectedQACursor
+		reservation.ExpectedQACursor = &cursor
 	}
 	if req.AttemptID != "" {
 		reservation.AttemptID = &req.AttemptID
@@ -578,7 +776,7 @@ func (l *SourceWikiBatchLedger) RecordCallInTx(tx *gorm.DB, reservationID, outco
 		return err
 	}
 	delta := 0
-	if actualTokens != nil && outcome == "succeeded" {
+	if actualTokens != nil && (outcome == "succeeded" || outcome == "over_budget") {
 		delta = *actualTokens - reservation.ReservedTokens
 	} else if actualTokens != nil && outcome == "provider_error" && *actualTokens > reservation.ReservedTokens {
 		delta = *actualTokens - reservation.ReservedTokens

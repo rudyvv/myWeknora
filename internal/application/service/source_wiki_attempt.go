@@ -34,9 +34,42 @@ type sourceWikiAttemptCheckpoint struct {
 }
 
 func (s *sourceWikiService) GenerateModule(ctx context.Context, req types.SourceWikiGenerateRequest) (*types.SourceWikiAttempt, error) {
+	if req.BatchID != "" {
+		return nil, fmt.Errorf("batch topic generation is server-managed")
+	}
+	req.TopicKind = "module"
+	req.TopicKey = "module/" + strings.TrimSpace(req.ModulePath)
+	return s.generateTopic(ctx, req)
+}
+
+func (s *sourceWikiService) GenerateTopic(ctx context.Context, req types.SourceWikiGenerateRequest) (*types.SourceWikiAttempt, error) {
+	if req.BatchID == "" || req.TopicKey == "" || len(req.TopicKey) > 1024 ||
+		(req.TopicKind != "system" && req.TopicKind != "module" && req.TopicKind != "flow") {
+		return nil, fmt.Errorf("batch topic generation requires a server-selected parent and topic")
+	}
+	parsed, err := uuid.Parse(req.BatchID)
+	if err != nil || parsed.String() != req.BatchID {
+		return nil, fmt.Errorf("batch_id must be a canonical UUID")
+	}
+	if req.TopicKind == "module" && req.TopicKey != "module/"+strings.TrimSpace(req.ModulePath) {
+		return nil, fmt.Errorf("module topic key does not match the planned module path")
+	}
+	if req.TopicKind == "system" && req.TopicKey != "system" {
+		return nil, fmt.Errorf("system topic key is invalid")
+	}
+	if req.TopicKind == "flow" && !strings.HasPrefix(req.TopicKey, "flow/") {
+		return nil, fmt.Errorf("flow topic key is invalid")
+	}
+	return s.generateTopic(ctx, req)
+}
+
+func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceWikiGenerateRequest) (*types.SourceWikiAttempt, error) {
 	module := strings.TrimSpace(req.ModulePath)
-	if req.SourceID == "" || req.Title == "" || module == "" || len(req.Title) > 200 || len(module) > 240 || path.IsAbs(module) || strings.Contains(module, "\\") || path.Clean(module) != module || module == ".." || strings.HasPrefix(module, "../") {
-		return nil, fmt.Errorf("source, title and a normalized relative module directory are required")
+	if req.SourceID == "" || strings.TrimSpace(req.Title) == "" || len(req.Title) > 200 {
+		return nil, fmt.Errorf("source and bounded topic title are required")
+	}
+	if req.TopicKind == "module" && (module == "" || len(module) > 240 || path.IsAbs(module) || strings.Contains(module, "\\") || path.Clean(module) != module || module == ".." || strings.HasPrefix(module, "../")) {
+		return nil, fmt.Errorf("module topic requires a normalized relative module directory")
 	}
 	if req.AttemptID != "" {
 		parsed, err := uuid.Parse(req.AttemptID)
@@ -83,6 +116,9 @@ func (s *sourceWikiService) GenerateModule(ctx context.Context, req types.Source
 		return nil, err
 	}
 	cleanup := func(reason string) (*types.SourceWikiAttempt, error) {
+		if req.BatchID != "" && errors.Is(ctx.Err(), context.Canceled) {
+			return ledger.Get(context.WithoutCancel(ctx), attempt.ID)
+		}
 		finishCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer stop()
 		if finishErr := ledger.Finish(finishCtx, lease, "failed", reason, time.Now()); finishErr != nil {
@@ -137,7 +173,7 @@ func (s *sourceWikiService) GenerateModule(ctx context.Context, req types.Source
 		}
 	}
 	if len(checkpoint.Evidence) == 0 {
-		checkpoint.Evidence, err = s.collectEvidence(workCtx, kb.ID, attempt.SourceID, attempt.ModulePath)
+		checkpoint.Evidence, err = s.collectTopicEvidence(workCtx, kb.ID, attempt)
 		if err != nil {
 			return cleanup(err.Error())
 		}
@@ -199,8 +235,9 @@ func (s *sourceWikiService) GenerateModule(ctx context.Context, req types.Source
 	for attempt.Phase != "publish" && attempt.Phase != "merge" && attempt.Phase != "merge_qa" {
 		if attempt.Phase != "qa" {
 			response, callErr := call("source_wiki_generate", map[string]any{
-				"instructions": "Generate a module responsibility card. Return JSON {title,summary,sections:[{text,evidence_ids,uncertain}]}. Every section needs supplied evidence IDs. Do not return URLs, paths, SHA, ranges or invented IDs. Describe only supported behavior, mark dynamic or inferred relationships uncertain. Title and summary must be supported. No document-level pages or file-by-file summaries.",
-				"title":        attempt.Title, "module": attempt.ModulePath, "evidence": prompts,
+				"instructions": "Generate one concise source-topic card. Respect topic_kind and topic_key; do not relabel a system or flow topic as a module. Return JSON {title,summary,sections:[{text,evidence_ids,uncertain}]}. Every section needs supplied evidence IDs. Do not return URLs, paths, SHA, ranges or invented IDs. Describe only supported behavior, mark dynamic or inferred relationships uncertain. Title and summary must be supported. No document-level pages or file-by-file summaries.",
+				"title":        attempt.Title, "topic_kind": attempt.TopicKind, "topic_key": attempt.TopicKey,
+				"module_path": attempt.ModulePath, "evidence": prompts,
 				"repair_reason": checkpoint.Reason, "previous_draft": draftText,
 			})
 			if callErr != nil {
@@ -410,7 +447,10 @@ func (s *sourceWikiService) loadOrCreateSourceWikiAttempt(ctx context.Context, l
 		if err != nil {
 			return nil, err
 		}
-		if attempt.KnowledgeBaseID != kb.ID || attempt.TenantID != kb.TenantID || attempt.SourceID != req.SourceID || attempt.ModulePath != module || attempt.Title != req.Title {
+		if attempt.KnowledgeBaseID != kb.ID || attempt.TenantID != kb.TenantID || attempt.SourceID != req.SourceID ||
+			attempt.ModulePath != module || attempt.Title != req.Title || attempt.BatchID != req.BatchID ||
+			(req.TopicKind != "" && attempt.TopicKind != "" && attempt.TopicKind != req.TopicKind) ||
+			(req.TopicKey != "" && attempt.TopicKey != "" && attempt.TopicKey != req.TopicKey) {
 			return nil, fmt.Errorf("attempt target does not match this generation request")
 		}
 		return attempt, nil
@@ -423,14 +463,12 @@ func (s *sourceWikiService) loadOrCreateSourceWikiAttempt(ctx context.Context, l
 	if err := s.db.WithContext(ctx).Where("data_source_id=? AND tenant_id=? AND knowledge_base_id=?", req.SourceID, kb.TenantID, kb.ID).Take(&publication).Error; err != nil {
 		return nil, err
 	}
-	existing, err := s.wiki.GetPageBySlug(ctx, kb.ID, sourceWikiModuleSlug(req.SourceID, module))
+	pageSlug := sourceWikiAttemptSlug(req.SourceID, req.TopicKind, req.TopicKey, module)
+	existing, err := s.wiki.GetPageBySlug(ctx, kb.ID, pageSlug)
 	if err != nil && !errors.Is(err, repository.ErrWikiPageNotFound) {
 		return nil, err
 	}
-	modelID := kb.SummaryModelID
-	if kb.WikiConfig != nil && kb.WikiConfig.SynthesisModelID != "" {
-		modelID = kb.WikiConfig.SynthesisModelID
-	}
+	modelID := sourceWikiEffectiveModelID(kb)
 	if modelID == "" {
 		return nil, fmt.Errorf("Wiki generation model is not configured")
 	}
@@ -445,27 +483,81 @@ func (s *sourceWikiService) loadOrCreateSourceWikiAttempt(ctx context.Context, l
 	if existing != nil {
 		baseVersion = existing.Version
 	}
-	now := time.Now()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	maxElapsedMS := types.SourceWikiAttemptMaxElapsedMS
+	deadline := now.Add(time.Duration(maxElapsedMS) * time.Millisecond)
+	maxCalls, maxTokens := types.SourceWikiAttemptMaxCalls, types.SourceWikiAttemptMaxTokens
+	maxCompletionTokens := types.SourceWikiAttemptMaxCompletionTokens
+	if req.BatchID != "" {
+		var batch types.SourceWikiBatch
+		if err := s.db.WithContext(ctx).Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND source_id = ?", req.BatchID, kb.TenantID, kb.ID, req.SourceID).Take(&batch).Error; err != nil {
+			return nil, repository.ErrSourceWikiBatchNotFound
+		}
+		if batch.Status != "running" || batch.Phase != "cards" || batch.SnapshotID != publication.SnapshotID ||
+			batch.ModelID != model.ID || batch.ModelSettingsFingerprint != sourceWikiModelFingerprint(model) ||
+			batch.ModelContextWindow != model.Parameters.ContextWindow || batch.MaxCompletionTokens <= 0 {
+			return nil, repository.ErrSourceWikiBatchInvalidState
+		}
+		if deadline.After(batch.DeadlineAt) {
+			deadline = batch.DeadlineAt
+		}
+		maxElapsedMS = deadline.Sub(now).Milliseconds()
+		if maxElapsedMS <= 0 {
+			return nil, repository.ErrSourceWikiBatchDeadline
+		}
+		maxCalls, maxTokens, maxCompletionTokens = types.SourceWikiBatchChildMaxCalls, types.SourceWikiBatchChildMaxTokens, batch.MaxCompletionTokens
+		if existingAttempt, found, lookupErr := s.existingSourceWikiBatchTopicAttempt(ctx, ledger, kb, req, module, publication.SnapshotID, &expectedSource, model); lookupErr != nil {
+			return nil, lookupErr
+		} else if found {
+			return existingAttempt, nil
+		}
+	}
 	attemptID := uuid.NewString()
-	now = now.UTC()
-	hash := sha256.Sum256([]byte(module))
 	attempt := &types.SourceWikiAttempt{
 		ID: attemptID, TenantID: kb.TenantID, KnowledgeBaseID: kb.ID, SourceID: req.SourceID,
-		SnapshotID: publication.SnapshotID, ModulePath: module, Title: req.Title,
-		Slug:   "concept/source-" + req.SourceID + "/module-" + hex.EncodeToString(hash[:8]),
+		SnapshotID: publication.SnapshotID, BatchID: req.BatchID, TopicKind: req.TopicKind, TopicKey: req.TopicKey,
+		ModulePath: module, Title: req.Title, Slug: pageSlug,
 		Status: "running", SourceConfigFingerprint: sourceWikiSourceFingerprint(&expectedSource),
 		SourceUpdatedAt: expectedSource.UpdatedAt, ModelID: model.ID,
 		ModelSettingsFingerprint: sourceWikiModelFingerprint(model), ModelContextWindow: model.Parameters.ContextWindow,
-		MaxCompletionTokens: types.SourceWikiAttemptMaxCompletionTokens, BasePageVersion: baseVersion,
-		DeadlineAt: now.Add(time.Duration(types.SourceWikiAttemptMaxElapsedMS) * time.Millisecond),
-		MaxCalls:   types.SourceWikiAttemptMaxCalls, MaxTokens: types.SourceWikiAttemptMaxTokens,
-		MaxElapsedMS: types.SourceWikiAttemptMaxElapsedMS, MaxRepairs: types.SourceWikiAttemptMaxRepairs,
+		MaxCompletionTokens: maxCompletionTokens, BasePageVersion: baseVersion,
+		DeadlineAt: deadline, MaxCalls: maxCalls, MaxTokens: maxTokens,
+		MaxElapsedMS: maxElapsedMS, MaxRepairs: types.SourceWikiAttemptMaxRepairs,
 		Phase: "collecting", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := ledger.Create(ctx, attempt); err != nil {
-		return nil, fmt.Errorf("module already has an active attempt or cannot be saved: %w", err)
+		if req.BatchID != "" {
+			if existingAttempt, found, lookupErr := s.existingSourceWikiBatchTopicAttempt(ctx, ledger, kb, req, module, publication.SnapshotID, &expectedSource, model); lookupErr == nil && found {
+				return existingAttempt, nil
+			}
+		}
+		return nil, fmt.Errorf("topic already has an active attempt or cannot be saved: %w", err)
 	}
 	return attempt, nil
+}
+
+func (s *sourceWikiService) existingSourceWikiBatchTopicAttempt(ctx context.Context, ledger *repository.SourceWikiAttemptLedger, kb *types.KnowledgeBase, req types.SourceWikiGenerateRequest, module, snapshotID string, source *types.DataSource, model *types.Model) (*types.SourceWikiAttempt, bool, error) {
+	var topic types.SourceWikiCoverageTopic
+	err := s.db.WithContext(ctx).Where("batch_id = ? AND source_id = ? AND snapshot_id = ? AND topic_key = ? AND status = 'draft' AND attempt_id IS NOT NULL",
+		req.BatchID, req.SourceID, snapshotID, req.TopicKey).Take(&topic).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	attempt, err := ledger.Get(ctx, *topic.AttemptID)
+	if err != nil {
+		return nil, false, err
+	}
+	if attempt.TenantID != kb.TenantID || attempt.KnowledgeBaseID != kb.ID || attempt.SourceID != req.SourceID ||
+		attempt.SnapshotID != snapshotID || attempt.BatchID != req.BatchID || attempt.TopicKind != req.TopicKind ||
+		attempt.TopicKey != req.TopicKey || attempt.ModulePath != module || attempt.Title != req.Title ||
+		attempt.SourceConfigFingerprint != sourceWikiSourceFingerprint(source) || !attempt.SourceUpdatedAt.Equal(source.UpdatedAt) ||
+		attempt.ModelID != model.ID || attempt.ModelSettingsFingerprint != sourceWikiModelFingerprint(model) {
+		return nil, false, repository.ErrSourceWikiBatchInvalidState
+	}
+	return attempt, true, nil
 }
 
 func (s *sourceWikiService) pinAttemptEvidence(ctx context.Context, lease types.SourceWikiAttemptLease, ledger *repository.SourceWikiAttemptLedger, attempt *types.SourceWikiAttempt, checkpoint *sourceWikiAttemptCheckpoint) error {
@@ -526,7 +618,10 @@ func (s *sourceWikiService) saveSourceWikiProgress(ctx context.Context, ledger *
 }
 
 func sourceWikiBuildPage(kbID string, attempt *types.SourceWikiAttempt, draft sourceWikiDraft, evidence []collectedWikiEvidence, registry map[string]collectedWikiEvidence, version int) *types.WikiPage {
-	provenance := &types.SourceWikiProvenance{SourceID: attempt.SourceID, ModulePath: attempt.ModulePath, State: "ready", ApplicableSnapshotID: attempt.SnapshotID}
+	provenance := &types.SourceWikiProvenance{
+		SourceID: attempt.SourceID, TopicKind: attempt.TopicKind, TopicKey: attempt.TopicKey,
+		ModulePath: attempt.ModulePath, State: "ready", ApplicableSnapshotID: attempt.SnapshotID,
+	}
 	refs := types.StringArray{}
 	seen := map[string]bool{}
 	for _, collected := range evidence {
@@ -617,6 +712,18 @@ func decodeSourceWikiDraftText(value types.JSON) string {
 func sourceWikiModuleSlug(sourceID, module string) string {
 	hash := sha256.Sum256([]byte(module))
 	return "concept/source-" + sourceID + "/module-" + hex.EncodeToString(hash[:8])
+}
+
+func sourceWikiAttemptSlug(sourceID, topicKind, topicKey, module string) string {
+	if topicKind == "module" && module != "" {
+		return sourceWikiModuleSlug(sourceID, module)
+	}
+	key := topicKey
+	if key == "" {
+		key = "module/" + module
+	}
+	hash := sha256.Sum256([]byte(key))
+	return "concept/source-" + sourceID + "/topic-" + hex.EncodeToString(hash[:8])
 }
 
 func sourceWikiEffectiveModelID(kb *types.KnowledgeBase) string {

@@ -11,7 +11,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/source"
@@ -32,10 +34,12 @@ type sourceWikiService struct {
 	knowledge interfaces.KnowledgeService
 	models    interfaces.ModelService
 	db        *gorm.DB
+	batchMu   sync.Mutex
+	batchWork map[string]sourceWikiBatchWorker
 }
 
 func NewSourceWikiService(wiki interfaces.WikiPageService, kb interfaces.KnowledgeBaseService, knowledge interfaces.KnowledgeService, models interfaces.ModelService, db *gorm.DB) interfaces.SourceWikiService {
-	return &sourceWikiService{wiki: wiki, kb: kb, knowledge: knowledge, models: models, db: db}
+	return &sourceWikiService{wiki: wiki, kb: kb, knowledge: knowledge, models: models, db: db, batchWork: make(map[string]sourceWikiBatchWorker)}
 }
 
 type sourceWikiVerifiedWriteKey struct{}
@@ -87,43 +91,109 @@ func sourceWikiJSON(text string, out any) error {
 }
 
 func (s *sourceWikiService) collectEvidence(ctx context.Context, kbID, sourceID, module string) ([]collectedWikiEvidence, error) {
-	var members []types.SourceSnapshotMember
-	q := s.db.WithContext(ctx).Table("source_snapshot_members sm").Select("sm.*").
-		Joins("JOIN source_snapshots ss ON ss.id=sm.snapshot_id AND ss.data_source_id=? AND ss.knowledge_base_id=? AND ss.state='published'", sourceID, kbID).
-		Where("sm.status='parsed' AND NOT sm.generated").
-		Where(source.SnapshotSQL(ctx, "sm.snapshot_id", "ss.data_source_id", "sm.source_file_id"))
-	if module != "." {
-		q = q.Where("sm.path LIKE ? ESCAPE '!'", strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(module)+"/%")
-	}
-	if err := q.Order("sm.path").Limit(sourceWikiMaxFiles + 1).Find(&members).Error; err != nil {
+	attempt := &types.SourceWikiAttempt{SourceID: sourceID, ModulePath: module, TopicKind: "module", TopicKey: "module/" + module, ModelContextWindow: 65536, MaxCompletionTokens: types.SourceWikiAttemptMaxCompletionTokens}
+	var publication types.SourcePublication
+	if err := s.db.WithContext(ctx).Where("data_source_id = ? AND knowledge_base_id = ?", sourceID, kbID).Take(&publication).Error; err != nil {
 		return nil, err
 	}
-	if len(members) > sourceWikiMaxFiles {
-		return nil, fmt.Errorf("module exceeds %d files; choose a smaller module", sourceWikiMaxFiles)
+	attempt.SnapshotID = publication.SnapshotID
+	return s.collectTopicEvidence(ctx, kbID, attempt)
+}
+
+func (s *sourceWikiService) collectTopicEvidence(ctx context.Context, kbID string, attempt *types.SourceWikiAttempt) ([]collectedWikiEvidence, error) {
+	if attempt == nil || attempt.SourceID == "" || attempt.SnapshotID == "" {
+		return nil, fmt.Errorf("topic evidence requires its fixed source snapshot")
 	}
-	var result []collectedWikiEvidence
+	var members []types.SourceSnapshotMember
+	q := s.db.WithContext(ctx).Table("source_snapshot_members sm").Select("sm.*").
+		Joins("JOIN source_snapshots ss ON ss.id=sm.snapshot_id AND ss.data_source_id=? AND ss.knowledge_base_id=? AND ss.state='published'", attempt.SourceID, kbID).
+		Where("sm.status='parsed' AND NOT sm.generated").
+		Where("sm.snapshot_id = ?", attempt.SnapshotID).
+		Where(source.SnapshotSQL(ctx, "sm.snapshot_id", "ss.data_source_id", "sm.source_file_id"))
+	if attempt.TopicKind == "module" || attempt.TopicKind == "" {
+		q = q.Where("sm.path LIKE ? ESCAPE '!'", strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(attempt.ModulePath)+"/%")
+	} else if attempt.TopicKind == "flow" {
+		var coverage types.SourceWikiCoverageTopic
+		if err := s.db.WithContext(ctx).Where("source_id = ? AND topic_key = ? AND batch_id = ?", attempt.SourceID, attempt.TopicKey, attempt.BatchID).Take(&coverage).Error; err != nil {
+			return nil, err
+		}
+		var relations []types.SourceCodeRelation
+		if err := json.Unmarshal(coverage.Relations, &relations); err != nil {
+			return nil, fmt.Errorf("planned flow relations are invalid")
+		}
+		paths := make(map[string]bool)
+		for _, relation := range relations {
+			if relation.FromPath != "" {
+				paths[relation.FromPath] = true
+			}
+			if relation.ToPath != "" {
+				paths[relation.ToPath] = true
+			}
+		}
+		if len(paths) == 0 {
+			return nil, nil
+		}
+		pathList := make([]string, 0, len(paths))
+		for filePath := range paths {
+			pathList = append(pathList, filePath)
+		}
+		sort.Strings(pathList)
+		q = q.Where("sm.path IN ?", pathList)
+	}
+	priority := `CASE WHEN lower(sm.path) LIKE '%readme%' THEN 0
+		WHEN lower(sm.path) LIKE '%/pom.xml' OR lower(sm.path) LIKE '%/go.mod' OR lower(sm.path) LIKE '%/package.json' OR lower(sm.path) LIKE '%/build.gradle%' THEN 1
+		WHEN lower(sm.path) LIKE '%/main.%' OR lower(sm.path) LIKE '%/application.%' THEN 2
+		WHEN lower(sm.path) LIKE '%/route%' OR lower(sm.path) LIKE '%/controller%' OR lower(sm.path) LIKE '%/service%' THEN 3
+		ELSE 10 END, sm.path`
+	if err := q.Order(priority).Limit(sourceWikiMaxFiles).Find(&members).Error; err != nil {
+		return nil, err
+	}
+	result := make([]collectedWikiEvidence, 0, len(members))
 	total := 0
 	for _, member := range members {
 		file, err := s.knowledge.GetSourceFile(ctx, member.SourceFileID, member.FileVersionID)
 		if err != nil {
-			return nil, fmt.Errorf("fixed module evidence cannot be read")
+			return nil, fmt.Errorf("fixed topic evidence cannot be read")
 		}
-		if file.FileVersionID != member.FileVersionID || file.SnapshotID != member.SnapshotID || file.DataSourceID != sourceID {
-			return nil, fmt.Errorf("fixed module evidence changed")
-		}
-		// The first-card collector accepts complete small files as separately
-		// bounded evidence. It never truncates a file while claiming a full range.
-		if len(file.RawContent) > sourceWikiMaxEvidenceBytes || total+len(file.RawContent) > sourceWikiMaxEvidenceBytes {
-			return nil, fmt.Errorf("module evidence exceeds byte budget; choose a smaller module")
+		if file.FileVersionID != member.FileVersionID || file.SnapshotID != member.SnapshotID || file.DataSourceID != attempt.SourceID {
+			return nil, fmt.Errorf("fixed topic evidence changed")
 		}
 		if len(file.RawContent) == 0 {
 			continue
 		}
-		total += len(file.RawContent)
+		inputTokenBudget := attempt.ModelContextWindow - attempt.MaxCompletionTokens - 512
+		if inputTokenBudget <= 0 {
+			return nil, errSourceWikiAttemptCallContext
+		}
+		maxBytes := inputTokenBudget * 3
+		if maxBytes > sourceWikiMaxEvidenceBytes {
+			maxBytes = sourceWikiMaxEvidenceBytes
+		}
+		remaining := maxBytes - total
+		if remaining <= 0 {
+			break
+		}
+		fileBudget := 2048
+		if remaining < fileBudget {
+			fileBudget = remaining
+		}
+		end := len(file.RawContent)
+		if end > fileBudget {
+			end = fileBudget
+			for end > 0 && !utf8.Valid(file.RawContent[:end]) {
+				end--
+			}
+		}
+		if end <= 0 {
+			continue
+		}
+		text := file.RawContent[:end]
+		total += end
 		hash := sha256.Sum256(file.RawContent)
-		e := types.SourceWikiEvidence{ID: fmt.Sprintf("e%03d", len(result)+1), KnowledgeID: file.KnowledgeID, SHA256: file.SHA256, TextSHA256: hex.EncodeToString(hash[:]), SourceEvidence: types.SourceEvidence{DataSourceID: file.DataSourceID, SnapshotID: file.SnapshotID, FileVersionID: file.FileVersionID, ProjectID: file.ProjectID, CommitSHA: file.CommitSHA, Path: file.Path, Quality: file.Quality, Range: types.SourceRange{StartByte: 0, EndByte: len(file.RawContent), StartLine: 1, EndLine: 1 + bytes.Count(file.RawContent[:len(file.RawContent)-1], []byte("\n"))}}}
+		hash = sha256.Sum256(text)
+		e := types.SourceWikiEvidence{ID: fmt.Sprintf("e%03d", len(result)+1), KnowledgeID: file.KnowledgeID, SHA256: file.SHA256, TextSHA256: hex.EncodeToString(hash[:]), SourceEvidence: types.SourceEvidence{DataSourceID: file.DataSourceID, SnapshotID: file.SnapshotID, FileVersionID: file.FileVersionID, ProjectID: file.ProjectID, CommitSHA: file.CommitSHA, Path: file.Path, Quality: file.Quality, Range: types.SourceRange{StartByte: 0, EndByte: end, StartLine: 1, EndLine: 1 + bytes.Count(text[:end-1], []byte("\n"))}}}
 		e.GitLabURL = source.GitLabBlobURL(file.RepositoryURL, e.CommitSHA, e.Path, e.Range)
-		result = append(result, collectedWikiEvidence{Evidence: e, Text: file.Content})
+		result = append(result, collectedWikiEvidence{Evidence: e, Text: string(text)})
 	}
 	return result, nil
 }
@@ -176,6 +246,25 @@ func (s *sourceWikiService) publishCard(ctx context.Context, kb *types.Knowledge
 	// The publication lock serializes the final card write with source publish;
 	// an old model result cannot become a current ready page after a new SHA.
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if attempt.BatchID != "" {
+			var batch types.SourceWikiBatch
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", attempt.BatchID).Take(&batch).Error; err != nil {
+				return repository.ErrSourceWikiBatchInvalidState
+			}
+			now := time.Now()
+			if batch.Status != "running" || batch.Phase != "cards" || !now.Before(batch.DeadlineAt) ||
+				batch.TenantID != attempt.TenantID || batch.KnowledgeBaseID != attempt.KnowledgeBaseID ||
+				batch.SourceID != attempt.SourceID || batch.SnapshotID != attempt.SnapshotID {
+				return repository.ErrSourceWikiBatchInvalidState
+			}
+			var running types.SourceWikiAttempt
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+				"id = ? AND batch_id = ? AND status = 'running' AND epoch = ? AND lease_owner = ? AND lease_expires_at > ? AND deadline_at > ?",
+				attempt.ID, batch.ID, lease.Epoch, lease.Owner, now, now,
+			).Take(&running).Error; err != nil {
+				return repository.ErrSourceWikiAttemptFenced
+			}
+		}
 		var currentSource types.DataSource
 		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=? AND knowledge_base_id=?", sourceID, kb.TenantID, kb.ID).First(&currentSource).Error; err != nil {
 			return err

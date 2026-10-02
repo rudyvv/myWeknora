@@ -35,7 +35,7 @@ func NewSourceWikiAttemptLedger(db *gorm.DB) *SourceWikiAttemptLedger {
 
 func (l *SourceWikiAttemptLedger) Create(ctx context.Context, attempt *types.SourceWikiAttempt) error {
 	if l == nil || l.db == nil || attempt == nil || attempt.ID == "" || attempt.Status != "running" ||
-		attempt.KnowledgeBaseID == "" || attempt.SourceID == "" || attempt.SnapshotID == "" || attempt.ModulePath == "" || attempt.Title == "" || attempt.Slug == "" ||
+		attempt.KnowledgeBaseID == "" || attempt.SourceID == "" || attempt.SnapshotID == "" || attempt.Title == "" || attempt.Slug == "" ||
 		attempt.SourceConfigFingerprint == "" || attempt.SourceUpdatedAt.IsZero() || attempt.ModelID == "" || attempt.ModelSettingsFingerprint == "" ||
 		attempt.ModelContextWindow <= 0 || attempt.MaxCompletionTokens <= 0 || attempt.MaxCompletionTokens > types.SourceWikiAttemptMaxCompletionTokens ||
 		attempt.MaxCompletionTokens >= attempt.ModelContextWindow ||
@@ -49,10 +49,61 @@ func (l *SourceWikiAttemptLedger) Create(ctx context.Context, attempt *types.Sou
 	if attempt.UpdatedAt.IsZero() {
 		attempt.UpdatedAt = attempt.CreatedAt
 	}
-	if err := l.db.WithContext(ctx).Create(attempt).Error; err != nil {
-		return fmt.Errorf("create source Wiki attempt: %w", err)
+	if attempt.BatchID == "" {
+		if attempt.ModulePath == "" {
+			return fmt.Errorf("%w: manual module attempt requires a module path", ErrSourceWikiAttemptInvalidState)
+		}
+		if err := l.db.WithContext(ctx).Create(attempt).Error; err != nil {
+			return fmt.Errorf("create source Wiki attempt: %w", err)
+		}
+		return nil
 	}
-	return nil
+	if attempt.TopicKind == "" || attempt.TopicKey == "" || attempt.MaxCalls > types.SourceWikiBatchChildMaxCalls ||
+		attempt.MaxTokens > types.SourceWikiBatchChildMaxTokens || attempt.MaxRepairs > types.SourceWikiAttemptMaxRepairs ||
+		attempt.MaxElapsedMS > types.SourceWikiAttemptMaxElapsedMS {
+		return fmt.Errorf("%w: invalid batch child topic or limits", ErrSourceWikiAttemptInvalidState)
+	}
+	return l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch types.SourceWikiBatch
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", attempt.BatchID).Take(&batch).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiBatchNotFound
+			}
+			return err
+		}
+		if batch.Status != "running" || batch.Phase != "cards" ||
+			batch.TenantID != attempt.TenantID || batch.KnowledgeBaseID != attempt.KnowledgeBaseID ||
+			batch.SourceID != attempt.SourceID || batch.SnapshotID != attempt.SnapshotID ||
+			batch.SourceConfigFingerprint != attempt.SourceConfigFingerprint || !batch.SourceUpdatedAt.Equal(attempt.SourceUpdatedAt) ||
+			batch.ModelID != attempt.ModelID || batch.ModelSettingsFingerprint != attempt.ModelSettingsFingerprint ||
+			batch.ModelContextWindow != attempt.ModelContextWindow || attempt.MaxCompletionTokens > batch.MaxCompletionTokens ||
+			attempt.DeadlineAt.After(batch.DeadlineAt) || !attempt.CreatedAt.Before(batch.DeadlineAt) {
+			return fmt.Errorf("%w: batch child is not bound to the active parent snapshot", ErrSourceWikiBatchInvalidState)
+		}
+		var topic types.SourceWikiCoverageTopic
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+			"source_id = ? AND topic_key = ? AND batch_id = ? AND snapshot_id = ? AND kind = ? AND status = 'planned'",
+			attempt.SourceID, attempt.TopicKey, batch.ID, batch.SnapshotID, attempt.TopicKind,
+		).Take(&topic).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: batch topic is not available to a child attempt", ErrSourceWikiBatchInvalidState)
+			}
+			return err
+		}
+		if err := tx.Create(attempt).Error; err != nil {
+			return fmt.Errorf("create source Wiki batch attempt: %w", err)
+		}
+		claimed := tx.Model(&types.SourceWikiCoverageTopic{}).
+			Where("id = ? AND batch_id = ? AND status = 'planned'", topic.ID, batch.ID).
+			Updates(map[string]any{"status": "draft", "attempt_id": attempt.ID, "updated_at": attempt.CreatedAt})
+		if claimed.Error != nil {
+			return claimed.Error
+		}
+		if claimed.RowsAffected != 1 {
+			return fmt.Errorf("%w: topic was claimed by another batch worker", ErrSourceWikiBatchInvalidState)
+		}
+		return nil
+	})
 }
 
 func (l *SourceWikiAttemptLedger) Get(ctx context.Context, attemptID string) (*types.SourceWikiAttempt, error) {
@@ -72,13 +123,33 @@ func (l *SourceWikiAttemptLedger) Claim(ctx context.Context, req types.SourceWik
 	}
 	var lease types.SourceWikiAttemptLease
 	var transitionErr error
-	err := l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	batchID, err := l.batchIDForAttempt(ctx, req.AttemptID)
+	if err != nil {
+		return types.SourceWikiAttemptLease{}, err
+	}
+	err = l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch *types.SourceWikiBatch
+		if batchID != "" {
+			batch = &types.SourceWikiBatch{}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", batchID).Take(batch).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrSourceWikiBatchNotFound
+				}
+				return err
+			}
+		}
 		var attempt types.SourceWikiAttempt
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", req.AttemptID).First(&attempt).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrSourceWikiAttemptNotFound
 			}
 			return err
+		}
+		if batch != nil {
+			if err := guardBatchChildTx(tx, batch, &attempt, req.Now); err != nil {
+				transitionErr = err
+				return nil
+			}
 		}
 		if attempt.Status != "running" {
 			return ErrSourceWikiAttemptInvalidState
@@ -150,7 +221,21 @@ func (l *SourceWikiAttemptLedger) FailRecoveryTarget(ctx context.Context, expect
 	if l == nil || l.db == nil || expected.ID == "" || expected.Status != "running" || expected.DeadlineAt.IsZero() || reason == "" || now.IsZero() {
 		return fmt.Errorf("%w: recovery failure requires an attempt snapshot, reason and time", ErrSourceWikiAttemptInvalidState)
 	}
+	batchID, err := l.batchIDForAttempt(ctx, expected.ID)
+	if err != nil {
+		return err
+	}
 	return l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch *types.SourceWikiBatch
+		if batchID != "" {
+			batch = &types.SourceWikiBatch{}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", batchID).Take(batch).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrSourceWikiBatchNotFound
+				}
+				return err
+			}
+		}
 		var attempt types.SourceWikiAttempt
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND source_id = ? AND epoch = ? AND status = ?",
@@ -160,6 +245,18 @@ func (l *SourceWikiAttemptLedger) FailRecoveryTarget(ctx context.Context, expect
 				return ErrSourceWikiAttemptFenced
 			}
 			return err
+		}
+		if batch != nil {
+			if attempt.BatchID != batch.ID || attempt.TenantID != batch.TenantID || attempt.KnowledgeBaseID != batch.KnowledgeBaseID ||
+				attempt.SourceID != batch.SourceID || attempt.SnapshotID != batch.SnapshotID {
+				return ErrSourceWikiAttemptFenced
+			}
+			if batch.Status == "running" && !now.Before(batch.DeadlineAt) {
+				return expireSourceWikiBatchInTx(tx, batch, now)
+			}
+			if batch.Status != "running" || batch.Phase != "cards" {
+				return failBatchChildInTx(tx, &attempt, "parent batch is no longer dispatchable", now)
+			}
 		}
 		if attempt.LeaseOwner != expected.LeaseOwner || !sameAttemptLeaseExpiry(attempt.LeaseExpiresAt, expected.LeaseExpiresAt) ||
 			!attempt.DeadlineAt.Equal(expected.DeadlineAt) {
@@ -205,8 +302,15 @@ func (l *SourceWikiAttemptLedger) ReserveCall(ctx context.Context, req types.Sou
 	if req.Phase == "" || req.ReservedTokens <= 0 || req.LeaseFor <= 0 {
 		return types.SourceWikiAttemptCallReservation{}, fmt.Errorf("%w: provider reservation requires phase and positive limits", ErrSourceWikiAttemptInvalidState)
 	}
+	batchID, err := l.batchIDForAttempt(ctx, req.Lease.AttemptID)
+	if err != nil {
+		return types.SourceWikiAttemptCallReservation{}, err
+	}
+	if batchID != "" {
+		return l.reserveBatchCall(ctx, batchID, req)
+	}
 	var reservation types.SourceWikiAttemptCallReservation
-	err := l.withClaim(ctx, req.Lease, req.Now, func(tx *gorm.DB, attempt *types.SourceWikiAttempt) error {
+	err = l.withClaim(ctx, req.Lease, req.Now, func(tx *gorm.DB, attempt *types.SourceWikiAttempt) error {
 		if attempt.Calls >= attempt.MaxCalls || attempt.Tokens+req.ReservedTokens > attempt.MaxTokens {
 			return ErrSourceWikiAttemptBudgetExhausted
 		}
@@ -245,8 +349,15 @@ func (l *SourceWikiAttemptLedger) CompleteCall(ctx context.Context, req types.So
 	if req.Outcome != "succeeded" && req.Outcome != "provider_error" && req.Outcome != "unknown" {
 		return fmt.Errorf("%w: unknown provider outcome", ErrSourceWikiAttemptInvalidState)
 	}
+	batchID, err := l.batchIDForAttempt(ctx, req.Lease.AttemptID)
+	if err != nil {
+		return err
+	}
+	if batchID != "" {
+		return l.completeBatchCall(ctx, batchID, req)
+	}
 	var overBudget bool
-	err := l.withClaim(ctx, req.Lease, req.Now, func(tx *gorm.DB, attempt *types.SourceWikiAttempt) error {
+	err = l.withClaim(ctx, req.Lease, req.Now, func(tx *gorm.DB, attempt *types.SourceWikiAttempt) error {
 		var call types.SourceWikiAttemptCall
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND attempt_id = ? AND epoch = ?", req.ReservationID, attempt.ID, attempt.Epoch).First(&call).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -309,6 +420,247 @@ func (l *SourceWikiAttemptLedger) CompleteCall(ctx context.Context, req types.So
 	return nil
 }
 
+func (l *SourceWikiAttemptLedger) batchIDForAttempt(ctx context.Context, attemptID string) (string, error) {
+	var row struct {
+		BatchID string `gorm:"column:batch_id"`
+	}
+	if err := l.db.WithContext(ctx).Table("source_wiki_attempts").Select("batch_id").Where("id = ?", attemptID).Take(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", ErrSourceWikiAttemptNotFound
+		}
+		return "", err
+	}
+	return row.BatchID, nil
+}
+
+// guardBatchChildTx runs only after the parent and child rows have been locked
+// in that order. A parent deadline atomically expires every child and leaves
+// unanswered provider reservations charged as unknown.
+func guardBatchChildTx(tx *gorm.DB, batch *types.SourceWikiBatch, attempt *types.SourceWikiAttempt, now time.Time) error {
+	if batch == nil || attempt == nil || attempt.BatchID != batch.ID || batch.TenantID != attempt.TenantID ||
+		batch.KnowledgeBaseID != attempt.KnowledgeBaseID || batch.SourceID != attempt.SourceID || batch.SnapshotID != attempt.SnapshotID {
+		return ErrSourceWikiAttemptFenced
+	}
+	if batch.Status == "running" && !now.Before(batch.DeadlineAt) {
+		if err := expireSourceWikiBatchInTx(tx, batch, now); err != nil {
+			return err
+		}
+		return ErrSourceWikiBatchDeadline
+	}
+	if batch.Status != "running" || batch.Phase != "cards" {
+		if attempt.Status == "running" {
+			if err := failBatchChildInTx(tx, attempt, "parent batch is no longer dispatchable", now); err != nil {
+				return err
+			}
+		}
+		return ErrSourceWikiBatchInvalidState
+	}
+	if attempt.DeadlineAt.After(batch.DeadlineAt) {
+		if err := failBatchChildInTx(tx, attempt, "child deadline exceeds parent batch deadline", now); err != nil {
+			return err
+		}
+		return ErrSourceWikiBatchInvalidState
+	}
+	return nil
+}
+
+func failBatchChildInTx(tx *gorm.DB, attempt *types.SourceWikiAttempt, reason string, now time.Time) error {
+	if err := tx.Model(attempt).Updates(map[string]any{
+		"status": "failed", "reason": reason, "lease_owner": "", "lease_expires_at": nil, "updated_at": now,
+	}).Error; err != nil {
+		return err
+	}
+	if err := markSourceWikiAttemptCallsUnknown(tx, attempt.ID, now); err != nil {
+		return err
+	}
+	if err := tx.Model(&types.SourceWikiBatchCallReservation{}).
+		Where("attempt_id = ? AND outcome = 'reserved'", attempt.ID).
+		Updates(map[string]any{"outcome": "unknown", "completed_at": now}).Error; err != nil {
+		return err
+	}
+	return ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
+}
+
+func (l *SourceWikiAttemptLedger) reserveBatchCall(ctx context.Context, batchID string, req types.SourceWikiAttemptCallReservationRequest) (types.SourceWikiAttemptCallReservation, error) {
+	if req.Lease.AttemptID == "" || req.Lease.Owner == "" || req.Lease.Epoch <= 0 || req.Now.IsZero() {
+		return types.SourceWikiAttemptCallReservation{}, fmt.Errorf("%w: incomplete worker lease", ErrSourceWikiAttemptInvalidState)
+	}
+	var reservation types.SourceWikiAttemptCallReservation
+	var transitionErr error
+	err := l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch types.SourceWikiBatch
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", batchID).Take(&batch).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiBatchNotFound
+			}
+			return err
+		}
+		var attempt types.SourceWikiAttempt
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", req.Lease.AttemptID).Take(&attempt).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiAttemptNotFound
+			}
+			return err
+		}
+		if err := guardBatchChildTx(tx, &batch, &attempt, req.Now); err != nil {
+			transitionErr = err
+			return nil
+		}
+		if attempt.Status != "running" {
+			return ErrSourceWikiAttemptFenced
+		}
+		if !req.Now.Before(attempt.DeadlineAt) {
+			transitionErr = ErrSourceWikiAttemptDeadline
+			return failBatchChildInTx(tx, &attempt, "attempt absolute time budget exhausted", req.Now)
+		}
+		if attempt.Epoch != req.Lease.Epoch || attempt.LeaseOwner != req.Lease.Owner ||
+			attempt.ModelID != req.Lease.ModelID || attempt.ModelSettingsFingerprint != req.Lease.ModelSettingsFingerprint ||
+			attempt.ModelContextWindow != req.Lease.ModelContextWindow || attempt.MaxCompletionTokens != req.Lease.MaxCompletionTokens ||
+			attempt.LeaseExpiresAt == nil || !req.Now.Before(*attempt.LeaseExpiresAt) {
+			return ErrSourceWikiAttemptFenced
+		}
+		if attempt.Calls >= attempt.MaxCalls || attempt.Tokens+req.ReservedTokens > attempt.MaxTokens {
+			return ErrSourceWikiAttemptBudgetExhausted
+		}
+		callNumber, id := attempt.Calls+1, uuid.NewString()
+		batchReservation, err := NewSourceWikiBatchLedger(l.db).ReserveCallInTx(tx, types.SourceWikiBatchReserveCallRequest{
+			BatchID: batch.ID, AttemptID: attempt.ID, AttemptCallID: id,
+			Phase: "card", ProviderPhase: req.Phase, ReservedTokens: req.ReservedTokens, Now: req.Now,
+		})
+		if err != nil {
+			return err
+		}
+		_ = batchReservation
+		call := types.SourceWikiAttemptCall{
+			ID: id, AttemptID: attempt.ID, Epoch: attempt.Epoch, CallNumber: callNumber,
+			Phase: req.Phase, ReservedTokens: req.ReservedTokens, Outcome: "reserved", CreatedAt: req.Now,
+		}
+		if err := tx.Create(&call).Error; err != nil {
+			return err
+		}
+		expires := attemptLeaseExpiry(req.Now, req.LeaseFor, attempt.DeadlineAt)
+		if err := tx.Model(&attempt).Updates(map[string]any{
+			"calls": callNumber, "tokens": attempt.Tokens + req.ReservedTokens,
+			"phase": req.Phase, "lease_expires_at": expires, "updated_at": req.Now,
+		}).Error; err != nil {
+			return err
+		}
+		reservation = types.SourceWikiAttemptCallReservation{
+			ID: id, AttemptID: attempt.ID, Epoch: attempt.Epoch,
+			CallNumber: callNumber, Phase: req.Phase, ReservedTokens: req.ReservedTokens,
+		}
+		return nil
+	})
+	if err != nil {
+		return types.SourceWikiAttemptCallReservation{}, err
+	}
+	if transitionErr != nil {
+		return types.SourceWikiAttemptCallReservation{}, transitionErr
+	}
+	return reservation, nil
+}
+
+func (l *SourceWikiAttemptLedger) completeBatchCall(ctx context.Context, batchID string, req types.SourceWikiAttemptCallCompletion) error {
+	var overBudget bool
+	var transitionErr error
+	err := l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch types.SourceWikiBatch
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", batchID).Take(&batch).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiBatchNotFound
+			}
+			return err
+		}
+		var attempt types.SourceWikiAttempt
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", req.Lease.AttemptID).Take(&attempt).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiAttemptNotFound
+			}
+			return err
+		}
+		if err := guardBatchChildTx(tx, &batch, &attempt, req.Now); err != nil {
+			transitionErr = err
+			return nil
+		}
+		if attempt.Status != "running" || attempt.Epoch != req.Lease.Epoch || attempt.LeaseOwner != req.Lease.Owner ||
+			attempt.ModelID != req.Lease.ModelID || attempt.ModelSettingsFingerprint != req.Lease.ModelSettingsFingerprint ||
+			attempt.ModelContextWindow != req.Lease.ModelContextWindow || attempt.MaxCompletionTokens != req.Lease.MaxCompletionTokens ||
+			attempt.LeaseExpiresAt == nil || !req.Now.Before(*attempt.LeaseExpiresAt) {
+			return ErrSourceWikiAttemptFenced
+		}
+		if !req.Now.Before(attempt.DeadlineAt) {
+			transitionErr = ErrSourceWikiAttemptDeadline
+			return failBatchChildInTx(tx, &attempt, "attempt absolute time budget exhausted", req.Now)
+		}
+		var call types.SourceWikiAttemptCall
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND attempt_id = ? AND epoch = ?", req.ReservationID, attempt.ID, attempt.Epoch).Take(&call).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSourceWikiAttemptInvalidState
+			}
+			return err
+		}
+		if call.Outcome != "reserved" {
+			return ErrSourceWikiAttemptInvalidState
+		}
+		delta := 0
+		if req.ActualTokens != nil {
+			if req.Outcome == "succeeded" && *req.ActualTokens >= 0 {
+				delta = *req.ActualTokens - call.ReservedTokens
+			} else if req.Outcome == "provider_error" && *req.ActualTokens > call.ReservedTokens {
+				delta = *req.ActualTokens - call.ReservedTokens
+			}
+		}
+		nextTokens := attempt.Tokens + delta
+		if nextTokens < 0 {
+			return fmt.Errorf("%w: token ledger would become negative", ErrSourceWikiAttemptInvalidState)
+		}
+		overBudget = nextTokens > attempt.MaxTokens
+		callOutcome := req.Outcome
+		if overBudget {
+			callOutcome = "over_budget"
+		}
+		var parentCall types.SourceWikiBatchCallReservation
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("attempt_call_id = ? AND attempt_id = ? AND batch_id = ?", call.ID, attempt.ID, batch.ID).Take(&parentCall).Error; err != nil {
+			return ErrSourceWikiBatchInvalidState
+		}
+		if err := NewSourceWikiBatchLedger(l.db).RecordCallInTx(tx, parentCall.ID, callOutcome, req.ActualTokens, req.Now); err != nil {
+			return err
+		}
+		if err := tx.Model(&call).Updates(map[string]any{"outcome": callOutcome, "actual_tokens": req.ActualTokens, "completed_at": req.Now}).Error; err != nil {
+			return err
+		}
+		attemptUpdates := map[string]any{"tokens": nextTokens, "updated_at": req.Now}
+		if !overBudget && req.Outcome == "succeeded" {
+			if req.NextPhase != "" {
+				attemptUpdates["phase"] = req.NextPhase
+			}
+			if len(req.Checkpoint) > 0 {
+				attemptUpdates["checkpoint"] = req.Checkpoint
+			}
+			if len(req.Draft) > 0 {
+				attemptUpdates["draft"] = req.Draft
+			}
+			if req.Repairs != nil {
+				if *req.Repairs < attempt.Repairs || *req.Repairs > attempt.MaxRepairs {
+					return fmt.Errorf("%w: repair count is not monotonic or exceeds its limit", ErrSourceWikiAttemptInvalidState)
+				}
+				attemptUpdates["repairs"] = *req.Repairs
+			}
+		}
+		return tx.Model(&attempt).Updates(attemptUpdates).Error
+	})
+	if err != nil {
+		return err
+	}
+	if transitionErr != nil {
+		return transitionErr
+	}
+	if overBudget {
+		return ErrSourceWikiAttemptBudgetExhausted
+	}
+	return nil
+}
+
 func (l *SourceWikiAttemptLedger) SaveProgress(ctx context.Context, lease types.SourceWikiAttemptLease, progress types.SourceWikiAttemptProgress) error {
 	if progress.Phase == "" || progress.Now.IsZero() || progress.Repairs < 0 {
 		return fmt.Errorf("%w: progress checkpoint requires a phase, time and valid repair count", ErrSourceWikiAttemptInvalidState)
@@ -348,13 +700,33 @@ func (l *SourceWikiAttemptLedger) withClaim(ctx context.Context, lease types.Sou
 		return fmt.Errorf("%w: incomplete worker lease", ErrSourceWikiAttemptInvalidState)
 	}
 	var transitionErr error
-	err := l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	batchID, err := l.batchIDForAttempt(ctx, lease.AttemptID)
+	if err != nil {
+		return err
+	}
+	err = l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch *types.SourceWikiBatch
+		if batchID != "" {
+			batch = &types.SourceWikiBatch{}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", batchID).Take(batch).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrSourceWikiBatchNotFound
+				}
+				return err
+			}
+		}
 		var attempt types.SourceWikiAttempt
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", lease.AttemptID).First(&attempt).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrSourceWikiAttemptNotFound
 			}
 			return err
+		}
+		if batch != nil {
+			if err := guardBatchChildTx(tx, batch, &attempt, now); err != nil {
+				transitionErr = err
+				return nil
+			}
 		}
 		if attempt.Status != "running" {
 			return ErrSourceWikiAttemptFenced

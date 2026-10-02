@@ -2,9 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -170,11 +167,16 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 		warnings = append(warnings, "The model context window is unknown; runtime calls must enforce their own input bounds.")
 	}
 	return &types.SourceWikiBatchPreflight{
-		PreflightPassed: true, StartAvailable: false,
-		DispatchReason: "Batch generation is not enabled; preflight does not create a batch or dispatch provider calls.",
-		SourceID:       sourceID, SnapshotID: snapshot.ID, CommitSHA: snapshot.CommitSHA,
+		PreflightPassed: true, StartAvailable: model.Parameters.ContextWindow > 0,
+		DispatchReason: func() string {
+			if model.Parameters.ContextWindow <= 0 {
+				return "The model context window is unknown; batch generation cannot be started safely."
+			}
+			return ""
+		}(),
+		SourceID: sourceID, SnapshotID: snapshot.ID, CommitSHA: snapshot.CommitSHA,
 		PublishedAt: snapshot.PublishedAt, SourceUpdatedAt: dataSource.UpdatedAt,
-		ModelID: model.ID, ModelContextWindow: model.Parameters.ContextWindow,
+		ModelID: model.ID, ModelUpdatedAt: model.UpdatedAt, ModelContextWindow: model.Parameters.ContextWindow,
 		ModelContextKnown: model.Parameters.ContextWindow > 0, MaxCompletionTokens: completionTokens,
 		CandidateCount: len(plan.Topics), InitialCount: plan.InitialCount, ExpansionCount: plan.ExpansionCount,
 		ModuleCount: plan.ModuleCount, FlowCount: plan.FlowCount, InitialTopics: initialTopics,
@@ -183,7 +185,7 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 		MaxElapsedMS: types.SourceWikiBatchMaxElapsed.Milliseconds(), MaxInitialTopics: types.SourceWikiBatchMaxInitialTopics,
 		SkeletonMaxCalls: types.SourceWikiBatchSkeletonMaxCalls, SkeletonMaxTokens: types.SourceWikiBatchSkeletonMaxTokens,
 		QAMaxCalls: types.SourceWikiBatchQAMaxCalls, QAMaxTokens: types.SourceWikiBatchQAMaxTokens,
-		SourceConfigFingerprint:  sourceWikiBytesFingerprint(dataSource.Config),
+		SourceConfigFingerprint:  sourceWikiSourceFingerprint(&dataSource),
 		ModelSettingsFingerprint: modelFingerprint, PlannedTopics: plan.Topics,
 	}, nil
 }
@@ -254,31 +256,9 @@ func loadSourceWikiRestartReference(ctx context.Context, db *gorm.DB, kb *types.
 	}, nil
 }
 
-func sourceWikiBytesFingerprint(value []byte) string {
-	digest := sha256.Sum256(value)
-	return hex.EncodeToString(digest[:])
-}
-
 func sourceWikiModelSettingsFingerprint(model *types.Model) (string, error) {
 	if model == nil {
 		return "", fmt.Errorf("Wiki generation model is unavailable")
 	}
-	identity := struct {
-		ID        string                `json:"id"`
-		TenantID  uint64                `json:"tenant_id"`
-		Name      string                `json:"name"`
-		Type      types.ModelType       `json:"type"`
-		Source    types.ModelSource     `json:"source"`
-		Status    types.ModelStatus     `json:"status"`
-		UpdatedAt time.Time             `json:"updated_at"`
-		Params    types.ModelParameters `json:"parameters"`
-	}{
-		ID: model.ID, TenantID: model.TenantID, Name: model.Name, Type: model.Type,
-		Source: model.Source, Status: model.Status, UpdatedAt: model.UpdatedAt, Params: model.Parameters,
-	}
-	encoded, err := json.Marshal(identity)
-	if err != nil {
-		return "", err
-	}
-	return sourceWikiBytesFingerprint(encoded), nil
+	return sourceWikiModelFingerprint(model), nil
 }

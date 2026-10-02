@@ -14,6 +14,7 @@ CREATE TABLE source_wiki_batches (
     phase TEXT NOT NULL,
     current_topic_key TEXT NOT NULL DEFAULT '',
     cursor INTEGER NOT NULL DEFAULT 0,
+    qa_cursor INTEGER NOT NULL DEFAULT 0,
     candidate_count INTEGER NOT NULL DEFAULT 0,
     initial_count INTEGER NOT NULL DEFAULT 0,
     calls_reserved INTEGER NOT NULL DEFAULT 0,
@@ -38,6 +39,7 @@ CREATE TABLE source_wiki_batches (
     CHECK (status IN ('queued', 'running', 'completed', 'failed', 'expired')),
     CHECK (phase IN ('skeleton', 'cards', 'batch_qa', 'finished')),
     CHECK (cursor >= 0 AND candidate_count >= 0 AND initial_count >= 0 AND initial_count <= candidate_count),
+    CHECK (qa_cursor >= 0 AND qa_cursor <= initial_count),
     CHECK (max_calls > 0 AND max_calls <= 240),
     CHECK (max_tokens > 0 AND max_tokens <= 4000000),
     CHECK (max_elapsed_ms > 0 AND max_elapsed_ms <= 3600000),
@@ -75,6 +77,7 @@ CREATE TABLE source_wiki_topics (
     module_path TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 0,
+    initial BOOLEAN NOT NULL DEFAULT FALSE,
     status TEXT NOT NULL,
     uncertain BOOLEAN NOT NULL DEFAULT FALSE,
     uncertainty_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -104,6 +107,7 @@ CREATE TABLE source_wiki_batch_calls (
     phase TEXT NOT NULL,
     provider_phase TEXT NOT NULL DEFAULT '',
     reserved_tokens INTEGER NOT NULL,
+    expected_qa_cursor INTEGER,
     actual_tokens INTEGER,
     outcome TEXT NOT NULL DEFAULT 'reserved',
     created_at TIMESTAMPTZ NOT NULL,
@@ -121,6 +125,13 @@ CREATE INDEX source_wiki_batch_calls_batch_phase
     ON source_wiki_batch_calls(batch_id, phase, created_at);
 
 ALTER TABLE source_wiki_attempts
-    ADD COLUMN batch_id VARCHAR(36) REFERENCES source_wiki_batches(id) ON DELETE SET NULL;
+    ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36) REFERENCES source_wiki_batches(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS topic_kind TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS topic_key TEXT NOT NULL DEFAULT '';
 CREATE INDEX source_wiki_attempts_batch
     ON source_wiki_attempts(batch_id, created_at);
+DROP INDEX IF EXISTS source_wiki_one_running_module;
+CREATE UNIQUE INDEX source_wiki_one_running_target
+    ON source_wiki_attempts(tenant_id, knowledge_base_id, source_id,
+        COALESCE(NULLIF(batch_id, ''), 'manual'), COALESCE(NULLIF(topic_key, ''), module_path))
+    WHERE status = 'running';

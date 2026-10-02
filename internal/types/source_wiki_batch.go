@@ -60,6 +60,7 @@ type SourceWikiBatch struct {
 	Phase                    string     `json:"phase"`
 	CurrentTopicKey          string     `json:"current_topic_key,omitempty"`
 	Cursor                   int        `json:"cursor"`
+	QACursor                 int        `json:"qa_cursor"`
 	CandidateCount           int        `json:"candidate_count"`
 	InitialCount             int        `json:"initial_count"`
 	CallsReserved            int        `json:"calls_reserved"`
@@ -99,6 +100,7 @@ type SourceWikiCoverageTopic struct {
 	ModulePath          string    `json:"module_path,omitempty"`
 	Title               string    `json:"title"`
 	Priority            int       `json:"priority"`
+	Initial             bool      `json:"initial"`
 	Status              string    `json:"status"`
 	Uncertain           bool      `json:"uncertain"`
 	UncertaintyReasons  JSON      `json:"uncertainty_reasons" gorm:"type:jsonb"`
@@ -117,35 +119,42 @@ func (SourceWikiCoverageTopic) TableName() string { return "source_wiki_topics" 
 // calls mirror T17's per-attempt reservation in the same DB transaction;
 // skeleton and whole-batch QA use this ledger directly.
 type SourceWikiBatchCallReservation struct {
-	ID             string     `json:"id" gorm:"type:varchar(36);primaryKey"`
-	BatchID        string     `json:"batch_id" gorm:"type:varchar(36);index"`
-	AttemptID      *string    `json:"attempt_id,omitempty" gorm:"type:varchar(36);index"`
-	AttemptCallID  *string    `json:"attempt_call_id,omitempty" gorm:"type:varchar(36);uniqueIndex"`
-	Phase          string     `json:"phase"`
-	ProviderPhase  string     `json:"provider_phase,omitempty"`
-	ReservedTokens int        `json:"reserved_tokens"`
-	ActualTokens   *int       `json:"actual_tokens,omitempty"`
-	Outcome        string     `json:"outcome"`
-	CreatedAt      time.Time  `json:"created_at"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	ID               string     `json:"id" gorm:"type:varchar(36);primaryKey"`
+	BatchID          string     `json:"batch_id" gorm:"type:varchar(36);index"`
+	AttemptID        *string    `json:"attempt_id,omitempty" gorm:"type:varchar(36);index"`
+	AttemptCallID    *string    `json:"attempt_call_id,omitempty" gorm:"type:varchar(36);uniqueIndex"`
+	Phase            string     `json:"phase"`
+	ProviderPhase    string     `json:"provider_phase,omitempty"`
+	ReservedTokens   int        `json:"reserved_tokens"`
+	ExpectedQACursor *int       `json:"expected_qa_cursor,omitempty"`
+	ActualTokens     *int       `json:"actual_tokens,omitempty"`
+	Outcome          string     `json:"outcome"`
+	CreatedAt        time.Time  `json:"created_at"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
 }
 
 func (SourceWikiBatchCallReservation) TableName() string { return "source_wiki_batch_calls" }
 
 type SourceWikiBatchReserveCallRequest struct {
-	BatchID        string
-	AttemptID      string
-	AttemptCallID  string
-	Phase          string
-	ProviderPhase  string
-	ReservedTokens int
-	Now            time.Time
+	BatchID          string
+	AttemptID        string
+	AttemptCallID    string
+	Phase            string
+	ProviderPhase    string
+	ReservedTokens   int
+	ExpectedQACursor *int
+	Now              time.Time
 }
 
 // SourceWikiBatchPreflightRequest may identify a terminal batch whose work is
-// being planned again. It never requests resumption or budget reuse.
+// being planned again. Expected bindings prevent a stale UI preview from
+// silently starting against a newer source or model configuration.
 type SourceWikiBatchPreflightRequest struct {
-	RestartOfBatchID string `json:"restart_of_batch_id,omitempty"`
+	RestartOfBatchID        string    `json:"restart_of_batch_id,omitempty"`
+	ExpectedSnapshotID      string    `json:"expected_snapshot_id,omitempty"`
+	ExpectedSourceUpdatedAt time.Time `json:"expected_source_updated_at,omitempty"`
+	ExpectedModelID         string    `json:"expected_model_id,omitempty"`
+	ExpectedModelUpdatedAt  time.Time `json:"expected_model_updated_at,omitempty"`
 }
 
 type SourceWikiBatchRestartReference struct {
@@ -174,6 +183,7 @@ type SourceWikiBatchPreflight struct {
 	PublishedAt              *time.Time                       `json:"published_at,omitempty"`
 	SourceUpdatedAt          time.Time                        `json:"source_updated_at"`
 	ModelID                  string                           `json:"model_id"`
+	ModelUpdatedAt           time.Time                        `json:"model_updated_at"`
 	ModelContextWindow       int                              `json:"model_context_window"`
 	ModelContextKnown        bool                             `json:"model_context_known"`
 	MaxCompletionTokens      int                              `json:"max_completion_tokens"`

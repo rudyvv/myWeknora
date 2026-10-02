@@ -146,7 +146,7 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, out.Code)
 }
 
-func TestSourceWikiBatchPreflightHTTPIsScopedAndDoesNotDispatch(t *testing.T) {
+func TestSourceWikiBatchPreflightHTTPIsScopedAndStartPersistsBatch(t *testing.T) {
 	f := service.NewSourceIntegrationFixture(t)
 	f.Sync()
 	var providerCalls atomic.Int32
@@ -182,6 +182,7 @@ func TestSourceWikiBatchPreflightHTTPIsScopedAndDoesNotDispatch(t *testing.T) {
 	})
 	group := r.Group("/api/v1/knowledgebase/:kb_id/wiki", h.WikiReadScope)
 	group.POST("/source/batches/preflight", h.PreflightSourceWikiBatch)
+	group.POST("/source/batches/start", h.StartSourceWikiBatch)
 	path := "/api/v1/knowledgebase/" + f.KB.ID + "/wiki/source/batches/preflight?source_id=" + url.QueryEscape(f.Source.ID)
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -193,7 +194,7 @@ func TestSourceWikiBatchPreflightHTTPIsScopedAndDoesNotDispatch(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
 	require.True(t, result.Data.PreflightPassed)
-	require.False(t, result.Data.StartAvailable)
+	require.True(t, result.Data.StartAvailable)
 	require.Equal(t, f.Source.ID, result.Data.SourceID)
 	require.Equal(t, types.SourceWikiBatchMaxInitialTopics, result.Data.MaxInitialTopics)
 	require.NotContains(t, response.Body.String(), "source_config_fingerprint")
@@ -202,4 +203,21 @@ func TestSourceWikiBatchPreflightHTTPIsScopedAndDoesNotDispatch(t *testing.T) {
 	require.NoError(t, f.DB.Model(&types.SourceWikiBatch{}).Where("source_id = ?", f.Source.ID).Count(&batchCount).Error)
 	require.Zero(t, batchCount)
 	require.Zero(t, providerCalls.Load())
+	startPath := "/api/v1/knowledgebase/" + f.KB.ID + "/wiki/source/batches/start?source_id=" + url.QueryEscape(f.Source.ID)
+	startRequest := httptest.NewRequest(http.MethodPost, startPath, strings.NewReader(`{}`))
+	startRequest.Header.Set("Content-Type", "application/json")
+	startResponse := httptest.NewRecorder()
+	r.ServeHTTP(startResponse, startRequest)
+	require.Equal(t, http.StatusAccepted, startResponse.Code, startResponse.Body.String())
+	var started struct {
+		Data types.SourceWikiBatch `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(startResponse.Body.Bytes(), &started))
+	require.NotEmpty(t, started.Data.ID)
+	require.Equal(t, "running", started.Data.Status)
+	require.NoError(t, f.DB.Model(&types.SourceWikiBatch{}).Where("id = ?", started.Data.ID).Count(&batchCount).Error)
+	require.EqualValues(t, 1, batchCount, "HTTP start durably writes the parent before accepting the request")
+	runner, ok := generator.(interface{ StopSourceWikiBatches() })
+	require.True(t, ok)
+	t.Cleanup(runner.StopSourceWikiBatches)
 }

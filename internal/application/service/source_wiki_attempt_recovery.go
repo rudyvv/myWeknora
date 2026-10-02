@@ -79,6 +79,9 @@ func (r *SourceWikiAttemptRecovery) Stop() error {
 	r.mu.Lock()
 	cancel, done := r.cancel, r.done
 	r.mu.Unlock()
+	if batchWorker, ok := r.wiki.(interfaces.SourceWikiBatchExecutionService); ok && r.db.Migrator().HasTable(&types.SourceWikiBatch{}) {
+		batchWorker.StopSourceWikiBatches()
+	}
 	if cancel == nil {
 		return nil
 	}
@@ -122,6 +125,15 @@ func (r *SourceWikiAttemptRecovery) recoverBatch(ctx context.Context) error {
 		if err := r.recoverOne(ctx, candidate); err != nil && !errors.Is(err, repository.ErrSourceWikiAttemptLeased) &&
 			!errors.Is(err, repository.ErrSourceWikiAttemptFenced) && !errors.Is(err, repository.ErrSourceWikiAttemptInvalidState) {
 			logger.Warnf(ctx, "[SourceWikiRecovery] attempt %s recovery deferred: %v", candidate.ID, err)
+		}
+	}
+	if batchWorker, ok := r.wiki.(interfaces.SourceWikiBatchExecutionService); ok {
+		var batches []types.SourceWikiBatch
+		if err := r.db.WithContext(ctx).Where("status = 'running'").Order("updated_at ASC, id ASC").Limit(r.batchSize).Find(&batches).Error; err != nil {
+			return err
+		}
+		for _, batch := range batches {
+			batchWorker.ResumeSourceWikiBatch(ctx, batch.ID)
 		}
 	}
 	return nil
@@ -197,10 +209,20 @@ func (r *SourceWikiAttemptRecovery) recoverOne(parent context.Context, candidate
 		model.Parameters.ContextWindow <= attempt.MaxCompletionTokens {
 		return r.terminalize(taskCtx, ledger, attempt.ID, "Wiki model settings or confirmed context window changed during module generation")
 	}
-	_, err = r.wiki.GenerateModule(taskCtx, types.SourceWikiGenerateRequest{
+	request := types.SourceWikiGenerateRequest{
 		KnowledgeBaseID: attempt.KnowledgeBaseID, AttemptID: attempt.ID, SourceID: attempt.SourceID,
 		ModulePath: attempt.ModulePath, Title: attempt.Title,
-	})
+	}
+	if attempt.BatchID != "" {
+		request.BatchID, request.TopicKind, request.TopicKey = attempt.BatchID, attempt.TopicKind, attempt.TopicKey
+		batchExecution, ok := r.wiki.(interfaces.SourceWikiBatchExecutionService)
+		if !ok {
+			return ledger.FailRecoveryTarget(taskCtx, attempt, "batch topic recovery service is unavailable", time.Now())
+		}
+		_, err = batchExecution.GenerateTopic(taskCtx, request)
+	} else {
+		_, err = r.wiki.GenerateModule(taskCtx, request)
+	}
 	if errors.Is(err, repository.ErrSourceWikiAttemptDeadline) {
 		return nil
 	}

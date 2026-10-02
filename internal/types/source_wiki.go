@@ -27,6 +27,8 @@ type SourceWikiEvidence struct {
 
 type SourceWikiProvenance struct {
 	SourceID             string               `json:"source_id"`
+	TopicKind            string               `json:"topic_kind,omitempty"`
+	TopicKey             string               `json:"topic_key,omitempty"`
 	ModulePath           string               `json:"module_path"`
 	State                string               `json:"state"`
 	ApplicableSnapshotID string               `json:"applicable_snapshot_id"`
@@ -59,6 +61,12 @@ type SourceWikiGenerateRequest struct {
 	SourceID   string `json:"source_id" binding:"required"`
 	ModulePath string `json:"module_path" binding:"required"`
 	Title      string `json:"title" binding:"required"`
+	// These fields are populated only by the server-side durable batch runner.
+	// They are excluded from JSON so callers cannot select a batch or topic.
+	BatchID   string               `json:"-"`
+	TopicKind string               `json:"-"`
+	TopicKey  string               `json:"-"`
+	Relations []SourceCodeRelation `json:"-"`
 }
 type SourceWikiAttempt struct {
 	ID                       string      `json:"id" gorm:"type:varchar(36);primaryKey"`
@@ -66,6 +74,9 @@ type SourceWikiAttempt struct {
 	KnowledgeBaseID          string      `json:"knowledge_base_id" gorm:"type:varchar(36)"`
 	SourceID                 string      `json:"source_id" gorm:"type:varchar(36)"`
 	SnapshotID               string      `json:"snapshot_id" gorm:"type:varchar(36)"`
+	BatchID                  string      `json:"batch_id,omitempty" gorm:"type:varchar(36);index"`
+	TopicKind                string      `json:"topic_kind,omitempty" gorm:"type:text;not null;default:''"`
+	TopicKey                 string      `json:"topic_key,omitempty" gorm:"type:text;not null;default:''"`
 	ModulePath               string      `json:"module_path"`
 	Title                    string      `json:"title"`
 	Slug                     string      `json:"slug"`

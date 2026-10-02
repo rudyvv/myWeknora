@@ -192,6 +192,7 @@ func TestWikiWriteRoutesDenyOutOfScopeAPIKeyKB(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/v1/knowledgebase/kb-other/wiki/pages"},
 		{http.MethodPost, "/api/v1/knowledgebase/kb-other/wiki/source/batches/preflight?source_id=source-id"},
+		{http.MethodPost, "/api/v1/knowledgebase/kb-other/wiki/source/batches/start?source_id=source-id"},
 		{http.MethodPut, "/api/v1/knowledgebase/kb-other/wiki/pages/some-page"},
 		{http.MethodDelete, "/api/v1/knowledgebase/kb-other/wiki/pages/some-page"},
 		{http.MethodPost, "/api/v1/knowledgebase/kb-other/wiki/folders"},

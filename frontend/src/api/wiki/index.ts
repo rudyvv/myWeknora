@@ -380,9 +380,9 @@ export interface SourceWikiBatch {
  deadline_at: string; reason?: string; created_at: string; updated_at: string; finished_at?: string;
 }
 export interface SourceWikiBatchPreflight {
- preflight_passed: boolean; start_available: boolean; dispatch_reason?: string;
- source_id: string; snapshot_id: string; commit_sha: string; source_updated_at: string;
- model_id: string; model_context_window: number; model_context_known: boolean; max_completion_tokens: number;
+  preflight_passed: boolean; start_available: boolean; dispatch_reason?: string;
+  source_id: string; snapshot_id: string; commit_sha: string; source_updated_at: string;
+  model_id: string; model_updated_at: string; model_context_window: number; model_context_known: boolean; max_completion_tokens: number;
  candidate_count: number; initial_count: number; expansion_count: number; module_count: number; flow_count: number;
  initial_topics: Array<Pick<SourceWikiCoverageTopic, 'topic_key' | 'kind' | 'title' | 'priority' | 'status' | 'uncertain'> & { uncertainty_reasons?: string[] }>;
  restart_from?: Pick<SourceWikiBatch, 'id' | 'status' | 'snapshot_id' | 'phase' | 'cursor' | 'candidate_count' | 'initial_count' | 'calls_reserved' | 'tokens_reserved'>;
@@ -398,6 +398,18 @@ export function preflightSourceWikiBatch(kbId: string, sourceId: string, restart
  return post(`/api/v1/knowledgebase/${kbId}/wiki/source/batches/preflight?${query.toString()}`,
   restartOfBatchId ? { restart_of_batch_id: restartOfBatchId } : {}, { timeout: 190000 });
 }
+ export function startSourceWikiBatch(kbId: string, sourceId: string, preview?: SourceWikiBatchPreflight) {
+   const query = new URLSearchParams({ source_id: sourceId });
+   const body = preview ? {
+    restart_of_batch_id: preview.restart_from?.id,
+    expected_snapshot_id: preview.snapshot_id,
+    expected_source_updated_at: preview.source_updated_at,
+    expected_model_id: preview.model_id,
+    expected_model_updated_at: preview.model_updated_at,
+   } : {};
+   return post(`/api/v1/knowledgebase/${kbId}/wiki/source/batches/start?${query.toString()}`,
+    body, { timeout: 190000 });
+ }
 export function listSourceWikiBatches(kbId: string, sourceId: string) {
  const query = new URLSearchParams({ source_id: sourceId });
  return get(`/api/v1/knowledgebase/${kbId}/wiki/source/batches?${query.toString()}`);

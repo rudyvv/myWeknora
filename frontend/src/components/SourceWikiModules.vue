@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { listDataSources, type DataSource } from '@/api/datasource'
-import { generateSourceWikiModule, listSourceWikiAttempts, listSourceWikiCoverage, type SourceWikiAttempt, type SourceWikiCoverageTopic } from '@/api/wiki'
+import { generateSourceWikiModule, listSourceWikiAttempts, listSourceWikiCoverage, listSourceWikiBatches, preflightSourceWikiBatch, startSourceWikiBatch, type SourceWikiAttempt, type SourceWikiBatch, type SourceWikiBatchPreflight, type SourceWikiCoverageTopic } from '@/api/wiki'
 const props = defineProps<{ kbId: string; canEdit?: boolean }>()
 const emit = defineEmits<{ (e: 'ready', slug: string): void }>()
 const sources = ref<DataSource[]>([])
 const attempts = ref<SourceWikiAttempt[]>([])
 const coverage = ref<SourceWikiCoverageTopic[]>([])
+const activeBatch = ref<SourceWikiBatch | null>(null)
+const batchPreview = ref<SourceWikiBatchPreflight | null>(null)
 const sourceID = ref('')
 const modulePath = ref('')
 const title = ref('')
@@ -15,6 +17,7 @@ const error = ref('')
 let generation = 0
 let requestGeneration = 0
 let coverageGeneration = 0
+let batchTimer: ReturnType<typeof setInterval> | null = null
 async function load() {
   const current = ++generation
   try {
@@ -42,8 +45,49 @@ async function loadCoverage() {
     }
   }
 }
+async function loadBatch() {
+  const kbID = props.kbId
+  const activeSourceID = sourceID.value
+  if (!activeSourceID) { activeBatch.value = null; return }
+  try {
+    const response: any = await listSourceWikiBatches(kbID, activeSourceID)
+    if (kbID !== props.kbId || activeSourceID !== sourceID.value) return
+    const batches = (response.data || []) as SourceWikiBatch[]
+    const runningBatch = batches.find(batch => batch.status === 'running' || batch.status === 'queued')
+    activeBatch.value = runningBatch || batches[0] || null
+    if (runningBatch && !batchTimer) batchTimer = setInterval(() => { void loadBatch(); void loadCoverage(); void load() }, 5000)
+    if (!runningBatch && batchTimer) { clearInterval(batchTimer); batchTimer = null }
+  } catch { if (kbID === props.kbId && activeSourceID === sourceID.value) error.value = '暂时无法读取批量生成状态。' }
+}
+async function previewBatch() {
+  if (busy.value || !props.canEdit || !sourceID.value) return
+  busy.value = true; error.value = ''; batchPreview.value = null
+  const kbID = props.kbId; const activeSourceID = sourceID.value
+  try {
+    const response: any = await preflightSourceWikiBatch(kbID, activeSourceID)
+    if (kbID !== props.kbId || activeSourceID !== sourceID.value) return
+    batchPreview.value = response.data || null
+    if (!batchPreview.value?.preflight_passed || !batchPreview.value?.start_available) error.value = batchPreview.value?.dispatch_reason || '当前仓库尚不能安全启动批量生成。'
+  } catch { if (kbID === props.kbId && activeSourceID === sourceID.value) error.value = '批量计划预检失败，请稍后重试。' }
+  finally { busy.value = false }
+}
+async function startBatch() {
+  if (busy.value || !props.canEdit || !sourceID.value || !batchPreview.value?.start_available) return
+  busy.value = true; error.value = ''
+  const kbID = props.kbId; const activeSourceID = sourceID.value
+  try {
+    const response: any = await startSourceWikiBatch(kbID, activeSourceID, batchPreview.value)
+    if (kbID !== props.kbId || activeSourceID !== sourceID.value) return
+    activeBatch.value = response.data || null; batchPreview.value = null
+    await Promise.all([loadBatch(), loadCoverage(), load()])
+  } catch { if (kbID === props.kbId && activeSourceID === sourceID.value) error.value = '批量生成未启动；请刷新状态后重新预检。' }
+  finally { busy.value = false }
+}
 function statusText(status: SourceWikiCoverageTopic['status']) {
   return ({ planned: '计划中', ready: '已就绪', draft: '草稿已保留', failed: '失败', insufficient_evidence: '证据不足', expansion: '待扩展' })[status]
+}
+function batchStatusText(status: string) {
+  return ({ queued: '排队中', running: '生成中', completed: '已完成', failed: '失败', expired: '已超时' } as Record<string, string>)[status] || status
 }
 async function generate(attempt?: SourceWikiAttempt) {
   if (busy.value || !props.canEdit) return
@@ -67,10 +111,13 @@ async function generate(attempt?: SourceWikiAttempt) {
 watch(() => props.kbId, () => {
   ++requestGeneration
   ++coverageGeneration
+  if (batchTimer) { clearInterval(batchTimer); batchTimer = null }
   sources.value = []; attempts.value = []; coverage.value = []; sourceID.value = ''; modulePath.value = ''; title.value = ''; error.value = ''; busy.value = false
+  activeBatch.value = null; batchPreview.value = null
   void load()
 }, { immediate: true })
-watch(sourceID, () => { void loadCoverage() })
+watch(sourceID, () => { batchPreview.value = null; void loadCoverage(); void loadBatch() })
+onBeforeUnmount(() => { if (batchTimer) clearInterval(batchTimer); ++generation; ++requestGeneration; ++coverageGeneration })
 </script>
 
 <template>
@@ -82,6 +129,15 @@ watch(sourceID, () => { void loadCoverage() })
       <label>主题<input v-model="title" required aria-label="技术卡片主题" placeholder="例如 排班模块职责" /></label>
       <button :disabled="busy || !sourceID || !modulePath || !title" type="submit">{{ busy ? '正在核验证据…' : '生成模块卡片' }}</button>
     </form>
+    <section v-if="sourceID" class="batch" aria-label="批量生成源码技术卡片">
+      <h3>批量生成重要主题卡片</h3>
+      <button v-if="canEdit && activeBatch?.status !== 'running' && activeBatch?.status !== 'queued'" type="button" :disabled="busy" @click="previewBatch">{{ busy ? '正在检查固定版本…' : '预检并预览计划' }}</button>
+      <p v-if="batchPreview">固定版本 {{ batchPreview.commit_sha.slice(0, 12) }} · {{ batchPreview.initial_count }} 张初始卡片 · {{ batchPreview.candidate_count }} 个候选主题（含 {{ batchPreview.expansion_count }} 个待扩展项）</p>
+      <ul v-if="batchPreview" class="preview-list"><li v-for="topic in batchPreview.initial_topics.slice(0, 8)" :key="topic.topic_key">{{ topic.title }} · {{ topic.kind }}</li></ul>
+      <button v-if="canEdit && batchPreview?.start_available" type="button" :disabled="busy" @click="startBatch">启动这批 {{ batchPreview.initial_count }} 张卡片</button>
+      <p v-if="activeBatch" role="status">批量{{ batchStatusText(activeBatch.status) }} · {{ activeBatch.phase }} · {{ activeBatch.cursor }}/{{ activeBatch.initial_count }} · {{ activeBatch.calls_reserved }} 次调用 · {{ activeBatch.tokens_reserved }} tokens</p>
+      <p v-if="activeBatch?.reason">{{ activeBatch.reason }}</p>
+    </section>
     <p v-if="error" role="alert">{{ error }}</p>
     <section v-if="sourceID" class="coverage" aria-label="源码主题覆盖">
       <h3>主题覆盖清单</h3>
