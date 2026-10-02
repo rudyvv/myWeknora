@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +13,10 @@ import (
 )
 
 const (
-	sourceWikiFlowDiagramMaxEdges = 64
-	sourceWikiFlowDiagramMaxLabel = 160
+	sourceWikiFlowDiagramMaxEdges      = 64
+	sourceWikiFlowDiagramMaxLabel      = 160
+	sourceWikiFlowDiagramMaxFactRefs   = 256
+	sourceWikiFlowDiagramMaxContextLen = 1 << 20
 )
 
 var errSourceWikiFlowDiagramLimit = errors.New("source Wiki flow diagram exceeds its 64-edge limit")
@@ -96,10 +99,14 @@ func BuildSourceWikiFlowDiagram(relations []types.SourceCodeRelation, evidence [
 		if err != nil {
 			return SourceWikiFlowDiagram{}, fmt.Errorf("source Wiki flow relation has an invalid source range: %w", err)
 		}
+		contextEvidence, contextCovered, err := sourceWikiFlowContextEvidenceIDs(relation.Context, relation, evidence)
+		if err != nil {
+			return SourceWikiFlowDiagram{}, err
+		}
 		fromEvidence := sourceWikiFlowEvidenceIDs(evidenceByEndpoint[sourceWikiFlowEvidenceKey{
 			sourceID: relation.DataSourceID, snapshotID: relation.SnapshotID, versionID: relation.FromVersionID, path: relation.FromPath,
 		}], fromRange)
-		if len(fromEvidence) == 0 {
+		if len(fromEvidence) == 0 || !contextCovered {
 			continue
 		}
 
@@ -142,6 +149,7 @@ func BuildSourceWikiFlowDiagram(relations []types.SourceCodeRelation, evidence [
 		}
 
 		allEvidence := append(fromEvidence, toEvidence...)
+		allEvidence = append(allEvidence, contextEvidence...)
 		sort.Strings(allEvidence)
 		allEvidence = uniqueSourceWikiFlowStrings(allEvidence)
 		edges = append(edges, sourceWikiFlowEdge{
@@ -224,6 +232,76 @@ func BuildSourceWikiFlowDiagram(relations []types.SourceCodeRelation, evidence [
 	}
 	sort.Strings(evidenceIDs)
 	return SourceWikiFlowDiagram{Markdown: markdown.String(), EvidenceIDs: evidenceIDs, Uncertain: uncertain}, nil
+}
+
+func sourceWikiFlowContextEvidenceIDs(raw types.JSON, relation types.SourceCodeRelation, evidence []types.SourceWikiEvidence) ([]string, bool, error) {
+	if len(raw) == 0 {
+		return nil, true, nil
+	}
+	encoded := bytes.TrimSpace(raw)
+	if len(encoded) == 0 || bytes.Equal(encoded, []byte("null")) {
+		return nil, true, nil
+	}
+	if len(raw) > sourceWikiFlowDiagramMaxContextLen || encoded[0] != '[' {
+		return nil, false, fmt.Errorf("source Wiki flow relation context must be a JSON array of causal references")
+	}
+	var refs []types.SourceRelationFactRef
+	if err := json.Unmarshal(encoded, &refs); err != nil {
+		return nil, false, fmt.Errorf("source Wiki flow relation has malformed causal references: %w", err)
+	}
+	if len(refs) > sourceWikiFlowDiagramMaxFactRefs {
+		return nil, false, fmt.Errorf("source Wiki flow relation exceeds its causal-reference limit")
+	}
+	var ids []string
+	covered := true
+	seenRefs := make(map[types.SourceRelationFactRef]struct{}, len(refs))
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.DataSourceID) == "" || strings.TrimSpace(ref.SnapshotID) == "" ||
+			strings.TrimSpace(ref.FileID) == "" || strings.TrimSpace(ref.FileVersionID) == "" || strings.TrimSpace(ref.Path) == "" ||
+			strings.TrimSpace(ref.Kind) == "" || strings.TrimSpace(ref.Role) == "" || strings.TrimSpace(ref.Quality) == "" ||
+			ref.Range.StartByte < 0 || ref.Range.EndByte <= ref.Range.StartByte || ref.Range.StartLine < 1 || ref.Range.EndLine < ref.Range.StartLine {
+			return nil, false, fmt.Errorf("source Wiki flow relation has an incomplete causal reference")
+		}
+		if ref.DataSourceID != relation.DataSourceID || ref.SnapshotID != relation.SnapshotID {
+			return nil, false, fmt.Errorf("source Wiki flow causal reference crosses source or snapshot boundaries")
+		}
+		expectedKind, supportedRole := sourceWikiFlowFactKindForRole(ref.Role)
+		if !supportedRole || ref.Kind != expectedKind {
+			return nil, false, fmt.Errorf("source Wiki flow relation has an invalid causal-reference role/kind pair")
+		}
+		if _, exists := seenRefs[ref]; exists {
+			return nil, false, fmt.Errorf("source Wiki flow relation has duplicate causal references")
+		}
+		seenRefs[ref] = struct{}{}
+		found := false
+		for _, item := range evidence {
+			if item.ID == "" || item.DataSourceID != ref.DataSourceID || item.SnapshotID != ref.SnapshotID ||
+				item.KnowledgeID != ref.FileID || item.FileVersionID != ref.FileVersionID || item.Path != ref.Path ||
+				!sourceWikiFlowRangeCovers(item.Range, ref.Range) {
+				continue
+			}
+			ids = append(ids, item.ID)
+			found = true
+		}
+		if !found {
+			covered = false
+		}
+	}
+	sort.Strings(ids)
+	return uniqueSourceWikiFlowStrings(ids), covered, nil
+}
+
+func sourceWikiFlowFactKindForRole(role string) (string, bool) {
+	switch role {
+	case "api_prefix":
+		return "api_prefix", true
+	case "api_proxy":
+		return "api_proxy", true
+	case "spring_class_mapping":
+		return "spring_mapping", true
+	default:
+		return "", false
+	}
 }
 
 func sourceWikiFlowDiagramKindAllowed(kind string) bool {

@@ -27,6 +27,31 @@ func flowEvidence(id, path, version string, start, end, startLine, endLine int) 
 	}
 }
 
+type flowFactRefFixture struct {
+	DataSourceID  string            `json:"data_source_id"`
+	SnapshotID    string            `json:"snapshot_id"`
+	FileID        string            `json:"file_id"`
+	FileVersionID string            `json:"file_version_id"`
+	Path          string            `json:"path"`
+	Kind          string            `json:"kind"`
+	Role          string            `json:"role"`
+	Quality       string            `json:"quality"`
+	Range         types.SourceRange `json:"range"`
+}
+
+func flowFactRefsJSON(t *testing.T, refs ...flowFactRefFixture) types.JSON {
+	t.Helper()
+	data, err := json.Marshal(refs)
+	require.NoError(t, err)
+	return types.JSON(data)
+}
+
+func flowFactEvidence(id, fileID, path, version string, start, end, startLine, endLine int) types.SourceWikiEvidence {
+	evidence := flowEvidence(id, path, version, start, end, startLine, endLine)
+	evidence.KnowledgeID = fileID
+	return evidence
+}
+
 func flowRelation(t *testing.T, kind, fromFile, fromVersion, fromPath string, fromRange types.SourceRange,
 	toFile, toVersion, toPath, toKey string, toRange types.SourceRange,
 ) types.SourceCodeRelation {
@@ -70,6 +95,178 @@ func TestBuildSourceWikiFlowDiagramRendersEvidenceBackedStaticChain(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, got.Markdown, reversed.Markdown, "diagram output is stable regardless of input relation order")
 	require.Equal(t, got.EvidenceIDs, reversed.EvidenceIDs)
+}
+
+func TestBuildSourceWikiFlowDiagramRetainsOnlyFullyBackedContextFactEdges(t *testing.T) {
+	fromRange := types.SourceRange{StartByte: 10, EndByte: 24, StartLine: 2, EndLine: 2}
+	toRange := types.SourceRange{StartByte: 40, EndByte: 56, StartLine: 7, EndLine: 7}
+	relation := flowRelation(t, "method_call", "file-a", "version-a", "api/Controller.java", fromRange,
+		"file-b", "version-b", "svc/Service.java", "Service.run", toRange)
+	refs := []flowFactRefFixture{
+		{DataSourceID: "source-1", SnapshotID: "snapshot-1", FileID: "file-prefix", FileVersionID: "prefix-v1", Path: "api/RoutePrefix.java", Kind: "api_prefix", Role: "api_prefix", Quality: "high", Range: types.SourceRange{StartByte: 4, EndByte: 12, StartLine: 1, EndLine: 1}},
+		{DataSourceID: "source-1", SnapshotID: "snapshot-1", FileID: "file-proxy", FileVersionID: "proxy-v1", Path: "svc/ServiceProxy.java", Kind: "api_proxy", Role: "api_proxy", Quality: "high", Range: types.SourceRange{StartByte: 30, EndByte: 42, StartLine: 4, EndLine: 4}},
+		{DataSourceID: "source-1", SnapshotID: "snapshot-1", FileID: "file-a", FileVersionID: "version-a", Path: "api/Controller.java", Kind: "spring_mapping", Role: "spring_class_mapping", Quality: "high", Range: types.SourceRange{StartByte: 0, EndByte: 9, StartLine: 1, EndLine: 1}},
+	}
+	relation.Context = flowFactRefsJSON(t, refs...)
+	evidence := []types.SourceWikiEvidence{
+		flowFactEvidence("ev-a", "file-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+		flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+		flowFactEvidence("ev-prefix", "file-prefix", "api/RoutePrefix.java", "prefix-v1", 0, 20, 1, 2),
+		flowFactEvidence("ev-proxy", "file-proxy", "svc/ServiceProxy.java", "proxy-v1", 25, 50, 3, 6),
+		flowFactEvidence("ev-class-prefix", "file-a", "api/Controller.java", "version-a", 0, 9, 1, 1),
+	}
+
+	got, err := BuildSourceWikiFlowDiagram([]types.SourceCodeRelation{relation}, evidence)
+	require.NoError(t, err)
+	require.Equal(t, []string{"ev-a", "ev-b", "ev-class-prefix", "ev-prefix", "ev-proxy"}, got.EvidenceIDs,
+		"all causal facts, including cross-file contributors, must be retained as exact Wiki evidence")
+	require.False(t, got.Uncertain)
+	require.Contains(t, got.Markdown, " -->|method call|")
+
+	uncertain := relation
+	uncertain.Determinacy = "uncertain"
+	got, err = BuildSourceWikiFlowDiagram([]types.SourceCodeRelation{uncertain}, evidence)
+	require.NoError(t, err)
+	require.True(t, got.Uncertain, "causal references must not upgrade uncertain relations")
+	require.Contains(t, got.Markdown, "-.->|uncertain method call|")
+	require.NotContains(t, got.Markdown, " -->|method call|")
+
+	legacy := relation
+	legacy.Context = types.JSON("null")
+	got, err = BuildSourceWikiFlowDiagram([]types.SourceCodeRelation{legacy}, evidence[:2])
+	require.NoError(t, err)
+	require.NotEmpty(t, got.Markdown, "legacy relations without fact refs retain endpoint-only diagrams")
+	require.Equal(t, []string{"ev-a", "ev-b"}, got.EvidenceIDs)
+
+	for _, tc := range []struct {
+		name      string
+		ref       flowFactRefFixture
+		evidence  []types.SourceWikiEvidence
+		context   types.JSON
+		wantError bool
+	}{
+		{
+			name: "uncovered causal range cannot leave the edge verified",
+			ref:  refs[0],
+			evidence: []types.SourceWikiEvidence{
+				flowEvidence("ev-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+				flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+			},
+		},
+		{
+			name:      "cross-snapshot causal reference is rejected",
+			ref:       func() flowFactRefFixture { ref := refs[0]; ref.SnapshotID = "snapshot-old"; return ref }(),
+			wantError: true,
+		},
+		{
+			name:      "cross-source causal reference is rejected",
+			ref:       func() flowFactRefFixture { ref := refs[0]; ref.DataSourceID = "source-other"; return ref }(),
+			wantError: true,
+		},
+		{
+			name: "wrong file identity cannot borrow path evidence",
+			ref:  func() flowFactRefFixture { ref := refs[0]; ref.FileID = "another-file"; return ref }(),
+			evidence: []types.SourceWikiEvidence{
+				flowEvidence("ev-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+				flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+				flowFactEvidence("ev-prefix", "file-prefix", "api/RoutePrefix.java", "prefix-v1", 0, 20, 1, 2),
+			},
+		},
+		{
+			name: "evidence from another source does not cover a causal ref",
+			ref:  refs[0],
+			evidence: func() []types.SourceWikiEvidence {
+				prefix := flowFactEvidence("ev-prefix", "file-prefix", "api/RoutePrefix.java", "prefix-v1", 0, 20, 1, 2)
+				prefix.DataSourceID = "source-other"
+				return []types.SourceWikiEvidence{
+					flowEvidence("ev-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+					flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+					prefix,
+				}
+			}(),
+		},
+		{
+			name: "evidence from another snapshot does not cover a causal ref",
+			ref:  refs[0],
+			evidence: func() []types.SourceWikiEvidence {
+				prefix := flowFactEvidence("ev-prefix", "file-prefix", "api/RoutePrefix.java", "prefix-v1", 0, 20, 1, 2)
+				prefix.SnapshotID = "snapshot-old"
+				return []types.SourceWikiEvidence{
+					flowEvidence("ev-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+					flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+					prefix,
+				}
+			}(),
+		},
+		{
+			name: "evidence with another file version does not cover a causal ref",
+			ref:  refs[0],
+			evidence: []types.SourceWikiEvidence{
+				flowEvidence("ev-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+				flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+				flowFactEvidence("ev-prefix", "file-prefix", "api/RoutePrefix.java", "old-version", 0, 20, 1, 2),
+			},
+		},
+		{
+			name: "evidence with another path does not cover a causal ref",
+			ref:  refs[0],
+			evidence: []types.SourceWikiEvidence{
+				flowEvidence("ev-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+				flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+				flowFactEvidence("ev-prefix", "file-prefix", "api/OtherPrefix.java", "prefix-v1", 0, 20, 1, 2),
+			},
+		},
+		{
+			name: "evidence with a partial range does not cover a causal ref",
+			ref:  refs[0],
+			evidence: []types.SourceWikiEvidence{
+				flowEvidence("ev-a", "api/Controller.java", "version-a", 0, 35, 1, 4),
+				flowEvidence("ev-b", "svc/Service.java", "version-b", 35, 70, 6, 9),
+				flowFactEvidence("ev-prefix", "file-prefix", "api/RoutePrefix.java", "prefix-v1", 4, 11, 1, 1),
+			},
+		},
+		{
+			name:      "mismatched role and fact kind are rejected",
+			ref:       func() flowFactRefFixture { ref := refs[0]; ref.Role = "api_proxy"; return ref }(),
+			wantError: true,
+		},
+		{
+			name:      "duplicate causal reference is rejected",
+			context:   flowFactRefsJSON(t, refs[0], refs[0]),
+			wantError: true,
+		},
+		{
+			name:      "malformed context JSON is rejected",
+			context:   types.JSON(`{"file_id":"file-prefix"`),
+			wantError: true,
+		},
+		{
+			name:      "incomplete causal reference is rejected",
+			ref:       flowFactRefFixture{DataSourceID: "source-1", SnapshotID: "snapshot-1", FileID: "file-prefix"},
+			wantError: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := relation
+			if tc.context != nil {
+				candidate.Context = tc.context
+			} else {
+				candidate.Context = flowFactRefsJSON(t, tc.ref)
+			}
+			candidateEvidence := tc.evidence
+			if candidateEvidence == nil {
+				candidateEvidence = evidence
+			}
+			got, err := BuildSourceWikiFlowDiagram([]types.SourceCodeRelation{candidate}, candidateEvidence)
+			if tc.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Empty(t, got.Markdown, "an edge missing exact evidence for any causal ref must not remain in the diagram")
+			require.Empty(t, got.EvidenceIDs)
+		})
+	}
 }
 
 func TestBuildSourceWikiFlowDiagramOmitsUncoveredOrCrossSnapshotEndpoints(t *testing.T) {
