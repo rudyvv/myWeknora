@@ -23,6 +23,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func newSourceWikiBatchLedgerFixture(t *testing.T, f *javaSourceFixture) *repository.SourceWikiBatchLedger {
@@ -1083,4 +1084,160 @@ func byCoverageTopic(t *testing.T, topics []types.SourceWikiCoverageTopic, key s
 	}
 	require.FailNow(t, "coverage topic missing", key)
 	return types.SourceWikiCoverageTopic{}
+}
+
+func TestSourceWikiManualRetryRepairsTerminalFailedInitialCoverage(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"The source declares a schedule.","sections":[{"text":"The module declares the cited component.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, now)
+	require.NoError(t, ledger.Create(f.ctx, batch))
+	require.NoError(t, ledger.UpdateProgress(f.ctx, batch.ID, "cards", "failed", "", "whole-batch QA failed", 0, now.Add(time.Millisecond)))
+	topic := types.SourceWikiCoverageTopic{
+		ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID,
+		SourceID: f.ds.ID, TopicKey: "module/src", SnapshotID: publication.SnapshotID,
+		Kind: "module", ModulePath: "src", Title: "Scheduling module", Priority: 10,
+		Initial: true, Status: "failed", UncertaintyReasons: types.JSON("[]"), Relations: types.JSON("[]"),
+		BatchID: &batch.ID, WikiSlug: sourceWikiModuleSlug(f.ds.ID, "src"), UpdatedAt: now,
+	}
+	require.NoError(t, f.db.Create(&topic).Error)
+	parentBefore, err := ledger.Get(f.ctx, f.kb.ID, batch.ID)
+	require.NoError(t, err)
+	manualAttempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ready", manualAttempt.Status)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, topic.WikiSlug)
+	require.NoError(t, err)
+	require.Equal(t, types.WikiPageStatusPublished, page.Status)
+	readService, ok := generator.(interfaces.SourceWikiBatchReadService)
+	require.True(t, ok)
+	coverage, err := readService.ListSourceWikiCoverage(f.ctx, f.kb.ID, f.ds.ID)
+	require.NoError(t, err)
+	updated := byCoverageTopic(t, coverage, topic.TopicKey)
+	require.Equal(t, "ready", updated.Status)
+	require.Equal(t, publication.SnapshotID, updated.LastReadySnapshotID)
+	require.NotNil(t, updated.AttemptID)
+	require.Equal(t, manualAttempt.ID, *updated.AttemptID)
+	require.NotNil(t, updated.BatchID)
+	require.Equal(t, batch.ID, *updated.BatchID, "manual repair must preserve the terminal batch association")
+	unchangedBatch, err := ledger.Get(f.ctx, f.kb.ID, batch.ID)
+	require.NoError(t, err)
+	require.Equal(t, parentBefore.Status, unchangedBatch.Status)
+	require.Equal(t, parentBefore.Phase, unchangedBatch.Phase)
+	require.Equal(t, parentBefore.Cursor, unchangedBatch.Cursor)
+	require.Equal(t, parentBefore.QACursor, unchangedBatch.QACursor)
+	require.Equal(t, parentBefore.PublishCursor, unchangedBatch.PublishCursor)
+	require.Equal(t, parentBefore.CallsReserved, unchangedBatch.CallsReserved)
+	require.Equal(t, parentBefore.TokensReserved, unchangedBatch.TokensReserved)
+	require.Equal(t, parentBefore.CandidateCount, unchangedBatch.CandidateCount)
+}
+
+func TestSourceWikiFlowEvidenceCapturesLateRelationRanges(t *testing.T) {
+	padding := strings.Repeat("// padding to keep the real handler after the file header\n", 100)
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"src/LateMapper.java":       []byte("package demo;\npublic interface LateMapper {\n" + padding + " String find();\n}\n"),
+		"src/mapper/LateMapper.xml": []byte("<mapper namespace=\"demo.LateMapper\"><select id=\"find\">SELECT id FROM users</select></mapper>\n"),
+	})
+	syncSourceFixture(t, f)
+	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` })
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	var relations []types.SourceCodeRelation
+	require.NoError(t, f.db.Where("snapshot_id = ? AND kind = 'mapper_statement' AND from_path = ? AND to_path = ?", publication.SnapshotID, "src/LateMapper.java", "src/mapper/LateMapper.xml").Find(&relations).Error)
+	require.NotEmpty(t, relations)
+	var fromRange types.SourceRange
+	require.NoError(t, json.Unmarshal(relations[0].FromRange, &fromRange))
+	require.Greater(t, fromRange.StartByte, 2048)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, time.Now().UTC().Truncate(time.Millisecond))
+	require.NoError(t, repository.NewSourceWikiBatchLedger(f.db).CreateWithPlan(f.ctx, batch, []types.SourceWikiTopic{{
+		SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "flow/GET /late", Kind: "flow",
+		Title: "GET /late", Priority: 100, Status: "planned", Relations: relations,
+	}}, time.Now()))
+	var coverage types.SourceWikiCoverageTopic
+	require.NoError(t, f.db.Where("batch_id = ? AND topic_key = ?", batch.ID, "flow/GET /late").Take(&coverage).Error)
+	evidence, err := generator.(*sourceWikiService).collectTopicEvidence(f.ctx, f.kb.ID, &types.SourceWikiAttempt{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID,
+		BatchID: batch.ID, TopicKey: coverage.TopicKey, TopicKind: "flow", ModelContextWindow: 65536, MaxCompletionTokens: 1024,
+	})
+	require.NoError(t, err)
+	records := make([]types.SourceWikiEvidence, 0, len(evidence))
+	for _, item := range evidence {
+		records = append(records, item.Evidence)
+	}
+	for _, relation := range relations {
+		for _, endpoint := range []struct {
+			fileID, versionID, path string
+			rawRange                types.JSON
+		}{{relation.FromFileID, relation.FromVersionID, relation.FromPath, relation.FromRange}, {relation.ToFileID, relation.ToVersionID, relation.ToPath, relation.ToRange}} {
+			if endpoint.fileID == "" {
+				continue
+			}
+			var required types.SourceRange
+			require.NoError(t, json.Unmarshal(endpoint.rawRange, &required))
+			covered := false
+			for _, item := range records {
+				if item.DataSourceID == relation.DataSourceID && item.SnapshotID == relation.SnapshotID &&
+					item.KnowledgeID == endpoint.fileID && item.FileVersionID == endpoint.versionID && item.Path == endpoint.path &&
+					sourceWikiFlowRangeCovers(item.Range, required) {
+					covered = true
+					break
+				}
+			}
+			require.True(t, covered, "each exact relation endpoint needs registered evidence")
+		}
+	}
+	diagram, err := BuildSourceWikiFlowDiagram(relations, records)
+	require.NoError(t, err)
+	require.NotEmpty(t, diagram.Markdown)
+	totalWindowBytes := 0
+	for _, item := range records {
+		file, err := generator.(*sourceWikiService).knowledge.GetSourceFile(f.ctx, item.KnowledgeID, item.FileVersionID)
+		require.NoError(t, err)
+		window := file.RawContent[item.Range.StartByte:item.Range.EndByte]
+		textHash := sha256.Sum256(window)
+		require.Equal(t, hex.EncodeToString(textHash[:]), item.TextSHA256)
+		require.Equal(t, sourceWikiRangeForBytes(file.RawContent, item.Range.StartByte, item.Range.EndByte), item.Range)
+		require.Equal(t, publication.SnapshotID, item.SnapshotID)
+		totalWindowBytes += len(window)
+	}
+	require.LessOrEqual(t, totalWindowBytes, sourceWikiMaxEvidenceBytes)
+	wikiService := generator.(*sourceWikiService)
+	ownerAttempt, err := wikiService.loadOrCreateSourceWikiAttempt(
+		f.ctx, repository.NewSourceWikiAttemptLedger(f.db), f.kb,
+		types.SourceWikiGenerateRequest{SourceID: f.ds.ID, ModulePath: "src", Title: "Evidence owner fixture"}, "src",
+	)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Transaction(func(tx *gorm.DB) error {
+		return repository.RegisterSourceWikiAttemptEvidence(tx, ownerAttempt.ID, records)
+	}))
+	t.Cleanup(func() {
+		_ = f.db.Transaction(func(tx *gorm.DB) error {
+			return repository.ReleaseSourceWikiAttemptEvidence(tx, ownerAttempt.ID)
+		})
+	})
+	var ownerCount int64
+	require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id = ?", ownerAttempt.ID).Count(&ownerCount).Error)
+	require.EqualValues(t, 2, ownerCount, "both exact endpoint versions stay pinned while the attempt owns their evidence")
+	_, err = generator.(*sourceWikiService).collectTopicEvidence(f.ctx, f.kb.ID, &types.SourceWikiAttempt{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID,
+		BatchID: batch.ID, TopicKey: coverage.TopicKey, TopicKind: "flow", ModelContextWindow: 800, MaxCompletionTokens: 100,
+	})
+	require.ErrorContains(t, err, "complete source evidence exceeds the bounded model context")
 }

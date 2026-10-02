@@ -87,7 +87,7 @@ func TestSourceWikiModuleGeneratesValidatedCardThroughExistingWikiTools(t *testi
 	})
 	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"})
 	require.NoError(t, err)
-	require.Equal(t, "ready", attempt.Status)
+	require.Equal(t, "ready", attempt.Status, attempt.Reason)
 	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
 	require.NoError(t, err)
 	require.Equal(t, 1, page.Version)

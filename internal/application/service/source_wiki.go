@@ -24,9 +24,134 @@ import (
 )
 
 const (
-	sourceWikiMaxEvidenceBytes = 32768
-	sourceWikiMaxFiles         = 16
+	sourceWikiMaxEvidenceBytes             = 32768
+	sourceWikiMaxFiles                     = 16
+	sourceWikiFlowEvidenceWindowBytes      = 4096
+	sourceWikiFlowEvidenceContextBytes     = 512
+	sourceWikiMaxFlowEvidenceWindowRecords = sourceWikiFlowDiagramMaxEdges * 2
 )
+
+type sourceWikiFlowEvidenceTarget struct {
+	FileID    string
+	VersionID string
+	Path      string
+}
+
+func sourceWikiFlowEvidenceRanges(relations []types.SourceCodeRelation, sourceID, snapshotID string) (map[sourceWikiFlowEvidenceTarget][]types.SourceRange, error) {
+	targets := make(map[sourceWikiFlowEvidenceTarget][]types.SourceRange)
+	addEndpoint := func(fileID, versionID, filePath string, rawRange types.JSON) error {
+		if fileID == "" || versionID == "" || filePath == "" {
+			return fmt.Errorf("flow relation has an incomplete exact source endpoint")
+		}
+		parsed, err := parseSourceWikiFlowRange(rawRange)
+		if err != nil {
+			return fmt.Errorf("flow relation lacks a valid exact source range: %w", err)
+		}
+		key := sourceWikiFlowEvidenceTarget{FileID: fileID, VersionID: versionID, Path: filePath}
+		for _, existing := range targets[key] {
+			if existing == parsed {
+				return nil
+			}
+		}
+		targets[key] = append(targets[key], parsed)
+		return nil
+	}
+	for _, relation := range relations {
+		if relation.DataSourceID != sourceID || relation.SnapshotID != snapshotID {
+			return nil, fmt.Errorf("flow relation belongs to a different published source snapshot")
+		}
+		if err := addEndpoint(relation.FromFileID, relation.FromVersionID, relation.FromPath, relation.FromRange); err != nil {
+			return nil, err
+		}
+		toHasFile := relation.ToFileID != "" || relation.ToVersionID != "" || relation.ToPath != ""
+		if toHasFile {
+			if err := addEndpoint(relation.ToFileID, relation.ToVersionID, relation.ToPath, relation.ToRange); err != nil {
+				return nil, err
+			}
+		} else if !sourceWikiFlowHasNoTargetRange(relation.ToRange) {
+			return nil, fmt.Errorf("flow relation has a target range without an exact source endpoint")
+		}
+	}
+	return targets, nil
+}
+
+func sourceWikiFlowEvidenceWindows(raw []byte, required []types.SourceRange) ([]types.SourceRange, error) {
+	if len(required) == 0 {
+		return nil, nil
+	}
+	ranges := append([]types.SourceRange(nil), required...)
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].StartByte != ranges[j].StartByte {
+			return ranges[i].StartByte < ranges[j].StartByte
+		}
+		return ranges[i].EndByte < ranges[j].EndByte
+	})
+	windows := make([]types.SourceRange, 0, len(ranges))
+	for _, requiredRange := range ranges {
+		if requiredRange.StartByte < 0 || requiredRange.EndByte <= requiredRange.StartByte || requiredRange.EndByte > len(raw) ||
+			requiredRange.StartLine < 1 || requiredRange.EndLine < requiredRange.StartLine ||
+			requiredRange.StartLine != 1+bytes.Count(raw[:requiredRange.StartByte], []byte("\n")) ||
+			requiredRange.EndLine != 1+bytes.Count(raw[:requiredRange.EndByte-1], []byte("\n")) ||
+			!utf8.Valid(raw[requiredRange.StartByte:requiredRange.EndByte]) {
+			return nil, fmt.Errorf("flow relation range does not match exact UTF-8 source coordinates")
+		}
+		targetBytes := requiredRange.EndByte - requiredRange.StartByte
+		if targetBytes > sourceWikiFlowEvidenceWindowBytes {
+			return nil, fmt.Errorf("flow relation range exceeds the bounded %d-byte evidence window", sourceWikiFlowEvidenceWindowBytes)
+		}
+		remaining := sourceWikiFlowEvidenceWindowBytes - targetBytes
+		leftBudget := min(sourceWikiFlowEvidenceContextBytes, remaining/2)
+		rightBudget := min(sourceWikiFlowEvidenceContextBytes, remaining-leftBudget)
+		start := sourceWikiPreviousUTF8Boundary(raw, requiredRange.StartByte, leftBudget)
+		end := sourceWikiNextUTF8Boundary(raw, requiredRange.EndByte, rightBudget)
+		if !utf8.Valid(raw[start:end]) {
+			start, end = requiredRange.StartByte, requiredRange.EndByte
+		}
+		if len(windows) > 0 && start <= windows[len(windows)-1].EndByte && end-windows[len(windows)-1].StartByte <= sourceWikiFlowEvidenceWindowBytes {
+			previous := windows[len(windows)-1]
+			windows[len(windows)-1] = sourceWikiRangeForBytes(raw, min(previous.StartByte, start), max(previous.EndByte, end))
+			continue
+		}
+		windows = append(windows, sourceWikiRangeForBytes(raw, start, end))
+	}
+	return windows, nil
+}
+
+func sourceWikiPreviousUTF8Boundary(raw []byte, end, maxBytes int) int {
+	start := end
+	used := 0
+	for start > 0 {
+		_, size := utf8.DecodeLastRune(raw[:start])
+		if size == 1 && raw[start-1] >= utf8.RuneSelf || used+size > maxBytes {
+			break
+		}
+		start -= size
+		used += size
+	}
+	return start
+}
+
+func sourceWikiNextUTF8Boundary(raw []byte, start, maxBytes int) int {
+	end := start
+	used := 0
+	for end < len(raw) {
+		_, size := utf8.DecodeRune(raw[end:])
+		if size == 1 && raw[end] >= utf8.RuneSelf || used+size > maxBytes {
+			break
+		}
+		end += size
+		used += size
+	}
+	return end
+}
+
+func sourceWikiRangeForBytes(raw []byte, start, end int) types.SourceRange {
+	return types.SourceRange{
+		StartByte: start, EndByte: end,
+		StartLine: 1 + bytes.Count(raw[:start], []byte("\n")),
+		EndLine:   1 + bytes.Count(raw[:end-1], []byte("\n")),
+	}
+}
 
 type sourceWikiService struct {
 	wiki      interfaces.WikiPageService
@@ -105,6 +230,7 @@ func (s *sourceWikiService) collectTopicEvidence(ctx context.Context, kbID strin
 		return nil, fmt.Errorf("topic evidence requires its fixed source snapshot")
 	}
 	var members []types.SourceSnapshotMember
+	var flowTargets map[sourceWikiFlowEvidenceTarget][]types.SourceRange
 	q := s.db.WithContext(ctx).Table("source_snapshot_members sm").Select("sm.*").
 		Joins("JOIN source_snapshots ss ON ss.id=sm.snapshot_id AND ss.data_source_id=? AND ss.knowledge_base_id=? AND ss.state='published'", attempt.SourceID, kbID).
 		Where("sm.status='parsed' AND NOT sm.generated").
@@ -114,24 +240,30 @@ func (s *sourceWikiService) collectTopicEvidence(ctx context.Context, kbID strin
 		q = q.Where("sm.path LIKE ? ESCAPE '!'", strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(attempt.ModulePath)+"/%")
 	} else if attempt.TopicKind == "flow" {
 		var coverage types.SourceWikiCoverageTopic
-		if err := s.db.WithContext(ctx).Where("source_id = ? AND topic_key = ? AND batch_id = ?", attempt.SourceID, attempt.TopicKey, attempt.BatchID).Take(&coverage).Error; err != nil {
+		if err := s.db.WithContext(ctx).Where(
+			"knowledge_base_id = ? AND source_id = ? AND topic_key = ? AND batch_id = ? AND snapshot_id = ? AND kind = 'flow'",
+			kbID, attempt.SourceID, attempt.TopicKey, attempt.BatchID, attempt.SnapshotID,
+		).Take(&coverage).Error; err != nil {
 			return nil, err
 		}
 		var relations []types.SourceCodeRelation
 		if err := json.Unmarshal(coverage.Relations, &relations); err != nil {
 			return nil, fmt.Errorf("planned flow relations are invalid")
 		}
-		paths := make(map[string]bool)
-		for _, relation := range relations {
-			if relation.FromPath != "" {
-				paths[relation.FromPath] = true
-			}
-			if relation.ToPath != "" {
-				paths[relation.ToPath] = true
-			}
+		var err error
+		flowTargets, err = sourceWikiFlowEvidenceRanges(relations, attempt.SourceID, attempt.SnapshotID)
+		if err != nil {
+			return nil, err
 		}
-		if len(paths) == 0 {
+		if len(flowTargets) == 0 {
 			return nil, nil
+		}
+		paths := make(map[string]struct{}, len(flowTargets))
+		for target := range flowTargets {
+			paths[target.Path] = struct{}{}
+		}
+		if len(paths) > sourceWikiMaxFiles {
+			return nil, fmt.Errorf("flow evidence requires more than %d exact source files", sourceWikiMaxFiles)
 		}
 		pathList := make([]string, 0, len(paths))
 		for filePath := range paths {
@@ -139,61 +271,121 @@ func (s *sourceWikiService) collectTopicEvidence(ctx context.Context, kbID strin
 		}
 		sort.Strings(pathList)
 		q = q.Where("sm.path IN ?", pathList)
+	} else if attempt.TopicKind != "system" {
+		return nil, fmt.Errorf("topic evidence requires a supported stable topic kind")
 	}
 	priority := `CASE WHEN lower(sm.path) LIKE '%readme%' THEN 0
 		WHEN lower(sm.path) LIKE '%/pom.xml' OR lower(sm.path) LIKE '%/go.mod' OR lower(sm.path) LIKE '%/package.json' OR lower(sm.path) LIKE '%/build.gradle%' THEN 1
 		WHEN lower(sm.path) LIKE '%/main.%' OR lower(sm.path) LIKE '%/application.%' THEN 2
 		WHEN lower(sm.path) LIKE '%/route%' OR lower(sm.path) LIKE '%/controller%' OR lower(sm.path) LIKE '%/service%' THEN 3
 		ELSE 10 END, sm.path`
-	if err := q.Order(priority).Limit(sourceWikiMaxFiles).Find(&members).Error; err != nil {
+	memberLimit := sourceWikiMaxFiles
+	if attempt.TopicKind == "flow" {
+		memberLimit++
+	}
+	if err := q.Order(priority).Limit(memberLimit).Find(&members).Error; err != nil {
 		return nil, err
 	}
+	if attempt.TopicKind == "flow" {
+		if len(members) > sourceWikiMaxFiles {
+			return nil, fmt.Errorf("flow evidence exceeds the %d-file collection bound", sourceWikiMaxFiles)
+		}
+		found := make(map[sourceWikiFlowEvidenceTarget]bool, len(members))
+		for _, member := range members {
+			found[sourceWikiFlowEvidenceTarget{FileID: member.SourceFileID, VersionID: member.FileVersionID, Path: member.Path}] = true
+		}
+		for target := range flowTargets {
+			if !found[target] {
+				return nil, fmt.Errorf("flow relation endpoint is not a readable member of the fixed published snapshot")
+			}
+		}
+	}
 	result := make([]collectedWikiEvidence, 0, len(members))
+	inputTokenBudget := attempt.ModelContextWindow - attempt.MaxCompletionTokens - 512
+	if inputTokenBudget <= 0 {
+		return nil, errSourceWikiAttemptCallContext
+	}
+	maxBytes := inputTokenBudget * 3
+	if maxBytes > sourceWikiMaxEvidenceBytes {
+		maxBytes = sourceWikiMaxEvidenceBytes
+	}
 	total := 0
 	for _, member := range members {
 		file, err := s.knowledge.GetSourceFile(ctx, member.SourceFileID, member.FileVersionID)
 		if err != nil {
 			return nil, fmt.Errorf("fixed topic evidence cannot be read")
 		}
-		if file.FileVersionID != member.FileVersionID || file.SnapshotID != member.SnapshotID || file.DataSourceID != attempt.SourceID {
+		if file.KnowledgeID != member.SourceFileID || file.FileVersionID != member.FileVersionID ||
+			file.SnapshotID != member.SnapshotID || file.DataSourceID != attempt.SourceID || file.Path != member.Path {
 			return nil, fmt.Errorf("fixed topic evidence changed")
 		}
 		if len(file.RawContent) == 0 {
+			if attempt.TopicKind == "flow" {
+				return nil, fmt.Errorf("flow relation endpoint has no readable source text")
+			}
 			continue
 		}
-		inputTokenBudget := attempt.ModelContextWindow - attempt.MaxCompletionTokens - 512
-		if inputTokenBudget <= 0 {
-			return nil, errSourceWikiAttemptCallContext
+		appendEvidence := func(evidenceRange types.SourceRange) error {
+			if evidenceRange.StartByte < 0 || evidenceRange.EndByte <= evidenceRange.StartByte || evidenceRange.EndByte > len(file.RawContent) {
+				return fmt.Errorf("source evidence range is outside the fixed file version")
+			}
+			text := file.RawContent[evidenceRange.StartByte:evidenceRange.EndByte]
+			if !utf8.Valid(text) {
+				return fmt.Errorf("source evidence window is not valid UTF-8")
+			}
+			if total+len(text) > maxBytes {
+				return fmt.Errorf("complete source evidence exceeds the bounded model context")
+			}
+			hash := sha256.Sum256(text)
+			evidence := types.SourceWikiEvidence{
+				ID: fmt.Sprintf("e%03d", len(result)+1), KnowledgeID: file.KnowledgeID, SHA256: file.SHA256,
+				TextSHA256: hex.EncodeToString(hash[:]),
+				SourceEvidence: types.SourceEvidence{
+					DataSourceID: file.DataSourceID, SnapshotID: file.SnapshotID, FileVersionID: file.FileVersionID,
+					ProjectID: file.ProjectID, CommitSHA: file.CommitSHA, Path: file.Path, Quality: file.Quality,
+					Range: evidenceRange,
+				},
+			}
+			evidence.GitLabURL = source.GitLabBlobURL(file.RepositoryURL, evidence.CommitSHA, evidence.Path, evidence.Range)
+			result = append(result, collectedWikiEvidence{Evidence: evidence, Text: string(text)})
+			total += len(text)
+			return nil
 		}
-		maxBytes := inputTokenBudget * 3
-		if maxBytes > sourceWikiMaxEvidenceBytes {
-			maxBytes = sourceWikiMaxEvidenceBytes
+		if attempt.TopicKind == "flow" {
+			rawHash := sha256.Sum256(file.RawContent)
+			if hex.EncodeToString(rawHash[:]) != file.SHA256 {
+				return nil, fmt.Errorf("flow relation endpoint raw source hash changed")
+			}
+			target := sourceWikiFlowEvidenceTarget{FileID: member.SourceFileID, VersionID: member.FileVersionID, Path: member.Path}
+			windows, err := sourceWikiFlowEvidenceWindows(file.RawContent, flowTargets[target])
+			if err != nil {
+				return nil, fmt.Errorf("cannot include complete flow relation evidence: %w", err)
+			}
+			if len(result)+len(windows) > sourceWikiMaxFlowEvidenceWindowRecords {
+				return nil, fmt.Errorf("flow evidence exceeds the %d-window collection bound", sourceWikiMaxFlowEvidenceWindowRecords)
+			}
+			for _, evidenceRange := range windows {
+				if err := appendEvidence(evidenceRange); err != nil {
+					return nil, fmt.Errorf("cannot include complete flow relation evidence: %w", err)
+				}
+			}
+			continue
 		}
 		remaining := maxBytes - total
 		if remaining <= 0 {
 			break
 		}
-		fileBudget := 2048
-		if remaining < fileBudget {
-			fileBudget = remaining
-		}
-		end := len(file.RawContent)
-		if end > fileBudget {
-			end = fileBudget
-			for end > 0 && !utf8.Valid(file.RawContent[:end]) {
-				end--
-			}
+		fileBudget := min(2048, remaining)
+		end := min(len(file.RawContent), fileBudget)
+		for end > 0 && !utf8.Valid(file.RawContent[:end]) {
+			end--
 		}
 		if end <= 0 {
 			continue
 		}
-		text := file.RawContent[:end]
-		total += end
-		hash := sha256.Sum256(file.RawContent)
-		hash = sha256.Sum256(text)
-		e := types.SourceWikiEvidence{ID: fmt.Sprintf("e%03d", len(result)+1), KnowledgeID: file.KnowledgeID, SHA256: file.SHA256, TextSHA256: hex.EncodeToString(hash[:]), SourceEvidence: types.SourceEvidence{DataSourceID: file.DataSourceID, SnapshotID: file.SnapshotID, FileVersionID: file.FileVersionID, ProjectID: file.ProjectID, CommitSHA: file.CommitSHA, Path: file.Path, Quality: file.Quality, Range: types.SourceRange{StartByte: 0, EndByte: end, StartLine: 1, EndLine: 1 + bytes.Count(text[:end-1], []byte("\n"))}}}
-		e.GitLabURL = source.GitLabBlobURL(file.RepositoryURL, e.CommitSHA, e.Path, e.Range)
-		result = append(result, collectedWikiEvidence{Evidence: e, Text: string(text)})
+		if err := appendEvidence(sourceWikiRangeForBytes(file.RawContent, 0, end)); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
@@ -239,6 +431,62 @@ func (s *sourceWikiService) validateEvidence(ctx context.Context, draft sourceWi
 	return ids, nil
 }
 
+func sourceWikiCoverageSchemaAvailable(tx *gorm.DB) (bool, error) {
+	var exists bool
+	err := tx.Raw("SELECT to_regclass(?) IS NOT NULL", "source_wiki_topics").Scan(&exists).Error
+	return exists, err
+}
+
+func sourceWikiLockTerminalFailedInitialCoverage(tx *gorm.DB, attempt *types.SourceWikiAttempt) (*types.SourceWikiCoverageTopic, error) {
+	if tx == nil || attempt == nil || attempt.BatchID != "" || attempt.TopicKind != "module" ||
+		attempt.TopicKey != "module/"+attempt.ModulePath || attempt.ModulePath == "" {
+		return nil, nil
+	}
+	type coverageRef struct {
+		ID      string
+		BatchID *string
+	}
+	var ref coverageRef
+	err := tx.Model(&types.SourceWikiCoverageTopic{}).Select("id", "batch_id").Where(
+		"tenant_id = ? AND knowledge_base_id = ? AND source_id = ? AND topic_key = ? AND kind = 'module' AND module_path = ? AND title = ? AND snapshot_id = ? AND wiki_slug = ? AND initial = TRUE AND status IN ('failed', 'insufficient_evidence')",
+		attempt.TenantID, attempt.KnowledgeBaseID, attempt.SourceID, attempt.TopicKey, attempt.ModulePath, attempt.Title, attempt.SnapshotID, attempt.Slug,
+	).Take(&ref).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if ref.BatchID == nil || *ref.BatchID == "" {
+		return nil, nil
+	}
+	var batch types.SourceWikiBatch
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", *ref.BatchID).Take(&batch).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if batch.TenantID != attempt.TenantID || batch.KnowledgeBaseID != attempt.KnowledgeBaseID ||
+		batch.SourceID != attempt.SourceID || batch.SnapshotID != attempt.SnapshotID ||
+		(batch.Status != "completed" && batch.Status != "failed" && batch.Status != "expired") {
+		return nil, nil
+	}
+	var topic types.SourceWikiCoverageTopic
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+		"id = ? AND tenant_id = ? AND knowledge_base_id = ? AND source_id = ? AND topic_key = ? AND kind = 'module' AND module_path = ? AND title = ? AND snapshot_id = ? AND wiki_slug = ? AND batch_id = ? AND initial = TRUE AND status IN ('failed', 'insufficient_evidence')",
+		ref.ID, attempt.TenantID, attempt.KnowledgeBaseID, attempt.SourceID, attempt.TopicKey, attempt.ModulePath, attempt.Title, attempt.SnapshotID, attempt.Slug, batch.ID,
+	).Take(&topic).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &topic, nil
+}
+
 func (s *sourceWikiService) publishCard(ctx context.Context, kb *types.KnowledgeBase, sourceID, snapshotID string, baseVersion int, existing, page *types.WikiPage, expectedSource *types.DataSource, expectedModel *types.Model, attempt *types.SourceWikiAttempt, lease types.SourceWikiAttemptLease) error {
 	return s.publishCardWithBatchState(ctx, kb, sourceID, snapshotID, baseVersion, existing, page, expectedSource, expectedModel, attempt, lease, false, "")
 }
@@ -254,6 +502,21 @@ func (s *sourceWikiService) publishCardWithBatchState(ctx context.Context, kb *t
 	// The publication lock serializes the final card write with source publish;
 	// an old model result cannot become a current ready page after a new SHA.
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var manualRepairTopic *types.SourceWikiCoverageTopic
+		coverageSchemaAvailable := false
+		if attempt.BatchID == "" && attempt.TopicKind == "module" && attempt.TopicKey == "module/"+attempt.ModulePath {
+			var err error
+			coverageSchemaAvailable, err = sourceWikiCoverageSchemaAvailable(tx)
+			if err != nil {
+				return err
+			}
+			if coverageSchemaAvailable {
+				manualRepairTopic, err = sourceWikiLockTerminalFailedInitialCoverage(tx, attempt)
+				if err != nil {
+					return err
+				}
+			}
+		}
 		if attempt.BatchID != "" {
 			if !stagedCandidate {
 				return repository.ErrSourceWikiBatchInvalidState
@@ -361,7 +624,7 @@ func (s *sourceWikiService) publishCardWithBatchState(ctx context.Context, kb *t
 				return repository.ErrSourceWikiBatchInvalidState
 			}
 		}
-		if attempt.BatchID == "" && attempt.TopicKind == "module" && attempt.TopicKey == "module/"+attempt.ModulePath {
+		if coverageSchemaAvailable && attempt.BatchID == "" && attempt.TopicKind == "module" && attempt.TopicKey == "module/"+attempt.ModulePath {
 			if err := tx.Model(&types.SourceWikiCoverageTopic{}).
 				Where("tenant_id = ? AND knowledge_base_id = ? AND source_id = ? AND topic_key = ? AND snapshot_id = ? AND wiki_slug = ? AND initial = FALSE AND status = 'expansion'",
 					attempt.TenantID, attempt.KnowledgeBaseID, attempt.SourceID, attempt.TopicKey, attempt.SnapshotID, attempt.Slug).
@@ -370,6 +633,21 @@ func (s *sourceWikiService) publishCardWithBatchState(ctx context.Context, kb *t
 					"last_ready_snapshot_id": attempt.SnapshotID, "reason": "", "updated_at": now,
 				}).Error; err != nil {
 				return err
+			}
+		}
+		if manualRepairTopic != nil {
+			updated := tx.Model(manualRepairTopic).Where(
+				"id = ? AND batch_id = ? AND snapshot_id = ? AND wiki_slug = ? AND initial = TRUE AND status IN ('failed', 'insufficient_evidence')",
+				manualRepairTopic.ID, *manualRepairTopic.BatchID, attempt.SnapshotID, attempt.Slug,
+			).Updates(map[string]any{
+				"status": "ready", "attempt_id": attempt.ID,
+				"last_ready_snapshot_id": attempt.SnapshotID, "reason": "", "updated_at": now,
+			})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return repository.ErrSourceWikiBatchInvalidState
 			}
 		}
 		if err := repository.ReleaseSourceWikiAttemptEvidence(tx, attempt.ID); err != nil {

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
@@ -163,4 +164,31 @@ func TestSourceWikiBuildPageRetainsFlowDiagramEvidenceLinks(t *testing.T) {
 	require.Contains(t, page.Content, "evidence_id=e001", "diagram edges retain the exact source evidence link")
 	require.NotNil(t, page.SourceProvenance)
 	require.Len(t, page.SourceProvenance.Evidence, 1)
+}
+
+func TestSourceWikiFlowEvidenceWindowsCoverExactUTF8RangesAndFailClosedAtLimit(t *testing.T) {
+	raw := make([]byte, 12000)
+	for i := range raw {
+		raw[i] = 'x'
+		if i%100 == 99 {
+			raw[i] = '\n'
+		}
+	}
+	target := sourceWikiRangeForBytes(raw, 2500, 2650)
+	windows, err := sourceWikiFlowEvidenceWindows(raw, []types.SourceRange{target})
+	require.NoError(t, err)
+	require.Len(t, windows, 1)
+	require.LessOrEqual(t, windows[0].EndByte-windows[0].StartByte, sourceWikiFlowEvidenceWindowBytes)
+	require.True(t, sourceWikiFlowRangeCovers(windows[0], target))
+	require.Equal(t, 1+bytes.Count(raw[:windows[0].StartByte], []byte("\n")), windows[0].StartLine)
+	require.Equal(t, 1+bytes.Count(raw[:windows[0].EndByte-1], []byte("\n")), windows[0].EndLine)
+
+	oversized := sourceWikiRangeForBytes(raw, 1000, 1000+sourceWikiFlowEvidenceWindowBytes+1)
+	_, err = sourceWikiFlowEvidenceWindows(raw, []types.SourceRange{oversized})
+	require.ErrorContains(t, err, "exceeds the bounded")
+
+	wrongCoordinates := target
+	wrongCoordinates.StartLine++
+	_, err = sourceWikiFlowEvidenceWindows(raw, []types.SourceRange{wrongCoordinates})
+	require.ErrorContains(t, err, "exact UTF-8 source coordinates")
 }
