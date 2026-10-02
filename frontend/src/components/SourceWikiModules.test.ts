@@ -120,6 +120,58 @@ test('coverage distinguishes backlog and uncertainty while ready topics keep the
  } finally { app.unmount(); host.remove() }
 })
 
+test('failed system and flow attempts retry only through bounded batch preflight and start', async () => {
+ const attempts = [
+  { id: 'system-failed', source_id: 'repo-one', module_path: '', title: 'System overview', slug: '', status: 'failed', reason: 'batch stopped', calls: 1, tokens: 1000, repairs: 0 },
+  { id: 'flow-failed', source_id: 'repo-one', module_path: '', title: 'POST /orders', slug: '', status: 'failed', reason: 'batch stopped', calls: 1, tokens: 1000, repairs: 0 },
+  { id: 'system-staged', source_id: 'repo-one', module_path: '', title: 'Pending overview', slug: '', status: 'staged', reason: '', calls: 0, tokens: 0, repairs: 0 },
+ ]
+ const preflightSources: string[] = [], startedSources: string[] = [], moduleRequests: any[] = []
+ let batchStatus = 'failed'
+ const view = component('./SourceWikiModules.vue', {
+  '@/api/datasource': { async listDataSources() { return { data: [{ id: 'repo-one', name: 'Repository', config: { settings: { content_mode: 'source' } } }] } } },
+  '@/api/wiki': {
+   async listSourceWikiAttempts() { return { data: attempts } },
+   async listSourceWikiCoverage() { return { data: [] } },
+   async listSourceWikiBatches(_kb: string, source: string) { return { data: [{ id: 'batch-one', source_id: source, status: batchStatus, phase: 'qa', cursor: 2, publish_cursor: 0, initial_count: 2, calls_reserved: 2, tokens_reserved: 2000 }] } },
+   async preflightSourceWikiBatch(_kb: string, source: string) {
+    preflightSources.push(source)
+    return { data: { preflight_passed: true, start_available: true, source_id: source, snapshot_id: 'snapshot-one', commit_sha: 'a'.repeat(40), source_updated_at: '2026-10-02T00:00:00Z', model_id: 'model-one', model_updated_at: '2026-10-02T00:00:00Z', model_context_window: 65536, model_context_known: true, max_completion_tokens: 4096, candidate_count: 3, initial_count: 2, expansion_count: 1, module_count: 0, flow_count: 1, initial_topics: [], max_calls: 18, max_tokens: 360000, max_elapsed_ms: 180000, max_initial_topics: 64, skeleton_max_calls: 8, skeleton_max_tokens: 100000, qa_max_calls: 10, qa_max_tokens: 260000 } }
+   },
+   async startSourceWikiBatch(_kb: string, source: string) { startedSources.push(source); batchStatus = 'queued'; return { data: { id: 'batch-two', source_id: source, status: 'queued', phase: 'skeleton', cursor: 0, publish_cursor: 0, initial_count: 2, calls_reserved: 0, tokens_reserved: 0 } } },
+   async generateSourceWikiModule(_kb: string, request: any) { moduleRequests.push(request); return { data: { status: 'ready', slug: 'unexpected' } } },
+  }
+ })
+ const host = document.createElement('div'); document.body.append(host)
+ const app = createApp({ render: () => h(view, { kbId: 'kb-one', canEdit: true }) })
+ app.mount(host)
+ try {
+  await settle()
+  const systemRow = Array.from(host.querySelectorAll('li')).find(row => row.querySelector('strong')?.textContent === 'System overview')
+  const flowRow = Array.from(host.querySelectorAll('li')).find(row => row.querySelector('strong')?.textContent === 'POST /orders')
+  const stagedRow = Array.from(host.querySelectorAll('li')).find(row => row.querySelector('strong')?.textContent === 'Pending overview')
+  assert.ok(systemRow); assert.ok(flowRow); assert.ok(stagedRow)
+  assert.ok(systemRow.textContent?.includes('批次失败'))
+  assert.ok(flowRow.textContent?.includes('批次失败'))
+  assert.ok(stagedRow.textContent?.includes('待整批QA'))
+  assert.ok(!stagedRow.textContent?.includes('失败，草稿已保留'))
+  for (const row of [systemRow, flowRow]) {
+   const retry = Array.from(row.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '失败批次重新预检')
+   assert.ok(retry); retry.click(); await settle()
+  }
+  assert.deepEqual(preflightSources, ['repo-one', 'repo-one'])
+  assert.deepEqual(moduleRequests, [], 'batch system/flow attempts must never call the module-generation API with an empty path')
+  const start = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '启动这批 2 张卡片')
+  assert.ok(start); start.click(); await settle()
+  assert.deepEqual(startedSources, ['repo-one'], 'retry follows the existing preflight then bounded batch-start path')
+  for (const row of [systemRow, flowRow]) {
+   const retry = Array.from(row.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '失败批次重新预检')
+   assert.ok(retry); assert.ok(retry.disabled, 'a queued/running parent batch blocks another retry')
+  }
+  assert.deepEqual(moduleRequests, [])
+ } finally { app.unmount(); host.remove() }
+})
+
 test('ordinary Wiki revision selection shows its body without a selection hint', async () => {
  const revision = { id: 'revision-one', version: 1, title: 'Original title', content: 'Original document body', summary: '', edit_source: 'human', edited_at: '2026-09-29T00:00:00Z' }
  const view = component('../views/knowledge/wiki/WikiRevisionDrawer.vue', {
