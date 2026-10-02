@@ -31,6 +31,12 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000105_source_wiki.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.DB.Exec(string(migration)).Error)
+	retentionMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000112_source_wiki_revision_retention.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(retentionMigration)).Error)
+	attemptLedgerMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000113_source_wiki_attempt_ledger.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Exec(string(attemptLedgerMigration)).Error)
 	batchMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.DB.Exec(string(batchMigration)).Error)
@@ -49,7 +55,7 @@ func TestSourceWikiHTTPGeneratesReadsAndScopesRegisteredEvidence(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	models := service.NewModelService(repository.NewModelRepository(f.DB), repository.NewKnowledgeBaseRepository(f.DB), nil, nil, nil, nil)
-	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "wiki-http-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai"}}
+	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "wiki-http-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai", ContextWindow: 65536}}
 	require.NoError(t, models.CreateModel(f.Ctx, model))
 	f.KB.SummaryModelID = model.ID
 	f.KB.IndexingStrategy.WikiEnabled = true

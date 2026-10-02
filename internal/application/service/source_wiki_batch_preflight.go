@@ -17,6 +17,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const sourceWikiBatchPreflightTimeout = 3 * time.Minute
+
 // PreflightSourceWikiBatch validates the server-selected source publication
 // and model, then returns a bounded plan preview. It has no persistence or
 // provider side effects; the accepted batch runner will own actual creation.
@@ -48,7 +50,7 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 	if s.db.Dialector.Name() != "postgres" {
 		return nil, apperrors.NewBadRequestError("source Wiki requires PostgreSQL")
 	}
-	ctx, cancel := context.WithTimeout(ctx, sourceWikiTimeout)
+	ctx, cancel := context.WithTimeout(ctx, sourceWikiBatchPreflightTimeout)
 	defer cancel()
 	ctx, release, err := beginSourceRead(ctx, s.kb, types.SearchTargets{&types.SearchTarget{
 		Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kb.ID, SourceIDs: []string{sourceID},

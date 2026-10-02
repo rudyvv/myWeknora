@@ -63,6 +63,11 @@ func TestKBTaskWriteIsExplicitAndBounded(t *testing.T) {
 	require.NoError(t, err)
 	ctx = logger.CloneContext(ctx)
 	require.Zero(t, types.CallerFromContext(ctx).TenantID, "a worker must not impersonate the tenant owner")
+	require.True(t, HasKBTaskGrant(ctx, "kb", 7, types.OrgRoleViewer))
+	require.False(t, HasKBTaskGrant(ctx, "other", 7, types.OrgRoleViewer))
+	require.False(t, HasKBTaskGrant(types.WithTenantAPIKeyScope(ctx, types.TenantAPIKeyScope{
+		KnowledgeBaseIDs: types.StringArray{"other"},
+	}), "kb", 7, types.OrgRoleViewer))
 	require.NoError(t, RequireKBWrite(ctx, kb))
 	allowed, err := NewKBPermissions(ctx, nil).Check("kb", 7, types.OrgRoleViewer)
 	require.NoError(t, err)
