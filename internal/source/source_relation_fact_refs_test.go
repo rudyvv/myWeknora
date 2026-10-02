@@ -284,6 +284,59 @@ func TestResolveSourceRelationFactRefsRequiresExactLegacyRelationIdentity(t *tes
 	}
 }
 
+func TestRootT15PersistedRefMustCauseItsSpecificRoute(t *testing.T) {
+	snapshot, relation := httpRouteFactSnapshot(t)
+	unused := relationFact("api_prefix", "/unused", "", 88, 99)
+	unused.RoutePath, unused.Certainty = "/unused", "certain"
+	snapshot.Members[1].Facts = append(snapshot.Members[1].Facts, unused)
+	var refs []types.SourceRelationFactRef
+	if err := json.Unmarshal(relation.Context, &refs); err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	for i := range refs {
+		if refs[i].Role == "api_prefix" {
+			refs[i].Range = unused.Range
+			changed = true
+		}
+	}
+	if !changed {
+		t.Fatal("fixture did not cite the matching prefix")
+	}
+	relation.Context, _ = json.Marshal(refs)
+	got := NewSourceRelationFactRefResolver(snapshot).Resolve(relation)
+	if got.Status != SourceRelationFactRefsUnavailable {
+		t.Fatalf("same-snapshot but noncausal prefix passed exact route validation: %#v", got)
+	}
+}
+
+func TestRootT15CoverageCoordinatesCannotCrossConfigurationFiles(t *testing.T) {
+	snapshot, _ := httpRouteFactSnapshot(t)
+	classFact := snapshot.Members[3].Facts[0]
+	handler := snapshot.Members[3].Facts[1]
+	handler.Range = classFact.Range
+	snapshot.Members[3].Facts = []types.ParsedSourceFact{handler}
+	snapshot.Members = append(snapshot.Members, SourceRelationMember{Path: "server/config/Controller.java", FileID: "class-file",
+		VersionID: "class-v1", Facts: []types.ParsedSourceFact{classFact}})
+	relations := CorrelateSourceFacts(snapshot.TenantID, snapshot.DataSourceID, snapshot.SnapshotID, snapshot.Members)
+	for _, relation := range relations {
+		if relation.Kind != "http_route" {
+			continue
+		}
+		var refs []types.SourceRelationFactRef
+		if err := json.Unmarshal(relation.Context, &refs); err != nil {
+			t.Fatal(err)
+		}
+		for _, ref := range refs {
+			if ref.Role == "spring_class_mapping" && ref.FileID == "class-file" {
+				return
+			}
+		}
+		t.Fatalf("matching file-local ranges in separate files suppressed the causal class mapping: %#v", refs)
+	}
+	t.Fatal("fixture did not produce the joined route")
+}
+
 func httpRouteFactSnapshot(t *testing.T) (SourceRelationFactSnapshot, types.SourceCodeRelation) {
 	t.Helper()
 	request := relationFact("api_request", "detail", "", 1, 8)

@@ -118,13 +118,6 @@ func (resolver *SourceRelationFactRefResolver) Resolve(relation types.SourceCode
 	if !valid {
 		return unavailableSourceRelationFactRefs()
 	}
-	if hasRefs {
-		if !resolver.verifyRefs(refs) {
-			return unavailableSourceRelationFactRefs()
-		}
-		return SourceRelationFactRefResolution{Status: SourceRelationFactRefsVerified, Refs: refs}
-	}
-
 	identity, ok := sourceRelationIdentityOf(relation)
 	if !ok {
 		return unavailableSourceRelationFactRefs()
@@ -134,11 +127,17 @@ func (resolver *SourceRelationFactRefResolver) Resolve(relation types.SourceCode
 	if len(matches) != 1 {
 		return unavailableSourceRelationFactRefs()
 	}
-	replayedRefs, hasRefs, valid := decodeSourceRelationFactRefs(matches[0].Context)
-	if !valid || (hasRefs && !resolver.verifyRefs(replayedRefs)) {
+	causalRefs, hasCausalRefs, valid := decodeSourceRelationFactRefs(matches[0].Context)
+	if !valid || (hasCausalRefs && !resolver.verifyRefs(causalRefs)) {
 		return unavailableSourceRelationFactRefs()
 	}
-	return SourceRelationFactRefResolution{Status: SourceRelationFactRefsReplayed, Refs: replayedRefs}
+	if hasRefs {
+		if !resolver.verifyRefs(refs) || !hasCausalRefs || !sameSourceRelationFactRefSet(refs, causalRefs) {
+			return unavailableSourceRelationFactRefs()
+		}
+		return SourceRelationFactRefResolution{Status: SourceRelationFactRefsVerified, Refs: causalRefs}
+	}
+	return SourceRelationFactRefResolution{Status: SourceRelationFactRefsReplayed, Refs: causalRefs}
 }
 
 func (resolver *SourceRelationFactRefResolver) replaySnapshot() {
@@ -187,6 +186,22 @@ func (resolver *SourceRelationFactRefResolver) verifyRefs(refs []types.SourceRel
 			}
 		}
 		if !factExists {
+			return false
+		}
+	}
+	return true
+}
+
+func sameSourceRelationFactRefSet(first, second []types.SourceRelationFactRef) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	refs := make(map[types.SourceRelationFactRef]struct{}, len(first))
+	for _, ref := range first {
+		refs[ref] = struct{}{}
+	}
+	for _, ref := range second {
+		if _, exists := refs[ref]; !exists {
 			return false
 		}
 	}

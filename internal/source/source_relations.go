@@ -574,7 +574,7 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 				continue
 			}
 			var supportingFacts []types.SourceRelationFactRef
-			if !sourceRangeCovers(fact.Range, prefix.fact.Range) {
+			if !sourceFactRangeCoveredBySameMember(mapping, prefix) {
 				supportingFacts = []types.SourceRelationFactRef{sourceRelationFactRef(sourceID, snapshotID, prefix, "spring_class_mapping")}
 			}
 			endpoints = append(endpoints, sourceRouteEndpoint{owner: mapping,
@@ -856,9 +856,13 @@ func sourceRelationFactRef(sourceID, snapshotID string, owner factOwner, role st
 		Kind: owner.fact.Kind, Role: role, Quality: owner.fact.Quality, Range: owner.fact.Range}
 }
 
-func sourceRangeCovers(outer, inner types.SourceRange) bool {
-	return outer.StartByte <= inner.StartByte && outer.EndByte >= inner.EndByte &&
-		outer.StartLine <= inner.StartLine && outer.EndLine >= inner.EndLine
+func sourceFactRangeCoveredBySameMember(outer, inner factOwner) bool {
+	if outer.member.FileID != inner.member.FileID || outer.member.VersionID != inner.member.VersionID ||
+		outer.member.Path != inner.member.Path {
+		return false
+	}
+	return outer.fact.Range.StartByte <= inner.fact.Range.StartByte && outer.fact.Range.EndByte >= inner.fact.Range.EndByte &&
+		outer.fact.Range.StartLine <= inner.fact.Range.StartLine && outer.fact.Range.EndLine >= inner.fact.Range.EndLine
 }
 
 func mergeSourceRelationFactRefs(existing, incoming []types.SourceRelationFactRef) []types.SourceRelationFactRef {
