@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool) string, override ...func(http.ResponseWriter, *http.Request, bool)) (interfaces.WikiPageService, interfaces.SourceWikiService) {
@@ -35,6 +37,9 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 	retentionMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000112_source_wiki_revision_retention.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.db.Exec(string(retentionMigration)).Error)
+	attemptLedgerMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000113_source_wiki_attempt_ledger.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(attemptLedgerMigration)).Error)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Messages []struct {
@@ -42,7 +47,12 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 			} `json:"messages"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-		qa := len(request.Messages) > 0 && request.Messages[0].Content == "source_wiki_qa"
+		stage := ""
+		if len(request.Messages) > 0 {
+			stage = request.Messages[0].Content
+		}
+		r.Header.Set("X-Source-Wiki-Test-Stage", stage)
+		qa := stage == "source_wiki_qa"
 		if len(override) > 0 {
 			override[0](w, r, qa)
 			return
@@ -51,7 +61,7 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 	}))
 	t.Cleanup(server.Close)
 	models := NewModelService(repository.NewModelRepository(f.db), repository.NewKnowledgeBaseRepository(f.db), nil, nil, nil, nil)
-	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "source-wiki-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai"}}
+	model := &types.Model{ID: uuid.NewString(), TenantID: 1, Name: "source-wiki-fixture", Type: types.ModelTypeKnowledgeQA, Source: types.ModelSourceRemote, Status: types.ModelStatusActive, Parameters: types.ModelParameters{BaseURL: server.URL, Provider: "openai", InterfaceType: "openai", ContextWindow: 65536}}
 	require.NoError(t, models.CreateModel(f.ctx, model))
 	f.kb.SummaryModelID = model.ID
 	f.kb.IndexingStrategy.WikiEnabled = true
@@ -86,6 +96,116 @@ func TestSourceWikiModuleGeneratesValidatedCardThroughExistingWikiTools(t *testi
 	require.NoError(t, err)
 	require.Equal(t, f.sha, evidence.CommitSHA)
 	require.Contains(t, evidence.Content, "getPushSchedule")
+}
+
+func TestSourceWikiUnknownContextFailsBeforeProviderDispatch(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var providerCalls atomic.Int32
+	_, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		providerCalls.Add(1)
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	svc := generator.(*sourceWikiService)
+	model, err := svc.models.GetModelByID(f.ctx, f.kb.SummaryModelID)
+	require.NoError(t, err)
+	model.Parameters.ContextWindow = 0
+	require.NoError(t, svc.models.UpdateModel(f.ctx, model))
+
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.Error(t, err, "an unknown provider context window must be an actionable configuration error")
+	require.Nil(t, attempt)
+	require.Zero(t, providerCalls.Load(), "unknown context must stop before any model dispatch")
+	var attempts int64
+	require.NoError(t, f.db.Model(&types.SourceWikiAttempt{}).Where("knowledge_base_id=?", f.kb.ID).Count(&attempts).Error)
+	require.Zero(t, attempts, "invalid model configuration must not consume a module attempt slot")
+}
+
+func TestSourceWikiGenerationRecoversSameAttemptFromPersistedQAPhase(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var generateCalls, qaCalls atomic.Int32
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	}, func(w http.ResponseWriter, r *http.Request, qa bool) {
+		reply := `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+		if qa {
+			qaCalls.Add(1)
+			reply = `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		} else if r.Header.Get("X-Source-Wiki-Test-Stage") == "source_wiki_generate" {
+			generateCalls.Add(1)
+		} else {
+			t.Fatalf("unexpected provider stage on recovery: %s", r.Header.Get("X-Source-Wiki-Test-Stage"))
+		}
+		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"total_tokens":40}}`, reply)
+	})
+	service := generator.(*sourceWikiService)
+	readCtx, release, err := beginSourceRead(f.ctx, service.kb, types.SearchTargets{&types.SearchTarget{
+		Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID, SourceIDs: []string{f.ds.ID},
+	}})
+	require.NoError(t, err)
+	defer release()
+	evidence, err := service.collectEvidence(readCtx, f.kb.ID, f.ds.ID, "src")
+	require.NoError(t, err)
+	var sourceConfig types.DataSource
+	require.NoError(t, f.db.Where("id=?", f.ds.ID).Take(&sourceConfig).Error)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id=?", f.ds.ID).Take(&publication).Error)
+	model, err := service.models.GetModelByID(f.ctx, f.kb.SummaryModelID)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	slug := sourceWikiModuleSlug(f.ds.ID, "src")
+	draft := `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	checkpointData, err := json.Marshal(sourceWikiAttemptCheckpoint{Evidence: evidence, SourceDraft: draft})
+	require.NoError(t, err)
+	draftData, err := json.Marshal(draft)
+	require.NoError(t, err)
+	ids := make(types.StringArray, 0, len(evidence))
+	all := make([]types.SourceWikiEvidence, 0, len(evidence))
+	for _, item := range evidence {
+		ids = append(ids, item.Evidence.KnowledgeID)
+		all = append(all, item.Evidence)
+	}
+	attempt := &types.SourceWikiAttempt{
+		ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID,
+		SnapshotID: publication.SnapshotID, ModulePath: "src", Title: "Scheduling module", Slug: slug,
+		Status: "running", EvidenceKnowledgeIDs: ids, Draft: types.JSON(draftData), Phase: "qa", Checkpoint: types.JSON(checkpointData),
+		SourceConfigFingerprint: sourceWikiSourceFingerprint(&sourceConfig), SourceUpdatedAt: sourceConfig.UpdatedAt,
+		ModelID: model.ID, ModelSettingsFingerprint: sourceWikiModelFingerprint(model), ModelContextWindow: model.Parameters.ContextWindow,
+		MaxCompletionTokens: types.SourceWikiAttemptMaxCompletionTokens, BasePageVersion: 0,
+		DeadlineAt: now.Add(3 * time.Minute), MaxCalls: types.SourceWikiAttemptMaxCalls, MaxTokens: types.SourceWikiAttemptMaxTokens,
+		MaxElapsedMS: types.SourceWikiAttemptMaxElapsedMS, MaxRepairs: types.SourceWikiAttemptMaxRepairs,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	ledger := repository.NewSourceWikiAttemptLedger(f.db)
+	require.NoError(t, ledger.Create(f.ctx, attempt))
+	require.NoError(t, f.db.Transaction(func(tx *gorm.DB) error {
+		return repository.RegisterSourceWikiAttemptEvidence(tx, attempt.ID, all)
+	}))
+
+	recovered, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, AttemptID: attempt.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, attempt.ID, recovered.ID, "recovery must not allocate a fresh attempt or budget")
+	require.Equal(t, "ready", recovered.Status)
+	require.Equal(t, 1, recovered.Calls, "the persisted QA phase resumes without repeating generation")
+	require.EqualValues(t, 1, qaCalls.Load())
+	require.Zero(t, generateCalls.Load())
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, slug)
+	require.NoError(t, err)
+	require.Equal(t, "ready", page.SourceProvenance.State)
+	var ownerCount int64
+	require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id=?", attempt.ID).Count(&ownerCount).Error)
+	require.Zero(t, ownerCount, "publication transfers protection to the page/revision owner in the same transaction")
 }
 
 func TestSourceWikiCurrentAnswersStopAfterPublicationAndRevisionsKeepTheirOwnEvidence(t *testing.T) {
@@ -873,6 +993,21 @@ func TestSourceWikiGenerationPublicationGatesPreserveExistingBody(t *testing.T) 
 			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
 		}
 		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	}, func(w http.ResponseWriter, r *http.Request, qa bool) {
+		if !qa && block.CompareAndSwap(true, false) {
+			entered <- struct{}{}
+			select {
+			case <-resume:
+			case <-time.After(15 * time.Second):
+			}
+		}
+		reply := `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		if r.Header.Get("X-Source-Wiki-Test-Stage") == "source_wiki_merge" {
+			reply = `{"title":"Scheduling module","summary":"Returns a schedule and retains the human clarification.","sections":[{"text":"getPushSchedule returns a schedule. Human clarification: keep the scheduling boundary explicit.","evidence_ids":["e001"],"uncertain":false}]}`
+		} else if !qa {
+			reply = `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+		}
+		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"total_tokens":40}}`, reply)
 	})
 	req := types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"}
 	ready, err := generator.GenerateModule(f.ctx, req)
@@ -941,14 +1076,16 @@ func TestSourceWikiGenerationPublicationGatesPreserveExistingBody(t *testing.T) 
 			released = true
 			attempt := <-done
 			require.NoError(t, <-errs)
-			require.Equal(t, "failed", attempt.Status)
-			require.NotEmpty(t, attempt.Reason)
 			after, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, ready.Slug)
 			require.NoError(t, err)
 			if mutation.name == "page_version" {
-				require.Equal(t, before.Version+1, after.Version)
-				require.Contains(t, after.Content, "Human clarification")
+				require.Equal(t, "ready", attempt.Status, "a bounded merge and QA should resolve a concurrent page edit")
+				require.Equal(t, before.Version+2, after.Version, "the human edit and rebased source write create separate revisions")
+				require.Contains(t, after.Content, "Human clarification: keep the scheduling boundary explicit")
+				require.Equal(t, "ready", after.SourceProvenance.State)
 			} else {
+				require.Equal(t, "failed", attempt.Status)
+				require.NotEmpty(t, attempt.Reason)
 				require.Equal(t, before.Version, after.Version)
 				require.Equal(t, before.Content, after.Content)
 			}
