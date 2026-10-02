@@ -25,12 +25,15 @@ import (
 const sourceWikiAttemptLeaseFor = 45 * time.Second
 
 type sourceWikiAttemptCheckpoint struct {
-	Evidence          []collectedWikiEvidence `json:"evidence"`
-	Reason            string                  `json:"reason,omitempty"`
-	SourceDraft       string                  `json:"source_draft,omitempty"`
-	RebaseRounds      int                     `json:"rebase_rounds,omitempty"`
-	MergeBaseVersion  int                     `json:"merge_base_version,omitempty"`
-	MergedPageVersion int                     `json:"merged_page_version,omitempty"`
+	Evidence          []collectedWikiEvidence    `json:"evidence"`
+	Relations         []types.SourceCodeRelation `json:"relations,omitempty"`
+	FlowDiagramBuilt  bool                       `json:"flow_diagram_built,omitempty"`
+	FlowDiagram       SourceWikiFlowDiagram      `json:"flow_diagram,omitempty"`
+	Reason            string                     `json:"reason,omitempty"`
+	SourceDraft       string                     `json:"source_draft,omitempty"`
+	RebaseRounds      int                        `json:"rebase_rounds,omitempty"`
+	MergeBaseVersion  int                        `json:"merge_base_version,omitempty"`
+	MergedPageVersion int                        `json:"merged_page_version,omitempty"`
 }
 
 func (s *sourceWikiService) GenerateModule(ctx context.Context, req types.SourceWikiGenerateRequest) (*types.SourceWikiAttempt, error) {
@@ -115,13 +118,13 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 		}
 		return nil, err
 	}
-	cleanup := func(reason string) (*types.SourceWikiAttempt, error) {
+	cleanupWithResultKind := func(reason string, resultKind types.SourceWikiAttemptResultKind) (*types.SourceWikiAttempt, error) {
 		if req.BatchID != "" && errors.Is(ctx.Err(), context.Canceled) {
 			return ledger.Get(context.WithoutCancel(ctx), attempt.ID)
 		}
 		finishCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer stop()
-		if finishErr := ledger.Finish(finishCtx, lease, "failed", reason, time.Now()); finishErr != nil {
+		if finishErr := ledger.FinishWithResultKind(finishCtx, lease, "failed", reason, resultKind, time.Now()); finishErr != nil {
 			latest, getErr := ledger.Get(finishCtx, attempt.ID)
 			if getErr == nil && latest.Status != "running" {
 				return latest, nil
@@ -129,6 +132,9 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			return latest, finishErr
 		}
 		return ledger.Get(finishCtx, attempt.ID)
+	}
+	cleanup := func(reason string) (*types.SourceWikiAttempt, error) {
+		return cleanupWithResultKind(reason, "")
 	}
 
 	workCtx, cancel := context.WithDeadline(ctx, attempt.DeadlineAt)
@@ -172,13 +178,22 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			return cleanup("attempt checkpoint is invalid")
 		}
 	}
+	requestedRelations, _ := json.Marshal(req.Relations)
+	if len(checkpoint.Relations) == 0 {
+		checkpoint.Relations = append([]types.SourceCodeRelation(nil), req.Relations...)
+	} else {
+		storedRelations, _ := json.Marshal(checkpoint.Relations)
+		if !bytes.Equal(storedRelations, requestedRelations) {
+			return cleanup("planned source relations changed during topic generation")
+		}
+	}
 	if len(checkpoint.Evidence) == 0 {
 		checkpoint.Evidence, err = s.collectTopicEvidence(workCtx, kb.ID, attempt)
 		if err != nil {
 			return cleanup(err.Error())
 		}
 		if len(checkpoint.Evidence) == 0 {
-			return cleanup("no readable evidence in the selected module")
+			return cleanupWithResultKind("no readable evidence in the selected module", types.SourceWikiAttemptResultKindInsufficientEvidence)
 		}
 		for _, item := range checkpoint.Evidence {
 			if item.Evidence.SnapshotID != attempt.SnapshotID || item.Evidence.DataSourceID != attempt.SourceID {
@@ -191,6 +206,29 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 	} else {
 		if err = s.pinAttemptEvidence(workCtx, lease, ledger, attempt, &checkpoint); err != nil {
 			return cleanup("cannot restore the exact source versions for this attempt")
+		}
+	}
+	if !checkpoint.FlowDiagramBuilt {
+		evidence := make([]types.SourceWikiEvidence, 0, len(checkpoint.Evidence))
+		for _, item := range checkpoint.Evidence {
+			evidence = append(evidence, item.Evidence)
+		}
+		checkpoint.FlowDiagram, err = BuildSourceWikiFlowDiagram(checkpoint.Relations, evidence)
+		if err != nil {
+			return cleanup("cannot build an evidence-backed static flow diagram: " + err.Error())
+		}
+		knownEvidence := make(map[string]bool, len(evidence))
+		for _, item := range evidence {
+			knownEvidence[item.ID] = true
+		}
+		for _, evidenceID := range checkpoint.FlowDiagram.EvidenceIDs {
+			if !knownEvidence[evidenceID] {
+				return cleanup("static flow diagram refers to unowned evidence")
+			}
+		}
+		checkpoint.FlowDiagramBuilt = true
+		if err = s.saveSourceWikiProgress(workCtx, ledger, lease, attempt, &checkpoint, attempt.Phase, attempt.Draft, attempt.Repairs); err != nil {
+			return cleanup(err.Error())
 		}
 	}
 
@@ -415,7 +453,13 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 		if err = sourceWikiJSON(draftText, &publishDraft); err != nil {
 			return cleanup("saved module draft is invalid")
 		}
-		page := sourceWikiBuildPage(kb.ID, attempt, publishDraft, checkpoint.Evidence, registry, currentVersion)
+		if attempt.BatchID != "" {
+			if err = ledger.StageBatchCandidate(workCtx, lease, currentVersion, time.Now()); err != nil {
+				return cleanup(err.Error())
+			}
+			return ledger.Get(context.WithoutCancel(workCtx), attempt.ID)
+		}
+		page := sourceWikiBuildPage(kb.ID, attempt, publishDraft, checkpoint.Evidence, registry, currentVersion, checkpoint.FlowDiagram)
 		if existing != nil {
 			page.Aliases = append(types.StringArray(nil), existing.Aliases...)
 			page.ParentSlug, page.FolderID = existing.ParentSlug, existing.FolderID
@@ -617,7 +661,7 @@ func (s *sourceWikiService) saveSourceWikiProgress(ctx context.Context, ledger *
 	return nil
 }
 
-func sourceWikiBuildPage(kbID string, attempt *types.SourceWikiAttempt, draft sourceWikiDraft, evidence []collectedWikiEvidence, registry map[string]collectedWikiEvidence, version int) *types.WikiPage {
+func sourceWikiBuildPage(kbID string, attempt *types.SourceWikiAttempt, draft sourceWikiDraft, evidence []collectedWikiEvidence, registry map[string]collectedWikiEvidence, version int, diagrams ...SourceWikiFlowDiagram) *types.WikiPage {
 	provenance := &types.SourceWikiProvenance{
 		SourceID: attempt.SourceID, TopicKind: attempt.TopicKind, TopicKey: attempt.TopicKey,
 		ModulePath: attempt.ModulePath, State: "ready", ApplicableSnapshotID: attempt.SnapshotID,
@@ -646,6 +690,20 @@ func sourceWikiBuildPage(kbID string, attempt *types.SourceWikiAttempt, draft so
 			fmt.Fprintf(&body, " [%s:%d–%d @ %s](%s)", e.Path, e.Range.StartLine, e.Range.EndLine, e.CommitSHA[:12], link)
 		}
 		body.WriteString("\n\n")
+	}
+	if len(diagrams) > 0 && diagrams[0].Markdown != "" {
+		body.WriteString(diagrams[0].Markdown)
+		body.WriteString("\n")
+		for _, id := range diagrams[0].EvidenceIDs {
+			item, ok := registry[id]
+			if !ok {
+				continue
+			}
+			e := item.Evidence
+			link := fmt.Sprintf("/api/v1/knowledgebase/%s/wiki/source/evidence?slug=%s&evidence_id=%s&version=%d", url.PathEscape(kbID), url.QueryEscape(attempt.Slug), url.QueryEscape(id), version+1)
+			fmt.Fprintf(&body, "Diagram evidence: [%s:%d–%d @ %s](%s)\n", e.Path, e.Range.StartLine, e.Range.EndLine, e.CommitSHA[:12], link)
+		}
+		body.WriteString("\n")
 	}
 	page.Content = body.String()
 	return page

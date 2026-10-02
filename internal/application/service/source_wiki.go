@@ -240,6 +240,14 @@ func (s *sourceWikiService) validateEvidence(ctx context.Context, draft sourceWi
 }
 
 func (s *sourceWikiService) publishCard(ctx context.Context, kb *types.KnowledgeBase, sourceID, snapshotID string, baseVersion int, existing, page *types.WikiPage, expectedSource *types.DataSource, expectedModel *types.Model, attempt *types.SourceWikiAttempt, lease types.SourceWikiAttemptLease) error {
+	return s.publishCardWithBatchState(ctx, kb, sourceID, snapshotID, baseVersion, existing, page, expectedSource, expectedModel, attempt, lease, false, "")
+}
+
+func (s *sourceWikiService) publishStagedCard(ctx context.Context, kb *types.KnowledgeBase, sourceID, snapshotID string, baseVersion int, existing, page *types.WikiPage, expectedSource *types.DataSource, expectedModel *types.Model, attempt *types.SourceWikiAttempt, approvalDigest string) error {
+	return s.publishCardWithBatchState(ctx, kb, sourceID, snapshotID, baseVersion, existing, page, expectedSource, expectedModel, attempt, types.SourceWikiAttemptLease{}, true, approvalDigest)
+}
+
+func (s *sourceWikiService) publishCardWithBatchState(ctx context.Context, kb *types.KnowledgeBase, sourceID, snapshotID string, baseVersion int, existing, page *types.WikiPage, expectedSource *types.DataSource, expectedModel *types.Model, attempt *types.SourceWikiAttempt, lease types.SourceWikiAttemptLease, stagedCandidate bool, approvalDigest string) error {
 	if err := source.ValidateReadScope(ctx); err != nil {
 		return err
 	}
@@ -247,23 +255,35 @@ func (s *sourceWikiService) publishCard(ctx context.Context, kb *types.Knowledge
 	// an old model result cannot become a current ready page after a new SHA.
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if attempt.BatchID != "" {
+			if !stagedCandidate {
+				return repository.ErrSourceWikiBatchInvalidState
+			}
 			var batch types.SourceWikiBatch
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", attempt.BatchID).Take(&batch).Error; err != nil {
 				return repository.ErrSourceWikiBatchInvalidState
 			}
 			now := time.Now()
-			if batch.Status != "running" || batch.Phase != "cards" || !now.Before(batch.DeadlineAt) ||
+			if batch.Status != "running" || !now.Before(batch.DeadlineAt) ||
 				batch.TenantID != attempt.TenantID || batch.KnowledgeBaseID != attempt.KnowledgeBaseID ||
 				batch.SourceID != attempt.SourceID || batch.SnapshotID != attempt.SnapshotID {
 				return repository.ErrSourceWikiBatchInvalidState
 			}
-			var running types.SourceWikiAttempt
+			if batch.Phase != "publishing" || batch.QAApprovedAt == nil || batch.QAApprovalDigest == "" || batch.QAApprovalDigest != approvalDigest || attempt.StagedPageVersion != baseVersion {
+				return repository.ErrSourceWikiBatchInvalidState
+			}
+			digest, err := repository.SourceWikiBatchCandidateDigestInTx(tx, &batch)
+			if err != nil || digest != batch.QAApprovalDigest {
+				return repository.ErrSourceWikiBatchInvalidState
+			}
+			var staged types.SourceWikiAttempt
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
-				"id = ? AND batch_id = ? AND status = 'running' AND epoch = ? AND lease_owner = ? AND lease_expires_at > ? AND deadline_at > ?",
-				attempt.ID, batch.ID, lease.Epoch, lease.Owner, now, now,
-			).Take(&running).Error; err != nil {
+				"id = ? AND batch_id = ? AND status = 'staged' AND staged_page_version = ?",
+				attempt.ID, batch.ID, baseVersion,
+			).Take(&staged).Error; err != nil {
 				return repository.ErrSourceWikiAttemptFenced
 			}
+		} else if stagedCandidate {
+			return repository.ErrSourceWikiBatchInvalidState
 		}
 		var currentSource types.DataSource
 		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=? AND knowledge_base_id=?", sourceID, kb.TenantID, kb.ID).First(&currentSource).Error; err != nil {
@@ -311,17 +331,46 @@ func (s *sourceWikiService) publishCard(ctx context.Context, kb *types.Knowledge
 			return writeErr
 		}
 		now := time.Now()
-		var running types.SourceWikiAttempt
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND status='running' AND epoch=? AND lease_owner=? AND lease_expires_at>? AND deadline_at>?", attempt.ID, lease.Epoch, lease.Owner, now, now).Take(&running).Error; err != nil {
-			return fmt.Errorf("source Wiki attempt is no longer running")
+		var result *gorm.DB
+		if stagedCandidate {
+			result = tx.Model(&types.SourceWikiAttempt{}).Where("id = ? AND batch_id = ? AND status = 'staged' AND staged_page_version = ?", attempt.ID, attempt.BatchID, baseVersion).
+				Updates(map[string]any{"status": "ready", "reason": "", "updated_at": now})
+		} else {
+			var running types.SourceWikiAttempt
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND status='running' AND epoch=? AND lease_owner=? AND lease_expires_at>? AND deadline_at>?", attempt.ID, lease.Epoch, lease.Owner, now, now).Take(&running).Error; err != nil {
+				return fmt.Errorf("source Wiki attempt is no longer running")
+			}
+			result = tx.Model(&types.SourceWikiAttempt{}).Where("id=? AND status='running' AND epoch=? AND lease_owner=?", attempt.ID, lease.Epoch, lease.Owner).
+				Updates(map[string]any{"status": "ready", "reason": "", "lease_owner": "", "lease_expires_at": nil, "updated_at": now})
 		}
-		result := tx.Model(&types.SourceWikiAttempt{}).Where("id=? AND status='running' AND epoch=? AND lease_owner=?", attempt.ID, lease.Epoch, lease.Owner).
-			Updates(map[string]any{"status": "ready", "reason": "", "lease_owner": "", "lease_expires_at": nil, "updated_at": now})
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
 			return repository.ErrSourceWikiAttemptFenced
+		}
+		if stagedCandidate {
+			updated := tx.Model(&types.SourceWikiCoverageTopic{}).
+				Where("tenant_id = ? AND knowledge_base_id = ? AND source_id = ? AND topic_key = ? AND snapshot_id = ? AND batch_id = ? AND initial = TRUE AND attempt_id = ? AND status = 'draft'",
+					attempt.TenantID, attempt.KnowledgeBaseID, attempt.SourceID, attempt.TopicKey, attempt.SnapshotID, attempt.BatchID, attempt.ID).
+				Updates(map[string]any{"status": "ready", "last_ready_snapshot_id": attempt.SnapshotID, "reason": "", "updated_at": now})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return repository.ErrSourceWikiBatchInvalidState
+			}
+		}
+		if attempt.BatchID == "" && attempt.TopicKind == "module" && attempt.TopicKey == "module/"+attempt.ModulePath {
+			if err := tx.Model(&types.SourceWikiCoverageTopic{}).
+				Where("tenant_id = ? AND knowledge_base_id = ? AND source_id = ? AND topic_key = ? AND snapshot_id = ? AND wiki_slug = ? AND initial = FALSE AND status = 'expansion'",
+					attempt.TenantID, attempt.KnowledgeBaseID, attempt.SourceID, attempt.TopicKey, attempt.SnapshotID, attempt.Slug).
+				Updates(map[string]any{
+					"status": "ready", "attempt_id": attempt.ID,
+					"last_ready_snapshot_id": attempt.SnapshotID, "reason": "", "updated_at": now,
+				}).Error; err != nil {
+				return err
+			}
 		}
 		if err := repository.ReleaseSourceWikiAttemptEvidence(tx, attempt.ID); err != nil {
 			return err

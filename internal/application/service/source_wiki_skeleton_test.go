@@ -141,3 +141,26 @@ func TestSourceWikiSkeletonIntegrityCheckRejectsCorruptCoverageAccounting(t *tes
 	corrupt.FlowCount++
 	require.Error(t, validateSourceWikiSkeletonPlan(corrupt), "persisted counters must match topic kinds")
 }
+
+func TestSourceWikiBuildPageRetainsFlowDiagramEvidenceLinks(t *testing.T) {
+	attempt := &types.SourceWikiAttempt{
+		TenantID: 1, SourceID: "source-a", SnapshotID: "snapshot-7", TopicKind: "flow",
+		TopicKey: "flow/GET /orders", Slug: "concept/source-a/flow-orders",
+	}
+	evidence := collectedWikiEvidence{Evidence: types.SourceWikiEvidence{
+		ID: "e001", KnowledgeID: "knowledge-a", SourceEvidence: types.SourceEvidence{
+			DataSourceID: "source-a", SnapshotID: "snapshot-7", FileVersionID: "version-a", Path: "src/OrderController.java",
+			CommitSHA: "123456789abcdef", Range: types.SourceRange{StartByte: 0, EndByte: 20, StartLine: 1, EndLine: 2},
+		},
+	}}
+	registry := map[string]collectedWikiEvidence{"e001": evidence}
+	diagram := SourceWikiFlowDiagram{Markdown: "```mermaid\nflowchart TD\n  n0 --> n1\n```\n", EvidenceIDs: []string{"e001"}}
+	page := sourceWikiBuildPage("kb-a", attempt, sourceWikiDraft{
+		Title: "Orders flow", Summary: "An orders request follows the cited route.",
+		Sections: []sourceWikiSection{{Text: "The route is declared.", EvidenceIDs: []string{"e001"}}},
+	}, []collectedWikiEvidence{evidence}, registry, 0, diagram)
+	require.Contains(t, page.Content, "flowchart TD")
+	require.Contains(t, page.Content, "evidence_id=e001", "diagram edges retain the exact source evidence link")
+	require.NotNil(t, page.SourceProvenance)
+	require.Len(t, page.SourceProvenance.Evidence, 1)
+}

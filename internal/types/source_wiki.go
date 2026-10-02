@@ -68,44 +68,54 @@ type SourceWikiGenerateRequest struct {
 	TopicKey  string               `json:"-"`
 	Relations []SourceCodeRelation `json:"-"`
 }
+
+type SourceWikiAttemptResultKind string
+
+const (
+	SourceWikiAttemptResultKindInsufficientEvidence SourceWikiAttemptResultKind = "insufficient_evidence"
+)
+
 type SourceWikiAttempt struct {
-	ID                       string      `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID                 uint64      `json:"tenant_id"`
-	KnowledgeBaseID          string      `json:"knowledge_base_id" gorm:"type:varchar(36)"`
-	SourceID                 string      `json:"source_id" gorm:"type:varchar(36)"`
-	SnapshotID               string      `json:"snapshot_id" gorm:"type:varchar(36)"`
-	BatchID                  string      `json:"batch_id,omitempty" gorm:"type:varchar(36);index"`
-	TopicKind                string      `json:"topic_kind,omitempty" gorm:"type:text;not null;default:''"`
-	TopicKey                 string      `json:"topic_key,omitempty" gorm:"type:text;not null;default:''"`
-	ModulePath               string      `json:"module_path"`
-	Title                    string      `json:"title"`
-	Slug                     string      `json:"slug"`
-	Status                   string      `json:"status"`
-	Reason                   string      `json:"reason"`
-	EvidenceKnowledgeIDs     StringArray `json:"-" gorm:"type:jsonb"`
-	Draft                    JSON        `json:"draft" gorm:"type:jsonb"`
-	Calls                    int         `json:"calls"`
-	Tokens                   int         `json:"tokens"`
-	Repairs                  int         `json:"repairs"`
-	SourceConfigFingerprint  string      `json:"-" gorm:"type:varchar(64);not null;default:''"`
-	SourceUpdatedAt          time.Time   `json:"-" gorm:"not null"`
-	ModelID                  string      `json:"-" gorm:"type:varchar(36);not null;default:''"`
-	ModelSettingsFingerprint string      `json:"-" gorm:"type:varchar(64);not null;default:''"`
-	ModelContextWindow       int         `json:"-" gorm:"not null;default:0"`
-	MaxCompletionTokens      int         `json:"-" gorm:"not null;default:4096"`
-	BasePageVersion          int         `json:"-" gorm:"not null;default:0"`
-	Epoch                    int64       `json:"-" gorm:"not null;default:0"`
-	LeaseOwner               string      `json:"-" gorm:"type:varchar(36);not null;default:''"`
-	LeaseExpiresAt           *time.Time  `json:"-"`
-	DeadlineAt               time.Time   `json:"deadline_at" gorm:"not null"`
-	MaxCalls                 int         `json:"max_calls" gorm:"not null"`
-	MaxTokens                int         `json:"max_tokens" gorm:"not null"`
-	MaxElapsedMS             int64       `json:"max_elapsed_ms" gorm:"not null"`
-	MaxRepairs               int         `json:"max_repairs" gorm:"not null"`
-	Phase                    string      `json:"phase,omitempty" gorm:"type:text;not null;default:''"`
-	Checkpoint               JSON        `json:"-" gorm:"type:jsonb"`
-	CreatedAt                time.Time   `json:"created_at"`
-	UpdatedAt                time.Time   `json:"updated_at"`
+	ID                       string                      `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID                 uint64                      `json:"tenant_id"`
+	KnowledgeBaseID          string                      `json:"knowledge_base_id" gorm:"type:varchar(36)"`
+	SourceID                 string                      `json:"source_id" gorm:"type:varchar(36)"`
+	SnapshotID               string                      `json:"snapshot_id" gorm:"type:varchar(36)"`
+	BatchID                  string                      `json:"batch_id,omitempty" gorm:"type:varchar(36);index"`
+	TopicKind                string                      `json:"topic_kind,omitempty" gorm:"type:text;not null;default:''"`
+	TopicKey                 string                      `json:"topic_key,omitempty" gorm:"type:text;not null;default:''"`
+	ModulePath               string                      `json:"module_path"`
+	Title                    string                      `json:"title"`
+	Slug                     string                      `json:"slug"`
+	Status                   string                      `json:"status"`
+	ResultKind               SourceWikiAttemptResultKind `json:"result_kind,omitempty" gorm:"type:text;not null;default:''"`
+	Reason                   string                      `json:"reason"`
+	EvidenceKnowledgeIDs     StringArray                 `json:"-" gorm:"type:jsonb"`
+	Draft                    JSON                        `json:"draft" gorm:"type:jsonb"`
+	Calls                    int                         `json:"calls"`
+	Tokens                   int                         `json:"tokens"`
+	Repairs                  int                         `json:"repairs"`
+	SourceConfigFingerprint  string                      `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	SourceUpdatedAt          time.Time                   `json:"-" gorm:"not null"`
+	ModelID                  string                      `json:"-" gorm:"type:varchar(36);not null;default:''"`
+	ModelSettingsFingerprint string                      `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	ModelContextWindow       int                         `json:"-" gorm:"not null;default:0"`
+	MaxCompletionTokens      int                         `json:"-" gorm:"not null;default:4096"`
+	BasePageVersion          int                         `json:"-" gorm:"not null;default:0"`
+	Epoch                    int64                       `json:"-" gorm:"not null;default:0"`
+	LeaseOwner               string                      `json:"-" gorm:"type:varchar(36);not null;default:''"`
+	LeaseExpiresAt           *time.Time                  `json:"-"`
+	DeadlineAt               time.Time                   `json:"deadline_at" gorm:"not null"`
+	MaxCalls                 int                         `json:"max_calls" gorm:"not null"`
+	MaxTokens                int                         `json:"max_tokens" gorm:"not null"`
+	MaxElapsedMS             int64                       `json:"max_elapsed_ms" gorm:"not null"`
+	MaxRepairs               int                         `json:"max_repairs" gorm:"not null"`
+	Phase                    string                      `json:"phase,omitempty" gorm:"type:text;not null;default:''"`
+	Checkpoint               JSON                        `json:"-" gorm:"type:jsonb"`
+	StagedAt                 *time.Time                  `json:"staged_at,omitempty"`
+	StagedPageVersion        int                         `json:"-" gorm:"not null;default:0"`
+	CreatedAt                time.Time                   `json:"created_at"`
+	UpdatedAt                time.Time                   `json:"updated_at"`
 }
 
 // SourceWikiAttemptLease is an epoch-fenced claim on one durable attempt.

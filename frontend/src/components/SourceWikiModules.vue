@@ -135,7 +135,7 @@ onBeforeUnmount(() => { if (batchTimer) clearInterval(batchTimer); ++generation;
       <p v-if="batchPreview">固定版本 {{ batchPreview.commit_sha.slice(0, 12) }} · {{ batchPreview.initial_count }} 张初始卡片 · {{ batchPreview.candidate_count }} 个候选主题（含 {{ batchPreview.expansion_count }} 个待扩展项）</p>
       <ul v-if="batchPreview" class="preview-list"><li v-for="topic in batchPreview.initial_topics.slice(0, 8)" :key="topic.topic_key">{{ topic.title }} · {{ topic.kind }}</li></ul>
       <button v-if="canEdit && batchPreview?.start_available" type="button" :disabled="busy" @click="startBatch">启动这批 {{ batchPreview.initial_count }} 张卡片</button>
-      <p v-if="activeBatch" role="status">批量{{ batchStatusText(activeBatch.status) }} · {{ activeBatch.phase }} · {{ activeBatch.cursor }}/{{ activeBatch.initial_count }} · {{ activeBatch.calls_reserved }} 次调用 · {{ activeBatch.tokens_reserved }} tokens</p>
+      <p v-if="activeBatch" role="status">批量{{ batchStatusText(activeBatch.status) }} · {{ activeBatch.phase }} · {{ activeBatch.phase === 'publishing' ? activeBatch.publish_cursor : activeBatch.cursor }}/{{ activeBatch.initial_count }} · {{ activeBatch.calls_reserved }} 次调用 · {{ activeBatch.tokens_reserved }} tokens</p>
       <p v-if="activeBatch?.reason">{{ activeBatch.reason }}</p>
     </section>
     <p v-if="error" role="alert">{{ error }}</p>

@@ -358,6 +358,7 @@ export function rebuildWikiLinks(kbId: string) {
 export interface SourceWikiAttempt {
  id: string; source_id: string; module_path: string; title: string; slug: string;
  status: string; reason: string; calls: number; tokens: number; repairs: number;
+ result_kind?: 'insufficient_evidence';
 }
 export function generateSourceWikiModule(kbId: string, request: { source_id: string; module_path: string; title: string }) {
  return post(`/api/v1/knowledgebase/${kbId}/wiki/source/generate`, request, { timeout: 190000 });
@@ -374,10 +375,10 @@ export interface SourceWikiCoverageTopic {
 }
 export interface SourceWikiBatch {
  id: string; source_id: string; snapshot_id: string; status: string; phase: string;
- current_topic_key?: string; cursor: number; candidate_count: number; initial_count: number;
+ current_topic_key?: string; cursor: number; qa_cursor: number; publish_cursor: number; candidate_count: number; initial_count: number;
  calls_reserved: number; tokens_reserved: number; skeleton_calls_reserved: number;
  skeleton_tokens_reserved: number; qa_calls_reserved: number; qa_tokens_reserved: number;
- deadline_at: string; reason?: string; created_at: string; updated_at: string; finished_at?: string;
+ deadline_at: string; qa_deadline_at?: string; reason?: string; created_at: string; updated_at: string; finished_at?: string;
 }
 export interface SourceWikiBatchPreflight {
   preflight_passed: boolean; start_available: boolean; dispatch_reason?: string;

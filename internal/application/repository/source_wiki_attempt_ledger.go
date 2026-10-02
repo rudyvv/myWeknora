@@ -455,6 +455,9 @@ func guardBatchChildTx(tx *gorm.DB, batch *types.SourceWikiBatch, attempt *types
 		}
 		return ErrSourceWikiBatchInvalidState
 	}
+	if batch.RevalidationAttemptID == attempt.ID && (batch.QADueAt == nil || !now.Before(*batch.QADueAt)) {
+		return ErrSourceWikiBatchQATimeout
+	}
 	if attempt.DeadlineAt.After(batch.DeadlineAt) {
 		if err := failBatchChildInTx(tx, attempt, "child deadline exceeds parent batch deadline", now); err != nil {
 			return err
@@ -681,17 +684,76 @@ func (l *SourceWikiAttemptLedger) SaveProgress(ctx context.Context, lease types.
 }
 
 func (l *SourceWikiAttemptLedger) Finish(ctx context.Context, lease types.SourceWikiAttemptLease, status, reason string, now time.Time) error {
+	return l.FinishWithResultKind(ctx, lease, status, reason, "", now)
+}
+
+func (l *SourceWikiAttemptLedger) FinishWithResultKind(ctx context.Context, lease types.SourceWikiAttemptLease, status, reason string, resultKind types.SourceWikiAttemptResultKind, now time.Time) error {
 	if (status != "ready" && status != "failed") || (status == "failed" && reason == "") || (status == "ready" && reason != "") {
 		return fmt.Errorf("%w: terminal state requires a consistent status and reason", ErrSourceWikiAttemptInvalidState)
+	}
+	if resultKind != "" && (status != "failed" || resultKind != types.SourceWikiAttemptResultKindInsufficientEvidence) {
+		return fmt.Errorf("%w: unsupported typed attempt result", ErrSourceWikiAttemptInvalidState)
 	}
 	return l.withClaim(ctx, lease, now, func(tx *gorm.DB, attempt *types.SourceWikiAttempt) error {
 		if err := tx.Model(attempt).Updates(map[string]any{
 			"status": status, "reason": reason, "lease_owner": "",
-			"lease_expires_at": nil, "updated_at": now,
+			"lease_expires_at": nil, "result_kind": resultKind, "updated_at": now,
 		}).Error; err != nil {
 			return err
 		}
 		return ReleaseSourceWikiAttemptEvidence(tx, attempt.ID)
+	})
+}
+
+// StageBatchCandidate ends model work without publishing a page or releasing
+// the exact evidence owner. Staged attempts are durable candidates and are
+// deliberately not claimable as fresh generation work.
+func (l *SourceWikiAttemptLedger) StageBatchCandidate(ctx context.Context, lease types.SourceWikiAttemptLease, pageVersion int, now time.Time) error {
+	if l == nil || l.db == nil || lease.AttemptID == "" || pageVersion < 0 || now.IsZero() {
+		return fmt.Errorf("%w: invalid staged candidate", ErrSourceWikiAttemptInvalidState)
+	}
+	batchID, err := l.batchIDForAttempt(ctx, lease.AttemptID)
+	if err != nil {
+		return err
+	}
+	if batchID == "" {
+		return fmt.Errorf("%w: only batch attempts can be staged", ErrSourceWikiAttemptInvalidState)
+	}
+	return l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var batch types.SourceWikiBatch
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", batchID).Take(&batch).Error; err != nil {
+			return err
+		}
+		if batch.Status != "running" || batch.Phase != "cards" || !now.Before(batch.DeadlineAt) {
+			return ErrSourceWikiBatchInvalidState
+		}
+		var attempt types.SourceWikiAttempt
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND batch_id = ?", lease.AttemptID, batch.ID).Take(&attempt).Error; err != nil {
+			return err
+		}
+		if attempt.Status != "running" || attempt.Epoch != lease.Epoch || attempt.LeaseOwner != lease.Owner ||
+			attempt.LeaseExpiresAt == nil || !now.Before(*attempt.LeaseExpiresAt) || !now.Before(attempt.DeadlineAt) ||
+			attempt.BatchID != batch.ID || attempt.SnapshotID != batch.SnapshotID || len(attempt.Checkpoint) == 0 || len(attempt.Draft) == 0 {
+			return ErrSourceWikiAttemptFenced
+		}
+		var ownerCount int64
+		if err := tx.Table("source_wiki_attempt_evidence_refs").Where("attempt_id = ?", attempt.ID).Count(&ownerCount).Error; err != nil {
+			return err
+		}
+		if ownerCount == 0 {
+			return fmt.Errorf("%w: staged candidate lost its evidence owner", ErrSourceWikiAttemptInvalidState)
+		}
+		result := tx.Model(&attempt).Updates(map[string]any{
+			"status": "staged", "phase": "staged", "staged_at": now,
+			"staged_page_version": pageVersion, "lease_owner": "", "lease_expires_at": nil, "updated_at": now,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrSourceWikiAttemptFenced
+		}
+		return nil
 	})
 }
 

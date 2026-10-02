@@ -8,6 +8,7 @@ const (
 	SourceWikiBatchMaxCalls            = 240
 	SourceWikiBatchMaxTokens           = 4_000_000
 	SourceWikiBatchMaxElapsed          = time.Hour
+	SourceWikiBatchQAMaxElapsed        = 5 * time.Minute
 	SourceWikiBatchMaxInitialTopics    = 40
 	SourceWikiBatchMaxCompletionTokens = 4096
 	SourceWikiBatchMinInputTokens      = 4096
@@ -61,6 +62,11 @@ type SourceWikiBatch struct {
 	CurrentTopicKey          string     `json:"current_topic_key,omitempty"`
 	Cursor                   int        `json:"cursor"`
 	QACursor                 int        `json:"qa_cursor"`
+	PublishCursor            int        `json:"publish_cursor"`
+	QADueAt                  *time.Time `json:"qa_deadline_at,omitempty" gorm:"column:qa_deadline_at"`
+	QAApprovedAt             *time.Time `json:"qa_approved_at,omitempty"`
+	QAApprovalDigest         string     `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	RevalidationAttemptID    string     `json:"-" gorm:"type:varchar(36);not null;default:''"`
 	CandidateCount           int        `json:"candidate_count"`
 	InitialCount             int        `json:"initial_count"`
 	CallsReserved            int        `json:"calls_reserved"`

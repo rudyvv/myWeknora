@@ -15,6 +15,11 @@ CREATE TABLE source_wiki_batches (
     current_topic_key TEXT NOT NULL DEFAULT '',
     cursor INTEGER NOT NULL DEFAULT 0,
     qa_cursor INTEGER NOT NULL DEFAULT 0,
+    publish_cursor INTEGER NOT NULL DEFAULT 0,
+    qa_deadline_at TIMESTAMPTZ,
+    qa_approved_at TIMESTAMPTZ,
+    qa_approval_digest VARCHAR(64) NOT NULL DEFAULT '',
+    revalidation_attempt_id VARCHAR(36) NOT NULL DEFAULT '',
     candidate_count INTEGER NOT NULL DEFAULT 0,
     initial_count INTEGER NOT NULL DEFAULT 0,
     calls_reserved INTEGER NOT NULL DEFAULT 0,
@@ -37,9 +42,10 @@ CREATE TABLE source_wiki_batches (
     updated_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ,
     CHECK (status IN ('queued', 'running', 'completed', 'failed', 'expired')),
-    CHECK (phase IN ('skeleton', 'cards', 'batch_qa', 'finished')),
+    CHECK (phase IN ('skeleton', 'cards', 'batch_qa', 'publishing', 'finished')),
     CHECK (cursor >= 0 AND candidate_count >= 0 AND initial_count >= 0 AND initial_count <= candidate_count),
     CHECK (qa_cursor >= 0 AND qa_cursor <= initial_count),
+    CHECK (publish_cursor >= 0 AND publish_cursor <= initial_count),
     CHECK (max_calls > 0 AND max_calls <= 240),
     CHECK (max_tokens > 0 AND max_tokens <= 4000000),
     CHECK (max_elapsed_ms > 0 AND max_elapsed_ms <= 3600000),
@@ -127,7 +133,13 @@ CREATE INDEX source_wiki_batch_calls_batch_phase
 ALTER TABLE source_wiki_attempts
     ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36) REFERENCES source_wiki_batches(id) ON DELETE SET NULL,
     ADD COLUMN IF NOT EXISTS topic_kind TEXT NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS topic_key TEXT NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS topic_key TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS staged_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS staged_page_version INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS result_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE source_wiki_attempts DROP CONSTRAINT IF EXISTS source_wiki_attempts_result_kind_check;
+ALTER TABLE source_wiki_attempts ADD CONSTRAINT source_wiki_attempts_result_kind_check
+    CHECK (result_kind IN ('', 'insufficient_evidence'));
 CREATE INDEX source_wiki_attempts_batch
     ON source_wiki_attempts(batch_id, created_at);
 DROP INDEX IF EXISTS source_wiki_one_running_module;

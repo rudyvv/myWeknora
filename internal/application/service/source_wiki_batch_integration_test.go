@@ -20,6 +20,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -113,7 +114,7 @@ func TestSourceWikiBatchLedgerReservesBudgetsAndPersistsStableCoverage(t *testin
 		BatchID: batch.ID, Phase: "batch_qa", ProviderPhase: "coverage_qa", ReservedTokens: 10, ExpectedQACursor: &expectedQACursor, Now: now.Add(5 * time.Second),
 	})
 	require.ErrorIs(t, err, repository.ErrSourceWikiBatchBudgetExhausted)
-	require.NoError(t, ledger.UpdateProgress(f.ctx, batch.ID, "finished", "completed", "", "", 2, now.Add(6*time.Second)))
+	require.NoError(t, ledger.UpdateProgress(f.ctx, batch.ID, "finished", "failed", "", "test batch terminalized", 2, now.Add(6*time.Second)))
 
 	// Replanning the same stable topic in a later batch must not create a
 	// duplicate coverage row or invalidate the current ready card.
@@ -124,7 +125,7 @@ func TestSourceWikiBatchLedgerReservesBudgetsAndPersistsStableCoverage(t *testin
 	require.NoError(t, err)
 	require.Len(t, coverage, 3)
 	require.Equal(t, "ready", byCoverageTopic(t, coverage, "module/src/orders").Status)
-	require.NoError(t, ledger.UpdateProgress(f.ctx, next.ID, "finished", "completed", "", "", 2, now.Add(9*time.Second)))
+	require.NoError(t, ledger.UpdateProgress(f.ctx, next.ID, "finished", "failed", "", "test batch terminalized", 2, now.Add(9*time.Second)))
 
 	// A source update keeps the old slug but returns coverage to planned for the
 	// new fixed snapshot; no stale ready state is presented as current.
@@ -376,6 +377,7 @@ func TestSourceWikiBatchStartGeneratesAndQAsAtLeastTwentyCards(t *testing.T) {
 	syncSourceFixture(t, f)
 	var providerCalls atomic.Int32
 	var batchQACalls atomic.Int32
+	var fullSetQACalls atomic.Int32
 	batchQAEntered := make(chan struct{}, 2)
 	batchQARelease := make(chan struct{})
 	var releaseBatchQAOnce sync.Once
@@ -417,6 +419,9 @@ func TestSourceWikiBatchStartGeneratesAndQAsAtLeastTwentyCards(t *testing.T) {
 			encoded, err := json.Marshal(map[string]any{"supported": true, "reason": "", "cards": cards})
 			require.NoError(t, err)
 			reply = string(encoded)
+		} else if strings.Contains(stage, "full initial candidate set") {
+			fullSetQACalls.Add(1)
+			reply = `{"supported":true,"reason":"all candidate cards are mutually consistent"}`
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"prompt_tokens":20,"completion_tokens":20,"total_tokens":40}}`, reply)
@@ -514,6 +519,421 @@ func TestSourceWikiBatchStartGeneratesAndQAsAtLeastTwentyCards(t *testing.T) {
 	require.GreaterOrEqual(t, qaCalls, int64((started.InitialCount+3)/4), "each group has at least one successful QA settlement")
 	require.LessOrEqual(t, qaCalls, int64(types.SourceWikiBatchQAMaxCalls), "duplicate cross-instance QA dispatches still consume the fixed parent budget")
 	require.GreaterOrEqual(t, batchQACalls.Load(), int32((started.InitialCount+3)/4))
+	require.GreaterOrEqual(t, fullSetQACalls.Load(), int32(1), "a separate full-set consistency check must compare candidates across local groups")
+}
+
+func TestSourceWikiBatchRejectedQADraftsAreNeverPublished(t *testing.T) {
+	extraFiles := make(map[string][]byte, 6)
+	for i := 1; i <= 6; i++ {
+		name := fmt.Sprintf("Batch%02dService", i)
+		extraFiles[fmt.Sprintf("src/module%02d/%s.java", i, name)] = []byte(fmt.Sprintf("package demo.module%02d;\npublic class %s {}\n", i, name))
+	}
+	f := newJavaSourceFixture(t, extraFiles)
+	syncSourceFixture(t, f)
+	var groupQACalls, fullSetQACalls atomic.Int32
+	var fullSetCards atomic.Int32
+	wiki, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` }, func(w http.ResponseWriter, r *http.Request, qa bool) {
+		reply := `{"title":"System overview","summary":"The pinned source contains a declared component.","sections":[{"text":"The component is declared in the cited source file.","evidence_ids":["e001"],"uncertain":false}]}`
+		if qa {
+			reply = `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		} else if strings.Contains(r.Header.Get("X-Source-Wiki-Test-Stage"), "Independently check this small group") {
+			groupQACalls.Add(1)
+			var request struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			var input struct {
+				Cards []struct {
+					TopicKey string `json:"topic_key"`
+				} `json:"cards"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(request.Messages[len(request.Messages)-1].Content), &input))
+			cards := make([]map[string]any, 0, len(input.Cards))
+			for _, card := range input.Cards {
+				cards = append(cards, map[string]any{"topic_key": card.TopicKey, "supported": true, "reason": ""})
+			}
+			encoded, err := json.Marshal(map[string]any{"supported": true, "reason": "local groups pass", "cards": cards})
+			require.NoError(t, err)
+			reply = string(encoded)
+		} else if strings.Contains(r.Header.Get("X-Source-Wiki-Test-Stage"), "full initial candidate set") {
+			fullSetQACalls.Add(1)
+			var request struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			var input struct {
+				Cards []map[string]json.RawMessage `json:"cards"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(request.Messages[len(request.Messages)-1].Content), &input))
+			fullSetCards.Store(int32(len(input.Cards)))
+			reply = `{"supported":false,"reason":"a contradiction spans candidates in different local groups"}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"prompt_tokens":20,"completion_tokens":20,"total_tokens":40}}`, reply)
+	})
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	startService, ok := generator.(interface {
+		StartSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatch, error)
+	})
+	require.True(t, ok)
+	systemSlug := sourceWikiAttemptSlug(f.ds.ID, "system", "system", "")
+	oldPage, err := generator.(*sourceWikiService).wiki.CreatePage(f.ctx, &types.WikiPage{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, Slug: systemSlug,
+		Title: "Existing system notes", Summary: "Previously reviewed content.", Content: "Keep this exact page before QA approves a replacement.",
+		PageType: types.WikiPageTypeConcept, Status: types.WikiPageStatusPublished,
+		SourceRefs: types.StringArray{"existing-document|README.md"},
+	})
+	require.NoError(t, err)
+	var revisionsBefore int64
+	require.NoError(t, f.db.Model(&types.WikiPageRevision{}).Where("page_id = ?", oldPage.ID).Count(&revisionsBefore).Error)
+	runner, ok := generator.(interface{ StopSourceWikiBatches() })
+	require.True(t, ok)
+	t.Cleanup(runner.StopSourceWikiBatches)
+	started, err := startService.StartSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.NoError(t, err)
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	deadline := time.Now().Add(90 * time.Second)
+	var finished *types.SourceWikiBatch
+	for time.Now().Before(deadline) {
+		finished, err = ledger.Get(f.ctx, f.kb.ID, started.ID)
+		require.NoError(t, err)
+		if finished.Status != "running" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	require.NotNil(t, finished)
+	require.Equal(t, "failed", finished.Status, finished.Reason)
+	coverage, err := ledger.Coverage(f.ctx, f.kb.ID, f.ds.ID)
+	require.NoError(t, err)
+	var attempted, publishedReady int
+	for _, topic := range coverage {
+		if topic.BatchID == nil || *topic.BatchID != started.ID || !topic.Initial || topic.AttemptID == nil {
+			continue
+		}
+		attempted++
+		var child types.SourceWikiAttempt
+		require.NoError(t, f.db.Where("id = ?", *topic.AttemptID).Take(&child).Error)
+		require.Equal(t, "failed", child.Status, "whole-set rejection terminalizes the staged child")
+		var retainedOwners int64
+		require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id = ?", child.ID).Count(&retainedOwners).Error)
+		require.Zero(t, retainedOwners, "rejected candidates release their exact evidence owners")
+		page, readErr := wiki.GetPageBySlug(f.ctx, f.kb.ID, topic.WikiSlug)
+		if errors.Is(readErr, repository.ErrWikiPageNotFound) {
+			continue
+		}
+		require.NoError(t, readErr)
+		if page != nil && page.Status == types.WikiPageStatusPublished && page.SourceProvenance != nil && page.SourceProvenance.State == "ready" {
+			publishedReady++
+		}
+	}
+	require.Greater(t, attempted, 0, "the fixture must reach candidate generation before the whole-batch rejection")
+	require.GreaterOrEqual(t, groupQACalls.Load(), int32(2), "the fixture must exercise more than one local QA group")
+	require.Equal(t, int32(1), fullSetQACalls.Load(), "the complete candidate set is checked once after all local groups")
+	require.Greater(t, fullSetCards.Load(), int32(4), "the whole-set QA input includes candidates from multiple local groups")
+	require.Zero(t, publishedReady, "a rejected whole-batch QA result must not leave candidate cards publicly readable as ready")
+	preserved, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, systemSlug)
+	require.NoError(t, err)
+	require.Equal(t, oldPage.ID, preserved.ID)
+	require.Equal(t, oldPage.Version, preserved.Version)
+	require.Equal(t, oldPage.Title, preserved.Title)
+	require.Equal(t, oldPage.Summary, preserved.Summary)
+	require.Equal(t, oldPage.Content, preserved.Content)
+	require.Equal(t, oldPage.SourceRefs, preserved.SourceRefs)
+	require.Nil(t, preserved.SourceProvenance)
+	var revisionsAfter int64
+	require.NoError(t, f.db.Model(&types.WikiPageRevision{}).Where("page_id = ?", oldPage.ID).Count(&revisionsAfter).Error)
+	require.Equal(t, revisionsBefore, revisionsAfter, "rejected QA does not append or rewrite a page revision")
+}
+
+func TestSourceWikiBatchPageConflictRebasesWithinOriginalAttemptAndRevalidates(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	globalEntered := make(chan struct{}, 1)
+	allowGlobalReturn := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseGlobal := func() { releaseOnce.Do(func() { close(allowGlobalReturn) }) }
+	var globalCalls atomic.Int32
+	wiki, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` }, func(w http.ResponseWriter, r *http.Request, qa bool) {
+		stage := r.Header.Get("X-Source-Wiki-Test-Stage")
+		reply := `{"title":"System overview","summary":"The pinned source declares a component.","sections":[{"text":"The component is declared in the cited source file.","evidence_ids":["e001"],"uncertain":false}]}`
+		if qa {
+			reply = `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		} else if stage == "source_wiki_merge" {
+			reply = `{"title":"System overview","summary":"The concurrent user edit is retained with the source update.","sections":[{"text":"The component is declared in the cited source file.","evidence_ids":["e001"],"uncertain":false}]}`
+		} else if strings.Contains(stage, "Independently check this small group") {
+			var request struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			var input struct {
+				Cards []struct {
+					TopicKey string `json:"topic_key"`
+				} `json:"cards"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(request.Messages[len(request.Messages)-1].Content), &input))
+			cards := make([]map[string]any, 0, len(input.Cards))
+			for _, card := range input.Cards {
+				cards = append(cards, map[string]any{"topic_key": card.TopicKey, "supported": true, "reason": ""})
+			}
+			encoded, err := json.Marshal(map[string]any{"supported": true, "reason": "local group is consistent", "cards": cards})
+			require.NoError(t, err)
+			reply = string(encoded)
+		} else if strings.Contains(stage, "full initial candidate set") {
+			if globalCalls.Add(1) == 1 {
+				globalEntered <- struct{}{}
+				select {
+				case <-allowGlobalReturn:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			reply = `{"supported":true,"reason":"the full candidate set is consistent"}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"prompt_tokens":20,"completion_tokens":20,"total_tokens":40}}`, reply)
+	})
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	startService, ok := generator.(interface {
+		StartSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatch, error)
+	})
+	require.True(t, ok)
+	runner, ok := generator.(interface{ StopSourceWikiBatches() })
+	require.True(t, ok)
+	t.Cleanup(func() { releaseGlobal(); runner.StopSourceWikiBatches() })
+	started, err := startService.StartSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.NoError(t, err)
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	select {
+	case <-globalEntered:
+	case <-time.After(90 * time.Second):
+		t.Fatal("the batch did not reach its full-set QA checkpoint")
+	}
+	coverage, err := ledger.Coverage(f.ctx, f.kb.ID, f.ds.ID)
+	require.NoError(t, err)
+	system := byCoverageTopic(t, coverage, "system")
+	require.NotNil(t, system.AttemptID)
+	childLedger := repository.NewSourceWikiAttemptLedger(f.db)
+	childBefore, err := childLedger.Get(f.ctx, *system.AttemptID)
+	require.NoError(t, err)
+	require.Equal(t, "staged", childBefore.Status)
+	originalCalls, originalDeadline := childBefore.Calls, childBefore.DeadlineAt
+	service := generator.(*sourceWikiService)
+	concurrentEdit, err := service.wiki.CreatePage(f.ctx, &types.WikiPage{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, Slug: sourceWikiAttemptSlug(f.ds.ID, "system", "system", ""),
+		Title: "System overview", Summary: "Concurrent user edit.", Content: "User-authored context.",
+		PageType: types.WikiPageTypeConcept, Status: types.WikiPageStatusPublished,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, concurrentEdit.Version)
+	releaseGlobal()
+	deadline := time.Now().Add(90 * time.Second)
+	var finished *types.SourceWikiBatch
+	for time.Now().Before(deadline) {
+		finished, err = ledger.Get(f.ctx, f.kb.ID, started.ID)
+		require.NoError(t, err)
+		if finished.Status != "running" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.NotNil(t, finished)
+	require.Equal(t, "completed", finished.Status, finished.Reason)
+	require.Equal(t, finished.InitialCount, finished.PublishCursor)
+	childAfter, err := childLedger.Get(f.ctx, *system.AttemptID)
+	require.NoError(t, err)
+	require.Equal(t, "ready", childAfter.Status)
+	require.Equal(t, originalDeadline, childAfter.DeadlineAt, "rebase never renews the original child deadline")
+	require.Greater(t, childAfter.Calls, originalCalls, "merge and per-card QA are charged to the same original child attempt")
+	var checkpoint sourceWikiAttemptCheckpoint
+	require.NoError(t, json.Unmarshal(childAfter.Checkpoint, &checkpoint))
+	require.Equal(t, 1, checkpoint.RebaseRounds)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, concurrentEdit.Slug)
+	require.NoError(t, err)
+	require.Equal(t, "The concurrent user edit is retained with the source update.", page.Summary)
+	require.GreaterOrEqual(t, globalCalls.Load(), int32(2), "candidate mutation after approval invalidates approval and reruns full-set QA")
+}
+
+func TestSourceWikiBatchQAPhaseDeadlineIsFixedAndParentBounded(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	ledger := newSourceWikiBatchLedgerFixture(t, f)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, now)
+	batch.MaxElapsedMS = (10 * time.Minute).Milliseconds()
+	batch.DeadlineAt = now.Add(10 * time.Minute)
+	require.NoError(t, ledger.Create(f.ctx, batch))
+	plan := []types.SourceWikiTopic{{
+		SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "system", Kind: "system",
+		Title: "System overview", Priority: 120, Status: "planned",
+	}}
+	require.NoError(t, ledger.SavePlan(f.ctx, batch.ID, plan, now.Add(time.Second)))
+	phaseStart := now.Add(10 * time.Second)
+	require.NoError(t, ledger.UpdateProgress(f.ctx, batch.ID, "batch_qa", "running", "", "", 1, phaseStart))
+	started, err := ledger.Get(f.ctx, f.kb.ID, batch.ID)
+	require.NoError(t, err)
+	require.NotNil(t, started.QADueAt)
+	require.True(t, phaseStart.Add(types.SourceWikiBatchQAMaxElapsed).Equal(*started.QADueAt), "the first QA entry fixes one absolute phase deadline")
+	require.NoError(t, ledger.UpdateProgress(f.ctx, batch.ID, "batch_qa", "running", "", "", 1, started.QADueAt.Add(-time.Second)))
+	resumed, err := ledger.Get(f.ctx, f.kb.ID, batch.ID)
+	require.NoError(t, err)
+	require.Equal(t, *started.QADueAt, *resumed.QADueAt, "recovery cannot renew the absolute QA phase deadline")
+	err = ledger.UpdateProgress(f.ctx, batch.ID, "batch_qa", "running", "", "", 1, *resumed.QADueAt)
+	require.ErrorIs(t, err, repository.ErrSourceWikiBatchQATimeout)
+	finished, err := ledger.Get(f.ctx, f.kb.ID, batch.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", finished.Status)
+	require.Equal(t, "batch QA phase deadline exhausted", finished.Reason)
+
+	short := newSourceWikiTestBatch(f, publication.SnapshotID, now.Add(20*time.Minute))
+	short.MaxElapsedMS = time.Minute.Milliseconds()
+	short.DeadlineAt = short.CreatedAt.Add(time.Minute)
+	require.NoError(t, ledger.Create(f.ctx, short))
+	require.NoError(t, ledger.SavePlan(f.ctx, short.ID, plan, short.CreatedAt.Add(time.Second)))
+	shortPhaseStart := short.CreatedAt.Add(10 * time.Second)
+	require.NoError(t, ledger.UpdateProgress(f.ctx, short.ID, "batch_qa", "running", "", "", 1, shortPhaseStart))
+	parentBounded, err := ledger.Get(f.ctx, f.kb.ID, short.ID)
+	require.NoError(t, err)
+	require.NotNil(t, parentBounded.QADueAt)
+	require.True(t, short.DeadlineAt.Equal(*parentBounded.QADueAt), "the five-minute QA maximum cannot extend the parent deadline")
+	require.NoError(t, ledger.UpdateProgress(f.ctx, short.ID, "batch_qa", "failed", "", "test cleanup", 1, shortPhaseStart.Add(time.Second)))
+}
+
+func TestManualModulePublishCompletesMatchingExpansionCoverageWithoutAdvancingBatch(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"The source declares a schedule.","sections":[{"text":"The module declares the cited component.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, now)
+	require.NoError(t, ledger.Create(f.ctx, batch))
+	require.NoError(t, ledger.UpdateProgress(f.ctx, batch.ID, "cards", "running", "", "", 0, now.Add(time.Millisecond)))
+	topic := types.SourceWikiCoverageTopic{
+		ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID,
+		SourceID: f.ds.ID, TopicKey: "module/src", SnapshotID: publication.SnapshotID,
+		Kind: "module", ModulePath: "src", Title: "Scheduling module", Priority: 10,
+		Initial: false, Status: "expansion", UncertaintyReasons: types.JSON("[]"), Relations: types.JSON("[]"),
+		BatchID: &batch.ID, WikiSlug: sourceWikiModuleSlug(f.ds.ID, "src"), UpdatedAt: now,
+	}
+	require.NoError(t, f.db.Create(&topic).Error)
+	manualAttempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ready", manualAttempt.Status)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, topic.WikiSlug)
+	require.NoError(t, err)
+	require.Equal(t, types.WikiPageStatusPublished, page.Status)
+	readService, ok := generator.(interfaces.SourceWikiBatchReadService)
+	require.True(t, ok)
+	coverage, err := readService.ListSourceWikiCoverage(f.ctx, f.kb.ID, f.ds.ID)
+	require.NoError(t, err)
+	updated := byCoverageTopic(t, coverage, topic.TopicKey)
+	require.Equal(t, "ready", updated.Status)
+	require.Equal(t, publication.SnapshotID, updated.LastReadySnapshotID)
+	require.NotNil(t, updated.AttemptID)
+	require.Equal(t, manualAttempt.ID, *updated.AttemptID)
+	require.NotNil(t, updated.BatchID)
+	require.Equal(t, batch.ID, *updated.BatchID, "the pre-existing batch association remains untouched")
+	unchangedBatch, err := ledger.Get(f.ctx, f.kb.ID, batch.ID)
+	require.NoError(t, err)
+	require.Equal(t, "cards", unchangedBatch.Phase)
+	require.Zero(t, unchangedBatch.Cursor)
+	require.Zero(t, unchangedBatch.QACursor)
+	require.Zero(t, unchangedBatch.CallsReserved, "manual T14 calls do not consume the active parent budget")
+	require.Equal(t, 0, unchangedBatch.CandidateCount)
+}
+
+func TestBatchWithoutReadableEvidenceUsesDedicatedCoverageOutcome(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var unexpectedProviderCalls atomic.Int32
+	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` }, func(w http.ResponseWriter, r *http.Request, qa bool) {
+		unexpectedProviderCalls.Add(1)
+		http.Error(w, "provider call is not expected without evidence", http.StatusInternalServerError)
+	})
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(migration)).Error)
+	service := generator.(*sourceWikiService)
+	model, err := service.models.GetModelByID(f.ctx, f.kb.SummaryModelID)
+	require.NoError(t, err)
+	var source types.DataSource
+	require.NoError(t, f.db.Where("id = ?", f.ds.ID).Take(&source).Error)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, now)
+	batch.SourceConfigFingerprint = sourceWikiSourceFingerprint(&source)
+	batch.SourceUpdatedAt = source.UpdatedAt
+	batch.ModelID = model.ID
+	batch.ModelSettingsFingerprint = sourceWikiModelFingerprint(model)
+	batch.ModelContextWindow = model.Parameters.ContextWindow
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	require.NoError(t, ledger.Create(f.ctx, batch))
+	topics := []types.SourceWikiTopic{{
+		SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "module/not-present",
+		Kind: "module", ModulePath: "not-present", Title: "Missing module", Priority: 10, Status: "planned",
+	}}
+	require.NoError(t, ledger.SavePlan(f.ctx, batch.ID, topics, now.Add(time.Millisecond)))
+	runner, ok := generator.(interfaces.SourceWikiBatchExecutionService)
+	require.True(t, ok)
+	t.Cleanup(runner.StopSourceWikiBatches)
+	runner.ResumeSourceWikiBatch(context.Background(), batch.ID)
+	deadline := time.Now().Add(30 * time.Second)
+	var finished *types.SourceWikiBatch
+	for time.Now().Before(deadline) {
+		finished, err = ledger.Get(f.ctx, f.kb.ID, batch.ID)
+		require.NoError(t, err)
+		if finished.Status != "running" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	require.NotNil(t, finished)
+	require.Equal(t, "failed", finished.Status)
+	coverageReader, ok := generator.(interfaces.SourceWikiBatchReadService)
+	require.True(t, ok)
+	coverage, err := coverageReader.ListSourceWikiCoverage(f.ctx, f.kb.ID, f.ds.ID)
+	require.NoError(t, err)
+	missing := byCoverageTopic(t, coverage, "module/not-present")
+	require.Equal(t, "insufficient_evidence", missing.Status)
+	require.NotNil(t, missing.AttemptID)
+	attempts, err := service.ListAttempts(f.ctx, f.kb.ID)
+	require.NoError(t, err)
+	var attempt *types.SourceWikiAttempt
+	for _, candidate := range attempts {
+		if candidate.ID == *missing.AttemptID {
+			attempt = candidate
+			break
+		}
+	}
+	require.NotNil(t, attempt)
+	require.Equal(t, types.SourceWikiAttemptResultKindInsufficientEvidence, attempt.ResultKind)
+	require.Zero(t, finished.CallsReserved)
+	require.Zero(t, unexpectedProviderCalls.Load())
 }
 
 func TestSourceWikiBatchStopPreservesCheckpointAndRestartExpiresParent(t *testing.T) {
@@ -542,6 +962,8 @@ func TestSourceWikiBatchStopPreservesCheckpointAndRestartExpiresParent(t *testin
 			reply = `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
 		} else if strings.Contains(stage, "Independently check this small group") {
 			reply = `{"supported":true,"reason":"","cards":[{"topic_key":"system","supported":true,"reason":""}]}`
+		} else if strings.Contains(stage, "full initial candidate set") {
+			reply = `{"supported":true,"reason":"consistent"}`
 		}
 		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"prompt_tokens":20,"completion_tokens":20,"total_tokens":40}}`, reply)
 	})
