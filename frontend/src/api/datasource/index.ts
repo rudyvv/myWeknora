@@ -25,6 +25,18 @@ export interface DataSource {
   created_at: string
   updated_at: string
   latest_sync_log?: SyncLog
+  source_lifecycle?: SourceLifecycle
+}
+
+export interface SourceLifecycle {
+  binding_state: 'bound' | 'unbound'
+  query_enabled: boolean
+  cleanup?: {
+    id: string
+    status: 'pending' | 'running' | 'failed' | 'completed'
+    retryable: boolean
+    error_code?: string
+  }
 }
 
 /**
@@ -177,6 +189,24 @@ export function pauseDataSource(id: string) {
 
 export function resumeDataSource(id: string) {
   return post(`/api/v1/datasource/${id}/resume`, {})
+}
+
+export async function unbindDataSource(id: string): Promise<DataSource> {
+  const response: any = await post(`/api/v1/datasource/${id}/unbind`, {})
+  return (response.data ?? response) as DataSource
+}
+
+export async function clearSourceKnowledge(id: string): Promise<DataSource> {
+  const response: any = await post(`/api/v1/datasource/${id}/clear-source`, {
+    confirm: true,
+    scope: 'current_and_history',
+  })
+  return (response.data ?? response) as DataSource
+}
+
+export async function retrySourceKnowledgeClear(id: string, operationId: string): Promise<DataSource> {
+  const response: any = await post(`/api/v1/datasource/${id}/clear-source/retry`, { operation_id: operationId })
+  return (response.data ?? response) as DataSource
 }
 
 export function getSyncLogs(id: string, limit = 20, offset = 0) {
