@@ -193,6 +193,7 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 	f := newJavaSourceFixture(t)
 	syncSourceFixture(t, f)
 	var generationCalls atomic.Int64
+	var targetGenerationCalls atomic.Int64
 	wiki, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` }, func(w http.ResponseWriter, r *http.Request, qa bool) {
 		stage := r.Header.Get("X-Source-Wiki-Test-Stage")
 		var reply string
@@ -215,7 +216,12 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 			case call == 2:
 				reply = `{"title":"Scheduling module","summary":"Source B documents a named lookup.","sections":[{"text":"Source B: getPushSchedule accepts a name and returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
 			case input.TopicKey == "module/src":
-				reply = `{"title":"Scheduling module","summary":"Source A now handles the replacement implementation.","sections":[{"text":"Source A updated: getPushSchedule reads the replacement implementation.","evidence_ids":["e001"],"uncertain":false}]}`
+				switch update := targetGenerationCalls.Add(1); {
+				case update == 1:
+					reply = `{"title":"Scheduling module","summary":"Source A handles the first replacement implementation.","sections":[{"text":"Source A update one: getPushSchedule reads the first replacement implementation.","evidence_ids":["e001"],"uncertain":false}]}`
+				default:
+					reply = `{"title":"Scheduling module","summary":"Source A handles the second replacement implementation.","sections":[{"text":"Source A update two: getPushSchedule reads the second replacement implementation.","evidence_ids":["e001"],"uncertain":false}]}`
+				}
 			default:
 				reply = `{"title":"System overview","summary":"The source declares a component.","sections":[{"text":"The source declares a component.","evidence_ids":["e001"],"uncertain":false}]}`
 			}
@@ -246,7 +252,11 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 			reply = `{"supported":true,"reason":"the full candidate set is consistent"}`
 		case stage == "source_wiki_merge":
 			// Return only A's supported update; B must survive through its typed contribution.
-			reply = `{"title":"Scheduling module","summary":"Source A now handles the replacement implementation.","sections":[{"text":"Source A updated: getPushSchedule reads the replacement implementation.","evidence_ids":["e001"],"uncertain":false}]}`
+			if targetGenerationCalls.Load() <= 1 {
+				reply = `{"title":"Scheduling module","summary":"Source A handles the first replacement implementation.","sections":[{"text":"Source A update one: getPushSchedule reads the first replacement implementation.","evidence_ids":["e001"],"uncertain":false}]}`
+			} else {
+				reply = `{"title":"Scheduling module","summary":"Source A handles the second replacement implementation.","sections":[{"text":"Source A update two: getPushSchedule reads the second replacement implementation.","evidence_ids":["e001"],"uncertain":false}]}`
+			}
 		default:
 			t.Errorf("unexpected provider stage in mixed-page regeneration fixture: %q", stage)
 			http.Error(w, "unexpected provider stage", http.StatusInternalServerError)
@@ -257,6 +267,10 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 	})
 	service := generator.(*sourceWikiService)
 	t.Cleanup(service.StopSourceWikiBatches)
+	initialDeliveryErr, initialPending := t16RegressionDrainUpdateLane(t, f, service)
+	require.NoError(t, initialDeliveryErr)
+	require.Zero(t, initialPending)
+	require.Zero(t, generationCalls.Load(), "initial source publication planning must not call the fake generation model")
 	request := types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"}
 	first, err := generator.GenerateModule(f.ctx, request)
 	require.NoError(t, err)
@@ -271,6 +285,11 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 	_, err = f.service.CreateDataSource(f.ctx, &sourceB)
 	require.NoError(t, err)
 	syncSourceFixture(t, f, sourceB.ID)
+	callsBeforeBGeneration := generationCalls.Load()
+	bDeliveryErr, bPending := t16RegressionDrainUpdateLane(t, f, service)
+	require.NoError(t, bDeliveryErr)
+	require.Zero(t, bPending)
+	require.Equal(t, callsBeforeBGeneration, generationCalls.Load(), "B's initial publication planning must not consume its generation fake")
 	request.SourceID = sourceB.ID
 	second, err := generator.GenerateModule(f.ctx, request)
 	require.NoError(t, err)
@@ -280,6 +299,10 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 
 	var contributionB types.SourceWikiPageContribution
 	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND revision_id IS NULL", pageB.ID, sourceB.ID).Take(&contributionB).Error)
+	var initialA types.SourceWikiPageContribution
+	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND revision_id IS NULL", pageA.ID, f.ds.ID).Take(&initialA).Error)
+	require.Equal(t, "ready", initialA.State)
+	require.Equal(t, "ready", contributionB.State)
 	var preservedB struct {
 		Content          string                     `json:"content"`
 		SourceRefs       types.StringArray          `json:"source_refs"`
@@ -294,7 +317,14 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 	preservedBTargetSnapshot := contributionB.TargetSnapshotID
 	pageA.Content += "\n" + pageB.Content
 	pageA.SourceRefs = append(pageA.SourceRefs, pageB.SourceRefs...)
+	pageA.Title, pageA.Summary = pageB.Title, pageB.Summary
+	primaryB := *pageB.SourceProvenance
+	pageA.SourceProvenance = &primaryB
+	require.Equal(t, sourceB.ID, pageA.SourceProvenance.SourceID, "the shared fixture intentionally starts with B as its verified primary projection")
+	require.Equal(t, pageB.Title, pageA.Title)
+	require.Equal(t, pageB.Summary, pageA.Summary)
 	require.NoError(t, f.db.Save(pageA).Error)
+	t16RegressionRegisterSourceWikiEvidenceOwners(t, f, pageA, pageB.SourceProvenance.Evidence)
 	contributionB.PageID = pageA.ID
 	contributionB.PageVersion = pageA.Version
 	require.NoError(t, f.db.Save(&contributionB).Error)
@@ -315,38 +345,17 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 	require.NoError(t, f.db.Where("plan_id=? AND topic_key=?", plan.ID, "module/src").Take(&updateItem).Error)
 	require.Equal(t, "regenerate", updateItem.Action)
 
-	var targetAttempt types.SourceWikiAttempt
-	targetAttemptFound := false
-	var completedGenerationCalls int64
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		var attempts []types.SourceWikiAttempt
-		require.NoError(t, f.db.Where("source_id=? AND snapshot_id=? AND topic_key=?", f.ds.ID, updateRun.Snapshot.ID, "module/src").
-			Order("created_at DESC, id DESC").Limit(1).Find(&attempts).Error)
-		targetAttemptFound = len(attempts) > 0
-		if targetAttemptFound {
-			targetAttempt = attempts[0]
-			require.NoError(t, f.db.Model(&types.SourceWikiAttemptCall{}).
-				Where("attempt_id=? AND phase=? AND outcome=? AND completed_at IS NOT NULL", targetAttempt.ID, "source_wiki_generate", "succeeded").
-				Count(&completedGenerationCalls).Error)
-			if targetAttempt.Status == "ready" && targetAttempt.Calls > 0 && completedGenerationCalls > 0 {
-				break
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	require.True(t, targetAttemptFound, "A's changed module must have its own attempt for the new source snapshot")
+	targetAttempt := t16RegressionAwaitReadySourceWikiAttempt(t, f, f.ds.ID, updateRun.Snapshot.ID, "module/src")
 	require.Equal(t, "ready", targetAttempt.Status)
 	require.Equal(t, f.ds.ID, targetAttempt.SourceID)
 	require.Equal(t, "module", targetAttempt.TopicKind)
 	require.Equal(t, "module/src", targetAttempt.TopicKey)
 	require.Equal(t, updateRun.Snapshot.ID, targetAttempt.SnapshotID)
 	require.Greater(t, targetAttempt.Calls, 0)
-	require.Greater(t, completedGenerationCalls, int64(0), "the exact target attempt must own a completed generation provider call")
 
 	updatedPage, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, pageA.Slug)
 	require.NoError(t, err)
-	require.Contains(t, updatedPage.Content, "Source A updated: getPushSchedule reads the replacement implementation.")
+	require.Contains(t, updatedPage.Content, "Source A update one: getPushSchedule reads the first replacement implementation.")
 	require.NotContains(t, updatedPage.Content, "Source A old: getPushSchedule returns a schedule.")
 	require.Contains(t, updatedPage.Content, "Source B: getPushSchedule accepts a name and returns a schedule.")
 	require.NotNil(t, updatedPage.SourceProvenance)
@@ -372,7 +381,7 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 		SourceProvenance *types.SourceWikiProvenance `json:"source_provenance"`
 	}
 	require.NoError(t, json.Unmarshal(updatedA.Contribution, &updatedAProjection))
-	require.Contains(t, updatedAProjection.Content, "Source A updated: getPushSchedule reads the replacement implementation.")
+	require.Contains(t, updatedAProjection.Content, "Source A update one: getPushSchedule reads the first replacement implementation.")
 	require.NotContains(t, updatedAProjection.Content, "Source A old: getPushSchedule returns a schedule.")
 	require.NotContains(t, updatedAProjection.Content, "Source B: getPushSchedule accepts a name and returns a schedule.")
 	require.NotNil(t, updatedAProjection.SourceProvenance)
@@ -381,6 +390,10 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 	require.Equal(t, "module/src", updatedAProjection.SourceProvenance.TopicKey)
 	require.Equal(t, "ready", updatedAProjection.SourceProvenance.State)
 	require.Equal(t, updateRun.Snapshot.ID, updatedAProjection.SourceProvenance.ApplicableSnapshotID)
+	firstARefs := make(types.StringArray, 0, len(updatedAProjection.SourceProvenance.Evidence))
+	for _, evidence := range updatedAProjection.SourceProvenance.Evidence {
+		firstARefs = append(firstARefs, evidence.KnowledgeID+"|"+evidence.Path)
+	}
 	var expectedSourceRefs types.StringArray
 	seenSourceRefs := make(map[string]bool)
 	addSourceRef := func(ref string) {
@@ -401,6 +414,80 @@ func TestSourceWikiIncrementalRegenerationPreservesMixedPageContribution(t *test
 	for _, oldRef := range originalARefs {
 		require.NotContains(t, updatedPage.SourceRefs, oldRef, "superseded A file references must not survive the replacement snapshot")
 	}
+
+	f.advanceFiles(map[string][]byte{
+		"src/UpdatedService.java": nil,
+		"src/FinalService.java":   []byte("package demo; public class FinalService { public String getPushSchedule(String name) { return \"final\"; } }\n"),
+	})
+	syncSourceFixture(t, f)
+	secondUpdateRun := latestIncrementalRun(t, f)
+	deliveryErr, pending = t16RegressionDrainUpdateLane(t, f, service)
+	require.NoError(t, deliveryErr)
+	require.Zero(t, pending)
+	var secondPlan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("source_id=? AND snapshot_id=?", f.ds.ID, secondUpdateRun.Snapshot.ID).Take(&secondPlan).Error)
+	require.Equal(t, "completed", secondPlan.Status)
+	var secondUpdateItem types.SourceWikiUpdatePlanItem
+	require.NoError(t, f.db.Where("plan_id=? AND topic_key=?", secondPlan.ID, "module/src").Take(&secondUpdateItem).Error)
+	require.Equal(t, "regenerate", secondUpdateItem.Action)
+	secondAttempt := t16RegressionAwaitReadySourceWikiAttempt(t, f, f.ds.ID, secondUpdateRun.Snapshot.ID, "module/src")
+	require.Equal(t, f.ds.ID, secondAttempt.SourceID)
+	require.Equal(t, "module", secondAttempt.TopicKind)
+	require.Equal(t, "module/src", secondAttempt.TopicKey)
+	require.Equal(t, secondUpdateRun.Snapshot.ID, secondAttempt.SnapshotID)
+
+	secondPage, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, pageA.Slug)
+	require.NoError(t, err)
+	require.Contains(t, secondPage.Content, "Source A update two: getPushSchedule reads the second replacement implementation.")
+	require.NotContains(t, secondPage.Content, "Source A update one: getPushSchedule reads the first replacement implementation.")
+	require.NotContains(t, secondPage.Content, "Source A old: getPushSchedule returns a schedule.")
+	require.Contains(t, secondPage.Content, "Source B: getPushSchedule accepts a name and returns a schedule.")
+	require.NotNil(t, secondPage.SourceProvenance)
+	require.Equal(t, "ready", secondPage.SourceProvenance.State)
+
+	var secondB types.SourceWikiPageContribution
+	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND revision_id IS NULL", secondPage.ID, sourceB.ID).Take(&secondB).Error)
+	require.Equal(t, "ready", secondB.State)
+	require.Equal(t, preservedBJSON, secondB.Contribution)
+	require.Equal(t, preservedBEvidenceSHA, secondB.EvidenceSHA256)
+	require.Equal(t, preservedBApplicableSnapshot, secondB.ApplicableSnapshotID)
+	require.Equal(t, preservedBTargetSnapshot, secondB.TargetSnapshotID)
+	require.Equal(t, secondPage.Version, secondB.PageVersion)
+	var secondA types.SourceWikiPageContribution
+	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND topic_key=? AND revision_id IS NULL", secondPage.ID, f.ds.ID, "module/src").Take(&secondA).Error)
+	require.Equal(t, "ready", secondA.State)
+	require.Equal(t, secondUpdateRun.Snapshot.ID, secondA.ApplicableSnapshotID)
+	require.Equal(t, secondUpdateRun.Snapshot.ID, secondA.TargetSnapshotID)
+	require.Equal(t, secondPage.Version, secondA.PageVersion)
+	var secondAProjection struct {
+		Content          string                      `json:"content"`
+		SourceProvenance *types.SourceWikiProvenance `json:"source_provenance"`
+	}
+	require.NoError(t, json.Unmarshal(secondA.Contribution, &secondAProjection))
+	require.Contains(t, secondAProjection.Content, "Source A update two: getPushSchedule reads the second replacement implementation.")
+	require.NotContains(t, secondAProjection.Content, "Source A update one: getPushSchedule reads the first replacement implementation.")
+	require.NotContains(t, secondAProjection.Content, "Source A old: getPushSchedule returns a schedule.")
+	require.NotContains(t, secondAProjection.Content, "Source B: getPushSchedule accepts a name and returns a schedule.")
+	require.NotNil(t, secondAProjection.SourceProvenance)
+	require.Equal(t, f.ds.ID, secondAProjection.SourceProvenance.SourceID)
+	require.Equal(t, "module/src", secondAProjection.SourceProvenance.TopicKey)
+	require.Equal(t, "ready", secondAProjection.SourceProvenance.State)
+	require.Equal(t, secondUpdateRun.Snapshot.ID, secondAProjection.SourceProvenance.ApplicableSnapshotID)
+
+	expectedSourceRefs = expectedSourceRefs[:0]
+	seenSourceRefs = make(map[string]bool)
+	for _, ref := range preservedB.SourceRefs {
+		addSourceRef(ref)
+	}
+	for _, evidence := range secondAProjection.SourceProvenance.Evidence {
+		addSourceRef(evidence.KnowledgeID + "|" + evidence.Path)
+	}
+	require.ElementsMatch(t, expectedSourceRefs, secondPage.SourceRefs,
+		"the second update must combine only the current A evidence refs and B's preserved refs")
+	require.Len(t, secondPage.SourceRefs, len(expectedSourceRefs))
+	for _, oldRef := range append(originalARefs, firstARefs...) {
+		require.NotContains(t, secondPage.SourceRefs, oldRef, "refs from either superseded A snapshot must not survive")
+	}
 }
 
 func TestSourceWikiIncrementalCompleteManifestRemovesOnlyDeletedMixedPageContribution(t *testing.T) {
@@ -416,6 +503,12 @@ func TestSourceWikiIncrementalCompleteManifestRemovesOnlyDeletedMixedPageContrib
 		}
 		return `{"title":"Scheduling module","summary":"Source B documents a named lookup.","sections":[{"text":"Source B: getPushSchedule accepts a name and returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
 	})
+	service := generator.(*sourceWikiService)
+	t.Cleanup(service.StopSourceWikiBatches)
+	initialDeliveryErr, initialPending := t16RegressionDrainUpdateLane(t, f, service)
+	require.NoError(t, initialDeliveryErr)
+	require.Zero(t, initialPending)
+	require.Zero(t, generationCalls.Load(), "initial source publication planning must not call the fake generation model")
 	request := types.SourceWikiGenerateRequest{KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module"}
 	first, err := generator.GenerateModule(f.ctx, request)
 	require.NoError(t, err)
@@ -429,6 +522,11 @@ func TestSourceWikiIncrementalCompleteManifestRemovesOnlyDeletedMixedPageContrib
 	_, err = f.service.CreateDataSource(f.ctx, &sourceB)
 	require.NoError(t, err)
 	syncSourceFixture(t, f, sourceB.ID)
+	callsBeforeBGeneration := generationCalls.Load()
+	bDeliveryErr, bPending := t16RegressionDrainUpdateLane(t, f, service)
+	require.NoError(t, bDeliveryErr)
+	require.Zero(t, bPending)
+	require.Equal(t, callsBeforeBGeneration, generationCalls.Load(), "B's initial publication planning must not consume its generation fake")
 	request.SourceID = sourceB.ID
 	second, err := generator.GenerateModule(f.ctx, request)
 	require.NoError(t, err)
@@ -458,6 +556,7 @@ func TestSourceWikiIncrementalCompleteManifestRemovesOnlyDeletedMixedPageContrib
 	pageA.Content += "\n" + pageB.Content
 	pageA.SourceRefs = append(pageA.SourceRefs, pageB.SourceRefs...)
 	require.NoError(t, f.db.Save(pageA).Error)
+	t16RegressionRegisterSourceWikiEvidenceOwners(t, f, pageA, pageB.SourceProvenance.Evidence)
 	contributionB.PageID = pageA.ID
 	contributionB.PageVersion = pageA.Version
 	require.NoError(t, f.db.Save(&contributionB).Error)
@@ -465,7 +564,7 @@ func TestSourceWikiIncrementalCompleteManifestRemovesOnlyDeletedMixedPageContrib
 	f.advanceFiles(map[string][]byte{"src/Service.java": nil})
 	syncSourceFixture(t, f)
 	next := latestIncrementalRun(t, f)
-	deliveryErr, pending := t16RegressionDrainUpdateLane(t, f, generator.(*sourceWikiService))
+	deliveryErr, pending := t16RegressionDrainUpdateLane(t, f, service)
 	require.NoError(t, deliveryErr)
 	require.Zero(t, pending)
 
@@ -523,4 +622,42 @@ func t16RegressionDrainUpdateLane(t *testing.T, f *javaSourceFixture, processor 
 		Where("tenant_id=? AND scope_id=? AND task_type=?", 1, f.kb.ID, types.TypeSourceWikiUpdate).
 		Count(&pending).Error)
 	return deliveryErr, pending
+}
+
+func t16RegressionRegisterSourceWikiEvidenceOwners(t *testing.T, f *javaSourceFixture, page *types.WikiPage, evidence []types.SourceWikiEvidence) {
+	t.Helper()
+	for _, item := range evidence {
+		ref := types.SourceWikiEvidenceRef{
+			ID: uuid.NewString(), PageID: page.ID, Version: page.Version, EvidenceID: item.ID,
+			SourceFileID: item.KnowledgeID, FileVersionID: item.FileVersionID, SnapshotID: item.SnapshotID,
+			Path: item.Path, CommitSHA: item.CommitSHA,
+		}
+		require.NoError(t, f.db.Create(&ref).Error)
+	}
+}
+
+func t16RegressionAwaitReadySourceWikiAttempt(t *testing.T, f *javaSourceFixture, sourceID, snapshotID, topicKey string) types.SourceWikiAttempt {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		var attempts []types.SourceWikiAttempt
+		require.NoError(t, f.db.Where("source_id=? AND snapshot_id=? AND topic_key=?", sourceID, snapshotID, topicKey).
+			Order("created_at DESC, id DESC").Limit(1).Find(&attempts).Error)
+		if len(attempts) > 0 {
+			attempt := attempts[0]
+			var completedGenerationCalls int64
+			require.NoError(t, f.db.Model(&types.SourceWikiAttemptCall{}).
+				Where("attempt_id=? AND phase=? AND outcome=? AND completed_at IS NOT NULL", attempt.ID, "source_wiki_generate", "succeeded").
+				Count(&completedGenerationCalls).Error)
+			if attempt.Status == "ready" && attempt.Calls > 0 && completedGenerationCalls > 0 {
+				return attempt
+			}
+			if attempt.Status == "failed" {
+				require.FailNow(t, "target source Wiki attempt failed: "+attempt.Reason)
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.FailNow(t, fmt.Sprintf("timed out waiting for ready source Wiki attempt for source=%s snapshot=%s topic=%s", sourceID, snapshotID, topicKey))
+	return types.SourceWikiAttempt{}
 }
