@@ -42,6 +42,7 @@ const logsDsId = ref('')
 const logsDsName = ref('')
 const logsDsType = ref('')
 const pollTimer = ref<number | null>(null)
+let listRequestGeneration = 0
 const gitLabWebhookVisible = ref(false)
 const gitLabWebhookDataSource = ref<DataSource | null>(null)
 
@@ -60,9 +61,11 @@ function schedulePolling() {
 }
 
 async function loadList(silent = false) {
+  const requestGeneration = ++listRequestGeneration
   if (!silent) loading.value = true
   try {
     const res = await listDataSources(props.kbId)
+    if (requestGeneration !== listRequestGeneration) return
     dataSources.value = res?.data || res || []
     emit('count', dataSources.value.length)
 
@@ -76,9 +79,9 @@ async function loadList(silent = false) {
       stopPolling()
     }
   } catch (e: any) {
-    console.error(e)
+    if (requestGeneration === listRequestGeneration) console.error(e)
   } finally {
-    if (!silent) loading.value = false
+    if (requestGeneration === listRequestGeneration) loading.value = false
   }
 }
 
@@ -128,6 +131,10 @@ function replaceDataSource(updated: DataSource) {
 }
 
 async function refreshSourceLifecycle(updated: DataSource) {
+  // Invalidate any list request that began before the accepted mutation. Keep
+  // this invalidation even if the subsequent refresh fails; the mutation reply
+  // is still the newest authoritative lifecycle state we have.
+  listRequestGeneration++
   replaceDataSource(updated)
   await loadList(true)
 }

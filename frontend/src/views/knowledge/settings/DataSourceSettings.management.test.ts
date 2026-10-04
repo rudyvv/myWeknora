@@ -57,6 +57,9 @@ function source(id: string, contentMode: 'source' | 'document' = 'source', sourc
 async function fixture(options: { admin?: boolean; sources: any[] }) {
   const calls: Array<{ method: string; args: any[] }> = []
   let rows = copy(options.sources)
+  let holdNextList = false
+  let releaseHeldList: (() => void) | undefined
+  let failNextList = false
   const record = (method: string, ...args: any[]) => calls.push({ method, args: copy(args) })
   const updateRow = (id: string, update: any) => {
     const index = rows.findIndex(row => row.id === id)
@@ -64,7 +67,18 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
     return copy(rows[index])
   }
   const api = {
-    async listDataSources() { return { data: copy(rows) } },
+    async listDataSources() {
+      if (failNextList) {
+        failNextList = false
+        throw new Error('fixture list failure')
+      }
+      const reply = { data: copy(rows) }
+      if (holdNextList) {
+        holdNextList = false
+        return new Promise(resolve => { releaseHeldList = () => resolve(reply) })
+      }
+      return reply
+    },
     async deleteDataSource(id: string) {
       record('deleteDataSource', id)
       rows = rows.filter(row => row.id !== id)
@@ -175,6 +189,9 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
   return {
     calls,
     host,
+    holdNextList() { holdNextList = true },
+    failNextList() { failNextList = true },
+    async releaseHeldList() { releaseHeldList?.(); await settle() },
     hasMenuItem,
     clickMenuItem,
     confirm,
@@ -303,4 +320,20 @@ test('viewer cannot mutate sources and document-mode datasource keeps its legacy
     assert.ok(doc.calls.some(call => call.method === 'deleteDataSource'))
     assert.ok(!doc.calls.some(call => call.method === 'clearSourceKnowledge' || call.method === 'unbindDataSource'))
   } finally { await doc.close() }
+})
+
+test('late pre-clear list cannot restore source controls when post-clear refresh fails', async () => {
+  const f = await fixture({ sources: [source('source-one')] })
+  try {
+    f.holdNextList()
+    await f.clickMenuItem('datasource.syncNow')
+    f.failNextList()
+    await f.clickMenuItem('datasource.sourceClear')
+    await f.confirm('datasource.sourceClearConfirm')
+    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'), 'accepted clear must disable queries')
+    await f.releaseHeldList()
+    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'), 'older list response must not overwrite accepted clear')
+    assert.ok(!f.hasMenuItem('datasource.edit'), 'older list response must not restore edit')
+    assert.ok(!f.hasMenuItem('datasource.syncNow'), 'older list response must not restore sync')
+  } finally { await f.releaseHeldList(); await f.close() }
 })
