@@ -47,3 +47,19 @@ One new P2 remains: distinct accepted flow keys normalize to the same route, mul
 Root independently instrumented only the loop via temporary Go overlays: 10,000 `api_request` facts for one route and 1,000 whitespace-alias topics, all valid old dependencies, with a complete empty next snapshot. Actual result: **10,000,000 entry checks**, limit 2,000,000, disposition Planned, Removed 1,000, no error. Counter FAIL, package 3.842 s. This is operation-count evidence, not a timing threshold. Original source/test files remain untouched. Log: `C:/Users/28211/AppData/Local/Temp/weknora-root-t16-impact-work-8e51573c.jsonl`.
 
 Decision: small bounded-work repair sent to the same T06 Luna/xhigh worker; main may continue assembling/validating a candidate but must include the subsequent clean repair before final acceptance. No root integration, closure or next-ticket dispatch. Standards 1 / Spec 1, worst P2 in each axis; contribution slice remains accepted. Overall 18/22.
+
+# Final impact slice acceptance — 9dc17a5b
+
+Verified clean SHA `9dc17a5b1548ece8f50faee750470c89ad82104f`; same fixed point. The repair meters each flow-entry check, propagating exhaustion through `(bool, error)` into the existing atomic fallback. Both independent Sol/high axes re-reviewed the full slice and repair delta.
+
+## Standards
+
+Zero hard findings and zero actionable smells. Prior polarity and total-work findings are fixed.
+
+## Spec
+
+Zero actionable findings. Retained paths prevent false removal, equal/changed inventories behave correctly, and exhaustion clears all partial results.
+
+Root rebuilt instrumentation overlays from **current HEAD**, avoiding the old frozen implementation overlay. Actual 20 focused tests (including all six worker regressions) plus four root counters PASS, package 4.831 s. The former 10-million-check input now stops after 1,976,997 entry checks, below the 2-million total limit, and returns `source_wide_stale / graph_work_limit_exceeded` with no Removed, Affected or Unaffected entries. Actual log: `C:/Users/28211/AppData/Local/Temp/weknora-root-t16-impact-9dc17a5b.jsonl`. Root test session fully collected; no database/provider used.
+
+Decision: impact slice accepted for clean candidate assembly; main notified to cherry-pick 9dc17a5b (already has the preceding repair). Contribution 36158f97 remains accepted. **Whole T16 remains pending** adapter, publication/recovery/auth behavior, independent PG verification and final dual-axis review. No issue closure or T19 dispatch. Totals at this HEAD: Standards 0 / Spec 0; overall 18/22.
