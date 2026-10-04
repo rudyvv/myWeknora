@@ -29,4 +29,4 @@ Both findings were delivered as one concrete backend repair batch to the same ma
 
 ## Coordination
 
-Main cursor processed through `24d59333-8ff6-4916-8a8c-2d74a9a4d6bb:53`; it is idle on the freeze hold. Root owns the dedicated 57822 PostgreSQL slot. The two consumed helpers remain frozen/idle, without ACK loops or premature T21 work. Acceptance remains **19/22**.
+Main cursor processed through `24d59333-8ff6-4916-8a8c-2d74a9a4d6bb:54`, now active on P1 only. To shorten repair, root reused the original UI chat/tree (2119) on a new preserved branch `codex/t19-public-error-repair` at clean 335f5769 for P2 only. Its ownership is `internal/handler/datasource.go` plus NEW `datasource_source_lifecycle_error_test.go`; main must not edit these handler files. UI cursor processed through `42309ca2-9f92-400a-bbd8-1bb7c5c274f0:2`, active. Main owns lifecycle repository/service and NEW concurrency tests. The original contribution/auxiliary helper remains frozen/idle. Root owns the dedicated 57822 PostgreSQL slot. No ACK loops or premature T21 work. Acceptance remains **19/22**.
