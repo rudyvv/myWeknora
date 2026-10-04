@@ -48,7 +48,10 @@ WHERE ((c.revision_id IS NULL AND wp.version=c.page_version) OR rev.id IS NOT NU
   AND sf.data_source_id=c.source_id AND evidence.item->>'data_source_id'=c.source_id
   AND evidence.item->>'id' IS NOT NULL AND evidence.item->>'path' IS NOT NULL
   AND EXISTS(SELECT 1 FROM jsonb_array_elements_text(
-                 CASE WHEN jsonb_typeof(wp.source_refs::jsonb)='array' THEN wp.source_refs::jsonb ELSE '[]'::jsonb END
+                 CASE WHEN c.revision_id IS NULL THEN
+                      CASE WHEN jsonb_typeof(wp.source_refs::jsonb)='array' THEN wp.source_refs::jsonb ELSE '[]'::jsonb END
+                      ELSE CASE WHEN jsonb_typeof(rev.source_refs::jsonb)='array' THEN rev.source_refs::jsonb ELSE '[]'::jsonb END
+                 END
              ) wr
              WHERE split_part(wr,'|',1)=evidence.item->>'knowledge_id')
   AND evidence.item->>'commit_sha'=ss.commit_sha

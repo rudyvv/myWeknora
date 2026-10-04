@@ -3,9 +3,12 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -139,6 +142,8 @@ func TestReadWikiPageDBMixedEvidenceOwnerScopes(t *testing.T) {
 	require.Contains(t, currentSQL, "mwr.snapshot_id=mce->>'snapshot_id'")
 	require.Contains(t, currentSQL, "sc.source_id=sf.data_source_id")
 	require.Contains(t, currentSQL, "sce->>'knowledge_id'=wk.id")
+	require.Contains(t, currentSQL, "OR (\n\t\tCOALESCE(wiki_pages.source_provenance->>'state','') IN ('ready','stale')")
+	require.NotContains(t, currentSQL, "sp.snapshot_id=mss.id")
 
 	revisionSQL := buildSQL("wiki_page_revisions", true)
 	require.Contains(t, revisionSQL, "sc.page_id=wiki_page_revisions.page_id AND sc.revision_id=wiki_page_revisions.id AND sc.page_version=wiki_page_revisions.version")
@@ -148,4 +153,26 @@ func TestReadWikiPageDBMixedEvidenceOwnerScopes(t *testing.T) {
 	require.NotContains(t, legacySQL, "source_wiki_page_contributions")
 	require.Contains(t, legacySQL, "NOT ((SELECT count(DISTINCT")
 	require.True(t, strings.Contains(legacySQL, "we->>'knowledge_id'=wk.id"))
+
+	answerContext := source.WithWikiAnswerRead(ctx)
+	var answerResult []struct{ ID string }
+	answerQuery := readWikiPageDB(answerContext, db.Session(&gorm.Session{DryRun: true}), true, true, "wiki_pages").
+		Table("wiki_pages").Select("wiki_pages.id").Find(&answerResult)
+	require.NoError(t, answerQuery.Error)
+	answerSQL := answerQuery.Statement.SQL.String()
+	require.Contains(t, answerSQL, "wiki_pages.source_provenance->>'state'='ready'")
+	require.Contains(t, answerSQL, "sp.snapshot_id=wiki_pages.source_provenance->>'applicable_snapshot_id'")
+	require.Contains(t, answerSQL, "cp.snapshot_id=c.applicable_snapshot_id")
+}
+
+func TestMixedEvidenceMigrationBackfillUsesRevisionSourceRefs(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	path := filepath.Join(root, "migrations", "versioned", "000116_source_wiki_mixed_evidence_owners.up.sql")
+	migration, err := os.ReadFile(path)
+	require.NoError(t, err)
+	sql := string(migration)
+	require.Contains(t, sql, "LEFT JOIN wiki_page_revisions rev ON rev.id=c.revision_id AND rev.page_id=c.page_id AND rev.version=c.page_version")
+	require.Contains(t, sql, "CASE WHEN c.revision_id IS NULL THEN")
+	require.Contains(t, sql, "jsonb_typeof(wp.source_refs::jsonb)='array' THEN wp.source_refs::jsonb")
+	require.Contains(t, sql, "jsonb_typeof(rev.source_refs::jsonb)='array' THEN rev.source_refs::jsonb")
 }

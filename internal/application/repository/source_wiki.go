@@ -45,7 +45,7 @@ func readWikiPageDB(ctx context.Context, base *gorm.DB, sourceWiki, sourceWikiCo
 		if table == "wiki_page_revisions" {
 			contributionOwner = "mc.page_id=" + table + ".page_id AND mc.revision_id=" + table + ".id AND mc.page_version=" + table + ".version"
 		}
-		mixedContributionGate = wikiPageMixedContributionOwnerSQL(ctx, table, refs, contributionOwner, p)
+		mixedContributionGate = `(NOT (` + mixedSources + `) OR ` + wikiPageMixedContributionOwnerSQL(ctx, table, refs, contributionOwner, p) + `)`
 	}
 	evidence := `NOT EXISTS (SELECT 1 FROM jsonb_array_elements(` + evidenceArray + `) we
  WHERE NOT EXISTS(SELECT 1 FROM source_wiki_evidence_refs wr
@@ -113,8 +113,7 @@ func wikiPageMixedContributionOwnerSQL(ctx context.Context, table, refs, owner, 
 			AND encode(sha256(substring(msv.content from (mce->'range'->>'start_byte')::int+1 for GREATEST(0,(mce->'range'->>'end_byte')::int-(mce->'range'->>'start_byte')::int))),'hex')=mce->>'text_sha256'
 			AND (mce->'range'->>'start_byte')::int>=0 AND (mce->'range'->>'end_byte')::int<=octet_length(msv.content)
 			AND (mce->'range'->>'end_byte')::int>(mce->'range'->>'start_byte')::int
-			AND (` + source.SourcePermissionSQL(ctx, "msf.data_source_id", "msf.id") + `)
-			AND (` + source.SnapshotSQL(ctx, "mss.id", "mc.source_id", "msf.id") + `))`
+			AND (` + source.SourcePermissionSQL(ctx, "msf.data_source_id", "msf.id") + `))`
 	primaryOwner := strings.ReplaceAll(owner, "mc.", "mp.")
 	return `(
 		COALESCE(` + pageProvenance + `->>'state','') IN ('ready','stale')
