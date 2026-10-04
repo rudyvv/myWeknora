@@ -696,6 +696,32 @@ func TestPlanSourceWikiImpactRemovesFlowWhenEntryMemberDisappears(t *testing.T) 
 	}
 }
 
+func TestPlanSourceWikiImpactBoundsRepeatedCanonicalFlowRemovalWork(t *testing.T) {
+	facts := make([]types.ParsedSourceFact, 10_000)
+	for i := range facts {
+		facts[i] = impactFact("api_request", "orders", "GET", "/orders", i*10+1)
+	}
+	request := impactMember("web/request.js", "request", "request-v1", "request", facts...)
+	previous := impactSnapshot("old", types.SourceWikiImpactPublishedComplete, []types.SourceWikiImpactMember{request}, nil)
+	next := impactSnapshot("new", types.SourceWikiImpactPreparingComplete, nil, nil)
+	topics := make([]types.SourceWikiImpactTopicDependencies, 1_000)
+	for i := range topics {
+		topics[i] = impactTopic("flow/GET"+strings.Repeat(" ", i+1)+"/orders", "flow", "", "flow", []string{"request"}, true)
+	}
+	oldInventory := impactInventory(previous, topics, nil)
+	newInventory := impactInventory(next, nil, nil)
+
+	plan, err := PlanSourceWikiImpact(previous, next, []types.SourceWikiImpactTopicInventory{oldInventory, newInventory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Disposition != types.SourceWikiImpactSourceWideStale || plan.FallbackReason != "graph_work_limit_exceeded" ||
+		len(plan.Removed) != 0 || len(plan.Affected) != 0 || len(plan.Unaffected) != 0 {
+		t.Fatalf("over-budget route-removal work returned a partial plan: disposition=%s fallback=%q affected=%d unaffected=%d removed=%d",
+			plan.Disposition, plan.FallbackReason, len(plan.Affected), len(plan.Unaffected), len(plan.Removed))
+	}
+}
+
 func impactSnapshot(snapshotID string, stage types.SourceWikiImpactSnapshotStage, members []types.SourceWikiImpactMember,
 	relations []types.SourceCodeRelation) types.SourceWikiImpactSnapshot {
 	return types.SourceWikiImpactSnapshot{
