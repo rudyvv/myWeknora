@@ -2,11 +2,13 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/handler/dto"
+	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/gin-gonic/gin"
@@ -76,6 +78,43 @@ func (h *DataSourceHandler) getOwnedDataSource(
 	}
 
 	return ds, http.StatusOK, ""
+}
+
+func writeSourceLifecycleError(c *gin.Context, status int, sourceID, operation string, err error) {
+	code, message, known := sourceLifecyclePublicError(err, operation)
+	if !known && err != nil {
+		logger.Errorf(c.Request.Context(), "[DataSource] source lifecycle %s failed for id=%s: %v", operation, sourceID, err)
+	}
+	c.JSON(status, gin.H{"code": code, "error": message})
+}
+
+func sourceLifecyclePublicError(err error, operation string) (code, message string, known bool) {
+	if err != nil {
+		switch {
+		case errors.Is(err, datasource.ErrDataSourceNotFound):
+			return "DATA_SOURCE_NOT_FOUND", "data source not found", true
+		case errors.Is(err, datasource.ErrSourcePipelineUnavailable):
+			return "SOURCE_LIFECYCLE_UNAVAILABLE", "source lifecycle is unavailable", true
+		case err.Error() == "source lifecycle is only available for source-mode data sources",
+			err.Error() == "unbind is only available for source-mode data sources",
+			err.Error() == "clear-source is only available for source-mode data sources",
+			err.Error() == "clear-source retry is only available for source-mode data sources":
+			return "SOURCE_MODE_REQUIRED", "source lifecycle is only available for source-mode data sources", true
+		case err.Error() == "source cleanup operation is not retryable":
+			return "SOURCE_CLEANUP_NOT_RETRYABLE", "source cleanup operation is not retryable", true
+		case err.Error() == "source configuration is not current":
+			return "SOURCE_CONFIGURATION_CHANGED", "source configuration changed; reload and try again", true
+		}
+	}
+
+	switch operation {
+	case "unbind":
+		return "SOURCE_UNBIND_FAILED", "Failed to unbind data source", false
+	case "clear":
+		return "SOURCE_CLEAR_FAILED", "Failed to clear source knowledge", false
+	default:
+		return "SOURCE_CLEAR_RETRY_FAILED", "Failed to retry source clear", false
+	}
 }
 
 // CreateDataSource godoc
@@ -531,12 +570,12 @@ func (h *DataSourceHandler) UnbindDataSource(c *gin.Context) {
 	}
 	lifecycle, ok := h.service.(interfaces.DataSourceLifecycleService)
 	if !ok {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source lifecycle is unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "SOURCE_LIFECYCLE_UNAVAILABLE", "error": "source lifecycle is unavailable"})
 		return
 	}
 	updated, err := lifecycle.UnbindDataSource(ctx, ds.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeSourceLifecycleError(c, http.StatusBadRequest, ds.ID, "unbind", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": dto.NewDataSourceResponse(updated)})
@@ -564,12 +603,12 @@ func (h *DataSourceHandler) ClearSource(c *gin.Context) {
 	}
 	lifecycle, ok := h.service.(interfaces.DataSourceLifecycleService)
 	if !ok {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source lifecycle is unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "SOURCE_LIFECYCLE_UNAVAILABLE", "error": "source lifecycle is unavailable"})
 		return
 	}
 	updated, err := lifecycle.ClearSource(ctx, ds.ID, request.Confirm, request.Scope)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeSourceLifecycleError(c, http.StatusBadRequest, ds.ID, "clear", err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"data": dto.NewDataSourceResponse(updated)})
@@ -596,12 +635,12 @@ func (h *DataSourceHandler) RetryClearSource(c *gin.Context) {
 	}
 	lifecycle, ok := h.service.(interfaces.DataSourceLifecycleService)
 	if !ok {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source lifecycle is unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "SOURCE_LIFECYCLE_UNAVAILABLE", "error": "source lifecycle is unavailable"})
 		return
 	}
 	updated, err := lifecycle.RetryClearSource(ctx, ds.ID, request.OperationID)
 	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		writeSourceLifecycleError(c, http.StatusConflict, ds.ID, "retry", err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"data": dto.NewDataSourceResponse(updated)})
