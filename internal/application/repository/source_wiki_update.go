@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -266,4 +267,53 @@ func markSourceWikiContributionsUnverifiedInTx(tx *gorm.DB, pageID string, pageV
 	return tx.Exec(`UPDATE source_wiki_page_contributions SET page_version=?,state='unverified',
 		reason_code='wiki_page_edited',reason='Page content changed outside a source revalidation plan.',updated_at=?
 		WHERE page_id=? AND revision_id IS NULL`, pageVersion, now, pageID).Error
+}
+
+type sourceWikiPageProjection struct {
+	Title            string                      `json:"title"`
+	Content          string                      `json:"content"`
+	Summary          string                      `json:"summary"`
+	Aliases          types.StringArray           `json:"aliases"`
+	SourceRefs       types.StringArray           `json:"source_refs"`
+	ChunkRefs        types.StringArray           `json:"chunk_refs"`
+	PageMetadata     types.JSON                  `json:"page_metadata"`
+	SourceProvenance *types.SourceWikiProvenance `json:"source_provenance"`
+}
+
+// sourceWikiPageProjectionMatchesRevision permits a page-version-only change
+// to carry contribution proof forward only when the exact source projection
+// and its page identity are unchanged. Invalid JSON fails closed.
+func sourceWikiPageProjectionMatchesRevision(page *types.WikiPage, revision *types.WikiPageRevision) bool {
+	if page == nil || revision == nil || page.ID == "" || revision.ID == "" ||
+		page.TenantID == 0 || page.TenantID != revision.TenantID ||
+		page.KnowledgeBaseID == "" || page.KnowledgeBaseID != revision.KnowledgeBaseID ||
+		page.ID != revision.PageID || revision.Version <= 0 || page.Version <= 1 ||
+		revision.Version != page.Version-1 || page.SourceProvenance == nil || revision.SourceProvenance == nil {
+		return false
+	}
+	previous, err := json.Marshal(sourceWikiPageProjection{
+		Title: revision.Title, Content: revision.Content, Summary: revision.Summary,
+		Aliases: revision.Aliases, SourceRefs: revision.SourceRefs, ChunkRefs: revision.ChunkRefs,
+		PageMetadata: revision.PageMetadata, SourceProvenance: revision.SourceProvenance,
+	})
+	if err != nil {
+		return false
+	}
+	current, err := json.Marshal(sourceWikiPageProjection{
+		Title: page.Title, Content: page.Content, Summary: page.Summary,
+		Aliases: page.Aliases, SourceRefs: page.SourceRefs, ChunkRefs: page.ChunkRefs,
+		PageMetadata: page.PageMetadata, SourceProvenance: page.SourceProvenance,
+	})
+	return err == nil && bytes.Equal(previous, current)
+}
+
+// advanceSourceWikiContributionPageVersionInTx updates only rows bound to the
+// exact superseded page version; stale bindings remain unreadable.
+func advanceSourceWikiContributionPageVersionInTx(tx *gorm.DB, pageID string, oldVersion, newVersion int) error {
+	if tx == nil || pageID == "" || oldVersion <= 0 || newVersion != oldVersion+1 ||
+		!tx.Migrator().HasTable(&types.SourceWikiPageContribution{}) {
+		return nil
+	}
+	return tx.Exec(`UPDATE source_wiki_page_contributions SET page_version=?
+		WHERE page_id=? AND revision_id IS NULL AND page_version=?`, newVersion, pageID, oldVersion).Error
 }

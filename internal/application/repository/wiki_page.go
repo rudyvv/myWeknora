@@ -161,7 +161,11 @@ func (r *wikiPageRepository) UpdateWithRevision(
 			return err
 		}
 		if r.sourceWiki {
-			if err := markSourceWikiContributionsUnverifiedInTx(tx, page.ID, page.Version, time.Now().UTC()); err != nil {
+			if sourceWikiPageProjectionMatchesRevision(page, rev) {
+				if err := advanceSourceWikiContributionPageVersionInTx(tx, page.ID, rev.Version, page.Version); err != nil {
+					return err
+				}
+			} else if err := markSourceWikiContributionsUnverifiedInTx(tx, page.ID, page.Version, time.Now().UTC()); err != nil {
 				return err
 			}
 			if err := tx.Where("page_id=? AND revision_id IS NULL", page.ID).Delete(&types.SourceWikiEvidenceRef{}).Error; err != nil {
