@@ -23,13 +23,18 @@ var ErrWikiPageConflict = errors.New("wiki page version conflict")
 
 // wikiPageRepository implements the WikiPageRepository interface
 type wikiPageRepository struct {
-	db         *gorm.DB
-	sourceWiki bool
+	db                      *gorm.DB
+	sourceWiki              bool
+	sourceWikiContributions bool
 }
 
 // NewWikiPageRepository creates a new wiki page repository
 func NewWikiPageRepository(db *gorm.DB) interfaces.WikiPageRepository {
-	return &wikiPageRepository{db: db, sourceWiki: db.Dialector.Name() == "postgres" && db.Migrator().HasTable("source_wiki_evidence_refs")}
+	sourceWiki := db.Dialector.Name() == "postgres" && db.Migrator().HasTable("source_wiki_evidence_refs")
+	return &wikiPageRepository{
+		db: db, sourceWiki: sourceWiki,
+		sourceWikiContributions: sourceWiki && db.Migrator().HasTable("source_wiki_page_contributions"),
+	}
 }
 
 func (r *wikiPageRepository) wikiDialect() string {
@@ -147,10 +152,22 @@ func (r *wikiPageRepository) UpdateWithRevision(
 				return err
 			}
 		}
+		if r.sourceWiki && rev != nil {
+			if err := archiveSourceWikiContributionsInTx(tx, rev); err != nil {
+				return err
+			}
+		}
 		if err := updateWikiPageRow(tx, page); err != nil {
 			return err
 		}
 		if r.sourceWiki {
+			if sourceWikiPageProjectionMatchesRevision(page, rev) {
+				if err := advanceSourceWikiContributionPageVersionInTx(tx, page.ID, rev.Version, page.Version); err != nil {
+					return err
+				}
+			} else if err := markSourceWikiContributionsUnverifiedInTx(tx, page.ID, page.Version, time.Now().UTC()); err != nil {
+				return err
+			}
 			if err := tx.Where("page_id=? AND revision_id IS NULL", page.ID).Delete(&types.SourceWikiEvidenceRef{}).Error; err != nil {
 				return err
 			}
@@ -245,7 +262,7 @@ func (r *wikiPageRepository) GetRevision(
 ) (*types.WikiPageRevision, error) {
 	var rev types.WikiPageRevision
 	load := func(db *gorm.DB) error {
-		return readWikiPageDB(ctx, db, r.sourceWiki, "wiki_page_revisions").
+		return readWikiPageDB(ctx, db, r.sourceWiki, r.sourceWikiContributions, "wiki_page_revisions").
 			Clauses(clause.Locking{Strength: "SHARE"}).
 			Where("knowledge_base_id = ? AND page_id = ? AND version = ?", kbID, pageID, version).
 			First(&rev).Error

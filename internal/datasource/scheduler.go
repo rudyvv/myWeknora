@@ -3,6 +3,7 @@ package datasource
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -286,6 +287,32 @@ func (s *Scheduler) relaySourcePublicationOutbox(ctx context.Context) {
 	}
 	if accepted > 0 {
 		logger.Infof(ctx, "[Scheduler] accepted %d published source Wiki update(s)", accepted)
+	}
+	if s.taskEnqueuer == nil {
+		return
+	}
+	scopes, err := s.sourceSnapshots.PendingSourceWikiUpdateScopes(ctx, 100)
+	if err != nil {
+		logger.Errorf(ctx, "[Scheduler] failed to list pending source Wiki update lanes: %v", err)
+		return
+	}
+	for _, scope := range scopes {
+		if scope.TenantID == 0 || scope.KnowledgeBaseID == "" {
+			continue
+		}
+		payload, marshalErr := json.Marshal(types.SourceWikiUpdateTriggerPayload{
+			TenantID: scope.TenantID, KnowledgeBaseID: scope.KnowledgeBaseID,
+		})
+		if marshalErr != nil {
+			logger.Errorf(ctx, "[Scheduler] failed to marshal source Wiki update trigger for KB %s: %v", scope.KnowledgeBaseID, marshalErr)
+			continue
+		}
+		task := asynq.NewTask(types.TypeSourceWikiUpdate, payload,
+			asynq.Queue(types.QueueWiki), asynq.MaxRetry(10), asynq.Timeout(60*time.Minute),
+			asynq.TaskID("source-wiki-update-"+scope.KnowledgeBaseID))
+		if _, enqueueErr := s.taskEnqueuer.Enqueue(task); enqueueErr != nil && !errors.Is(enqueueErr, asynq.ErrTaskIDConflict) && !errors.Is(enqueueErr, asynq.ErrDuplicateTask) {
+			logger.Errorf(ctx, "[Scheduler] failed to enqueue source Wiki update trigger for KB %s: %v", scope.KnowledgeBaseID, enqueueErr)
+		}
 	}
 }
 

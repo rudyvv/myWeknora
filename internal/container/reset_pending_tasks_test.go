@@ -351,3 +351,44 @@ func TestRecoverPendingWikiTasks_RecreatesOneTriggerPerLaneAndKB(t *testing.T) {
 		Count(&orphaned).Error)
 	assert.Zero(t, orphaned)
 }
+
+func TestRecoverPendingSourceWikiUpdates_RecreatesPerKBLaneAndDropsDeletedKB(t *testing.T) {
+	db := setupResetPendingDB(t)
+	require.NoError(t, db.Exec(
+		`INSERT INTO knowledge_bases (id, tenant_id, deleted_at)
+		 VALUES (?, ?, NULL), (?, ?, NULL), (?, ?, ?)`,
+		"kb-a", 7, "kb-b", 8, "kb-deleted", 9, time.Now(),
+	).Error)
+	for _, row := range []struct {
+		tenant uint64
+		kb     string
+		dedup  string
+	}{
+		{7, "kb-a", "delivery-1"},
+		{7, "kb-a", "delivery-2"},
+		{8, "kb-b", "delivery-3"},
+		{9, "kb-deleted", "delivery-deleted"},
+	} {
+		require.NoError(t, db.Exec(
+			`INSERT INTO task_pending_ops (tenant_id, task_type, scope, scope_id, op, dedup_key, payload)
+			 VALUES (?, ?, ?, ?, 'published_snapshot', ?, '{}')`,
+			row.tenant, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, row.kb, row.dedup,
+		).Error)
+	}
+
+	recorder := &recordingTaskEnqueuer{}
+	recoverPendingSourceWikiUpdates(db, recorder)
+	require.Len(t, recorder.tasks, 2)
+	seen := map[string]uint64{}
+	for _, task := range recorder.tasks {
+		assert.Equal(t, types.TypeSourceWikiUpdate, task.Type())
+		var payload types.SourceWikiUpdateTriggerPayload
+		require.NoError(t, json.Unmarshal(task.Payload(), &payload))
+		seen[payload.KnowledgeBaseID] = payload.TenantID
+	}
+	assert.Equal(t, uint64(7), seen["kb-a"])
+	assert.Equal(t, uint64(8), seen["kb-b"])
+	var orphaned int64
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("scope_id = ?", "kb-deleted").Count(&orphaned).Error)
+	assert.Zero(t, orphaned)
+}

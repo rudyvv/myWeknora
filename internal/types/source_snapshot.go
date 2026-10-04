@@ -237,6 +237,19 @@ type SourceWikiUpdatePayload struct {
 	ConfigGeneration int64  `json:"config_generation"`
 }
 
+// SourceWikiUpdateTriggerPayload is the per-KB wake-up signal for the durable
+// source:wiki:update lane. It intentionally carries no source or generation;
+// the consumer claims exact accepted rows and revalidates each full payload.
+type SourceWikiUpdateTriggerPayload struct {
+	TenantID        uint64 `json:"tenant_id"`
+	KnowledgeBaseID string `json:"knowledge_base_id"`
+}
+
+type SourceWikiUpdateQueueScope struct {
+	TenantID        uint64 `json:"tenant_id"`
+	KnowledgeBaseID string `json:"knowledge_base_id"`
+}
+
 // SourceWikiDeliveryID gives each configuration-generation delivery of a
 // published snapshot a stable identity while keeping its publication EventID
 // unchanged. The task queue uses this as its deduplication/ack identity.

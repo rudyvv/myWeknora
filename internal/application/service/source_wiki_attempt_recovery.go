@@ -135,6 +135,9 @@ func (r *SourceWikiAttemptRecovery) recoverBatch(ctx context.Context) error {
 		for _, batch := range batches {
 			batchWorker.ResumeSourceWikiBatch(ctx, batch.ID)
 		}
+		if err := batchWorker.ResumePendingSourceWikiUpdates(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }

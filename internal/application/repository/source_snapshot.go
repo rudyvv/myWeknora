@@ -354,6 +354,9 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		}
 		snapshot.State, snapshot.PublishedAt = "published", &now
 		if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
+			if err := stageSourceWikiUpdateFence(tx, kb.TenantID, kb.ID, ds.ID, previous.SnapshotID, snapshot.ID, lease.ConfigGeneration, now); err != nil {
+				return err
+			}
 			eventID := uuid.NewString()
 			payload, err := json.Marshal(types.SourceWikiUpdatePayload{
 				SchemaVersion: 1, EventID: eventID,
@@ -446,6 +449,10 @@ func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.C
 				snapshot.ID, current.TenantID, current.ID, current.KnowledgeBaseID).
 			Take(&published).Error; err != nil {
 			return fmt.Errorf("published source snapshot is no longer available: %w", err)
+		}
+		if err := stageSourceWikiUpdateFence(tx, current.TenantID, current.KnowledgeBaseID, current.ID,
+			published.PreviousSnapshotID, published.ID, state.ConfigGeneration, time.Now().UTC()); err != nil {
+			return err
 		}
 
 		now := time.Now().UTC()
@@ -660,6 +667,25 @@ func (r *sourceSnapshotRepository) RelaySourcePublicationOutbox(ctx context.Cont
 	return accepted, nil
 }
 
+// PendingSourceWikiUpdateScopes returns bounded KB lanes with durable source
+// Wiki work so the scheduler can recreate an ephemeral queue trigger after a
+// relay or process restart. The accepted payload rows remain authoritative.
+func (r *sourceSnapshotRepository) PendingSourceWikiUpdateScopes(ctx context.Context, limit int) ([]types.SourceWikiUpdateQueueScope, error) {
+	if r == nil || r.db == nil || r.db.Dialector.Name() != "postgres" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	var scopes []types.SourceWikiUpdateQueueScope
+	err := r.db.WithContext(ctx).Table("task_pending_ops po").
+		Select("DISTINCT po.tenant_id, po.scope_id AS knowledge_base_id").
+		Joins("JOIN knowledge_bases kb ON kb.id=po.scope_id AND kb.tenant_id=po.tenant_id AND kb.deleted_at IS NULL").
+		Where("po.task_type=? AND po.scope=? AND po.op='published_snapshot'", types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase).
+		Order("po.tenant_id ASC, po.scope_id ASC").Limit(limit).Find(&scopes).Error
+	return scopes, err
+}
+
 func sourceOutboxRetryDelay(attempt int) time.Duration {
 	delay := time.Second
 	for i := 1; i < attempt && delay < 5*time.Minute; i++ {
@@ -781,7 +807,14 @@ func (r *sourceSnapshotRepository) CollectRetiredSourceVersions(ctx context.Cont
 				WHERE rs.snapshot_id=? AND rl.expires_at>now())`, snapshotID).Scan(&activeRead).Error; err != nil {
 				return err
 			}
-			if publication.SnapshotID == snapshotID || activeRead {
+			var activeWikiPlan bool
+			if tx.Migrator().HasTable("source_wiki_update_plans") {
+				if err := tx.Raw(`SELECT EXISTS(SELECT 1 FROM source_wiki_update_plans
+					WHERE previous_snapshot_id=? AND status IN ('pending','running'))`, snapshotID).Scan(&activeWikiPlan).Error; err != nil {
+					return err
+				}
+			}
+			if publication.SnapshotID == snapshotID || activeRead || activeWikiPlan {
 				return deferSourceSnapshotGC(tx, snapshotID, token, "")
 			}
 

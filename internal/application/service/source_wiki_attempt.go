@@ -94,7 +94,8 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 	if s.db.Dialector.Name() != "postgres" {
 		return nil, fmt.Errorf("source Wiki requires PostgreSQL")
 	}
-	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kb.ID, SourceIDs: []string{req.SourceID}}}
+	// Merge reads need the whole KB projection; BeginSourceRead still reuses any narrower caller source/file/tag scope.
+	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kb.ID}}
 	ctx, release, err := beginSourceRead(ctx, s.kb, targets)
 	if err != nil {
 		return nil, err
@@ -377,7 +378,13 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 		if existing != nil {
 			currentVersion = existing.Version
 			if existing.SourceProvenance != nil && existing.SourceProvenance.SourceID != attempt.SourceID {
-				return cleanup("module page contains provenance from another source and cannot be safely rebased")
+				mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(workCtx, existing, attempt, checkpoint.Evidence)
+				if mergeErr != nil {
+					return cleanup("cannot verify the foreign-primary module page contribution fence: " + mergeErr.Error())
+				}
+				if !mergeable {
+					return cleanup("module page contains provenance from another source without an exact current contribution for this attempt")
+				}
 			}
 		}
 
@@ -395,8 +402,14 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 				}
 			}
 			if attempt.Phase == "merge" {
-				if existing != nil && !sourceWikiPageSourcesAreMergeable(existing, checkpoint.Evidence) {
-					return cleanup("latest module page has source references that cannot be safely merged")
+				if existing != nil {
+					mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(workCtx, existing, attempt, checkpoint.Evidence)
+					if mergeErr != nil {
+						return cleanup("cannot verify the latest module page contribution projection: " + mergeErr.Error())
+					}
+					if !mergeable {
+						return cleanup("latest module page has source references that cannot be safely merged")
+					}
 				}
 				var latest any
 				if existing != nil {
@@ -457,8 +470,14 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			if checkpoint.RebaseRounds >= 2 {
 				return cleanup("module page changed too many times to safely rebase")
 			}
-			if existing != nil && !sourceWikiPageSourcesAreMergeable(existing, checkpoint.Evidence) {
-				return cleanup("latest module page has source references that cannot be safely merged")
+			if existing != nil {
+				mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(workCtx, existing, attempt, checkpoint.Evidence)
+				if mergeErr != nil {
+					return cleanup("cannot verify the latest module page contribution projection: " + mergeErr.Error())
+				}
+				if !mergeable {
+					return cleanup("latest module page has source references that cannot be safely merged")
+				}
 			}
 			if checkpoint.SourceDraft == "" {
 				checkpoint.SourceDraft = draftText
@@ -487,11 +506,6 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			page.ParentSlug, page.FolderID = existing.ParentSlug, existing.FolderID
 			page.PageMetadata = append(types.JSON(nil), existing.PageMetadata...)
 			page.ChunkRefs = append(types.StringArray(nil), existing.ChunkRefs...)
-			for _, ref := range existing.SourceRefs {
-				if !containsSourceWikiRef(page.SourceRefs, ref) {
-					page.SourceRefs = append(page.SourceRefs, ref)
-				}
-			}
 		}
 		if err = s.publishCard(workCtx, kb, attempt.SourceID, attempt.SnapshotID, currentVersion, existing, page, &expectedSource, modelConfig, attempt, lease); err != nil {
 			if errors.Is(err, repository.ErrWikiPageConflict) {
@@ -575,7 +589,13 @@ func (s *sourceWikiService) loadOrCreateSourceWikiAttempt(ctx context.Context, l
 		if existingAttempt, found, lookupErr := s.existingSourceWikiBatchTopicAttempt(ctx, ledger, kb, req, module, publication.SnapshotID, &expectedSource, model); lookupErr != nil {
 			return nil, lookupErr
 		} else if found {
+			if err := s.validateSourceWikiUpdateGenerationBase(ctx, req.BatchID, req.TopicKey, publication.SnapshotID, existing, existingAttempt.BasePageVersion); err != nil {
+				return nil, err
+			}
 			return existingAttempt, nil
+		}
+		if err := s.validateSourceWikiUpdateGenerationBase(ctx, req.BatchID, req.TopicKey, publication.SnapshotID, existing, baseVersion); err != nil {
+			return nil, err
 		}
 	}
 	attemptID := uuid.NewString()
@@ -767,15 +787,6 @@ func sourceWikiPageSourcesAreMergeable(page *types.WikiPage, evidence []collecte
 		return false
 	}
 	return true
-}
-
-func containsSourceWikiRef(refs types.StringArray, value string) bool {
-	for _, ref := range refs {
-		if ref == value {
-			return true
-		}
-	}
-	return false
 }
 
 func decodeSourceWikiDraftText(value types.JSON) string {

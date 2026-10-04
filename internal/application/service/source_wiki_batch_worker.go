@@ -70,6 +70,19 @@ func (s *sourceWikiService) runSourceWikiBatch(parent context.Context, batchID s
 	if parent == nil {
 		parent = context.Background()
 	}
+	defer func() {
+		if parent.Err() != nil {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
+		defer cleanupCancel()
+		if err := s.reconcileSourceWikiUpdateBatch(cleanupCtx, batchID); err != nil {
+			logger.Warnf(cleanupCtx, "[SourceWikiBatch] update-plan reconciliation for batch %s deferred: %v", batchID, err)
+		}
+		if err := s.ResumePendingSourceWikiUpdates(cleanupCtx); err != nil {
+			logger.Warnf(cleanupCtx, "[SourceWikiBatch] pending source Wiki regeneration dispatch deferred after batch %s: %v", batchID, err)
+		}
+	}()
 	base := parent
 	var batch types.SourceWikiBatch
 	if err := s.db.WithContext(base).Where("id = ?", batchID).Take(&batch).Error; err != nil {
@@ -173,6 +186,11 @@ func (s *sourceWikiService) runSourceWikiBatch(parent context.Context, batchID s
 				return
 			case errors.Is(err, repository.ErrSourceWikiBatchInvalidState), errors.Is(err, repository.ErrSourceWikiBatchNotFound):
 				_ = ledger.UpdateProgress(context.WithoutCancel(base), batchID, current.Phase, "failed", current.CurrentTopicKey, "batch execution state no longer matches its fixed plan", current.Cursor, time.Now())
+				return
+			case errors.Is(err, ErrSourceWikiUpdateBaseVersionChanged):
+				if failErr := ledger.UpdateProgress(context.WithoutCancel(base), batchID, current.Phase, "failed", current.CurrentTopicKey, err.Error(), current.Cursor, time.Now()); failErr != nil {
+					logger.Warnf(ctx, "[SourceWikiBatch] batch %s could not persist its page-version fence failure: %v", batchID, failErr)
+				}
 				return
 			default:
 				logger.Warnf(ctx, "[SourceWikiBatch] batch %s step deferred: %v", batchID, err)
@@ -732,6 +750,10 @@ func (s *sourceWikiService) processSourceWikiBatchPublish(ctx context.Context, l
 	if existing != nil {
 		currentVersion = existing.Version
 	}
+	if err := s.validateSourceWikiUpdateGenerationBase(ctx, batch.ID, topic.TopicKey, batch.SnapshotID, existing, currentVersion); err != nil {
+		return false, ledger.UpdateProgress(ctx, batch.ID, "publishing", "failed", topic.TopicKey,
+			"the target Wiki page changed after this source update was planned; the stale candidate was not published", batch.Cursor, time.Now())
+	}
 	if currentVersion != attempt.StagedPageVersion {
 		if published, checkErr := s.sourceWikiBatchCandidateAlreadyPublished(ctx, batch, attempt.ID); checkErr != nil {
 			return false, checkErr
@@ -746,11 +768,6 @@ func (s *sourceWikiService) processSourceWikiBatchPublish(ctx context.Context, l
 		page.ParentSlug, page.FolderID = existing.ParentSlug, existing.FolderID
 		page.PageMetadata = append(types.JSON(nil), existing.PageMetadata...)
 		page.ChunkRefs = append(types.StringArray(nil), existing.ChunkRefs...)
-		for _, ref := range existing.SourceRefs {
-			if !containsSourceWikiRef(page.SourceRefs, ref) {
-				page.SourceRefs = append(page.SourceRefs, ref)
-			}
-		}
 	}
 	err = s.publishStagedCard(ctx, kb, attempt.SourceID, attempt.SnapshotID, currentVersion, existing, page, &expectedSource, expectedModel, &attempt, batch.QAApprovalDigest)
 	if errors.Is(err, repository.ErrWikiPageConflict) {
@@ -797,10 +814,11 @@ func (s *sourceWikiService) revalidateStagedBatchCandidate(ctx context.Context, 
 	if existing == nil && attempt.StagedPageVersion > 0 {
 		return fail("staged page was removed before publication; safe rebase is unavailable")
 	}
-	if existing != nil && existing.SourceProvenance != nil && existing.SourceProvenance.SourceID != attempt.SourceID {
-		return fail("staged page now contains provenance from another source")
+	mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(ctx, existing, attempt, checkpoint.Evidence)
+	if mergeErr != nil {
+		return false, mergeErr
 	}
-	if !sourceWikiPageSourcesAreMergeable(existing, checkpoint.Evidence) {
+	if !mergeable {
 		return fail("latest page references cannot be safely merged with the staged candidate")
 	}
 	if batch.QADueAt == nil || !time.Now().Before(*batch.QADueAt) || !time.Now().Before(batch.DeadlineAt) ||
