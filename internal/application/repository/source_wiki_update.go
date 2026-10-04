@@ -104,6 +104,23 @@ func stageSourceWikiUpdateFence(
 			WHERE source_id=? AND revision_id IS NULL AND state<>'removed'`, snapshotID, now, sourceID).Error; err != nil {
 			return err
 		}
+		if err := tx.Exec(`UPDATE source_wiki_page_contributions
+			SET contribution=jsonb_set(contribution, '{source_provenance,state}', '"stale"'::jsonb, true)
+			WHERE source_id=? AND revision_id IS NULL AND target_snapshot_id=? AND state='stale'
+			  AND topic_kind<>'' AND topic_key<>''
+			  AND contribution->>'topic_kind'=topic_kind AND contribution->>'topic_key'=topic_key
+			  AND contribution->>'has_unattributed_body'='false'
+			  AND jsonb_typeof(contribution->'source_provenance')='object'
+			  AND contribution->'source_provenance'->>'source_id'=source_id
+			  AND contribution->'source_provenance'->>'topic_kind'=topic_kind
+			  AND contribution->'source_provenance'->>'topic_key'=topic_key
+			  AND contribution->'source_provenance'->>'applicable_snapshot_id'=applicable_snapshot_id
+			  AND contribution->'source_provenance'->>'state'='ready'
+			  AND CASE WHEN jsonb_typeof(contribution->'source_provenance'->'evidence')='array'
+			           THEN jsonb_array_length(contribution->'source_provenance'->'evidence')>0
+			           ELSE FALSE END`, sourceID, snapshotID).Error; err != nil {
+			return err
+		}
 		return tx.Exec(`UPDATE wiki_pages
 			SET source_provenance=jsonb_set(source_provenance::jsonb,'{state}','"stale"'::jsonb,true), updated_at=?
 			WHERE tenant_id=? AND knowledge_base_id=? AND source_provenance IS NOT NULL
