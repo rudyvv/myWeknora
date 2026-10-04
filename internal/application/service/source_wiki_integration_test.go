@@ -445,6 +445,13 @@ func TestSourceWikiRevisionLeasePinOutlivesPruneAndGCDropsOnlyOldIndex(t *testin
 	require.NoError(t, f.db.Table("source_read_wiki_evidence_refs").Where("file_version_id=?", oldEvidence.FileVersionID).Count(&pins).Error)
 	require.EqualValues(t, 1, pins, "the authorized history read must pin its exact raw version")
 
+	drainSourceWikiReviewUpdateLane(t, f, generator)
+	var pendingOldSnapshotPlans int64
+	require.NoError(t, f.db.Model(&types.SourceWikiUpdatePlan{}).
+		Where("source_id=? AND previous_snapshot_id=? AND status IN ?", f.ds.ID, oldSnapshotID, []string{"pending", "running"}).
+		Count(&pendingOldSnapshotPlans).Error)
+	require.Zero(t, pendingOldSnapshotPlans, "retired-source GC must not race an unfinished impact plan")
+
 	gc := repository.NewSourceSnapshotRepository(f.db)
 	_, err = gc.CollectRetiredSourceVersions(f.ctx, 10)
 	require.NoError(t, err)
