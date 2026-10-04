@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { JSDOM } from 'jsdom'
-import { createI18n } from 'vue-i18n'
 import ts from 'typescript'
 import zhCN from '../i18n/locales/zh-CN'
 
@@ -16,6 +15,7 @@ for (const key of ['window', 'document', 'navigator', 'Element', 'HTMLElement', 
 }
 const require = createRequire(import.meta.url)
 const { createApp, h, nextTick, reactive } = require('vue') as typeof import('vue')
+const { createI18n } = require('vue-i18n') as typeof import('vue-i18n')
 const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
 
 function createTestApp(root: Parameters<typeof createApp>[0]) {
