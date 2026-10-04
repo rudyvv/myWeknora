@@ -85,3 +85,25 @@ Actual adjacent PostgreSQL gates at 6216: typed atomic publication/outbox PASS 1
 Independent Sol/high Spec inspection confirmed that GC failure is fixture timing, not a product finding. The fixture must consume the real update lane before asking GC to discard impact-proof inputs. Root temporary overlay does exactly that, asserts no pending/running plan remains for the old snapshot, then runs all original pruning/read-pin/index-removal/raw-retention assertions: **PASS 12.84s**, package 17.226s, session 20396 collected. No production GC logic or artificial plan-state flip was used. The main executor is applying only that short fixture sequencing adjustment to the existing test.
 
 Logs: `weknora-root-t16-6216b7b3-pg.jsonl` and `weknora-root-t16-gc-lane-pg.jsonl` under the same root Temp directory. The first run remains recorded as failed; only the calibrated real-lane run is reported green. Final assembled acceptance/integration is still pending.
+
+## Final frozen candidate and integrated acceptance
+
+The final test-only freeze is `9fff05ba6ebfe636fc9da031fe9a574b47e699fc`, reviewed with `git diff 6216b7b3...9fff05ba`. Independent Sol/high Standards: **0 hard violations / 0 new actionable Fowler smells**. Independent Sol/high Spec: **0 findings**. The original whole-ticket fixed point remains the user-approved `55d69df1355fba044ac0e58bc8f2f4dc2c15d2c0`; all required findings from that review and subsequent behavioral counterexamples have been repaired and verified. Earlier non-blocking code-smell suggestions remain suggestions and are not misreported as newly reviewed zero.
+
+Root merged the frozen candidate without conflicts as `ffb1ca5ff93beff92d7926cd43e0a43f05239e07`. The candidate and integrated tree have identical `internal`, `frontend`, `migrations`, `CONTEXT.md` and ADR product content. After the merge, the normal checked-in files ran seven actual PostgreSQL integration gates, **all PASS**, package **80.404s**:
+
+| Gate | Time |
+| --- | --- |
+| Publication consumes exact-target regeneration to terminal outcome | 13.07s |
+| Oversized facts persist and settle a source-wide fallback | 9.97s |
+| Consecutive A replacements preserve B in a mixed-source page | 18.72s |
+| Complete deletion proof removes only the attributable contribution | 11.37s |
+| Real update-lane completion permits old-index GC while retaining pinned raw | 10.07s |
+| Whole-page and history reads enforce every actual source/file/tag scope | 8.62s |
+| Bookkeeping cannot forge evidence and prose edits remain unverified | 6.14s |
+
+Actual log: `C:/Users/28211/AppData/Local/Temp/weknora-root-t16-integrated-final.jsonl`; root session 95867 exited 0 and was collected. Earlier real migration/backfill, historical raw reads after both publications, generation fencing/CAS, unaffected carry-forward, atomic outbox, mixed ordinary-document scope and native checks remain the separately recorded results above. Native service worker/adapter/removal/read checks also PASS 4.360s. No production GC rule was relaxed and no plan state was artificially changed to obtain a green test.
+
+Whole-application suite coverage remains limited by the previously recorded native `sqlite3.h` environment dependency; the targeted source/Wiki PostgreSQL and native checks are actual passing executions, not a claim that the complete application suite passed. Shared application services and old container credentials were not changed or read.
+
+T16/#24 is accepted after these reviews and integrated gates; cumulative acceptance is **19/22**. Publication and next-ticket startup use this accepted integrated state. T19/#27 is the only newly unblocked implementation ticket; T21 and T22 remain blocked on its acceptance and subsequent dependencies.
