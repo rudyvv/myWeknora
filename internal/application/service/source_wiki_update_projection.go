@@ -68,6 +68,17 @@ func sourceWikiEvidenceRefOwners(pageID string, version int, contributions []typ
 	return refs
 }
 
+func sourceWikiReadProvenanceMatchesPersisted(read, persisted *types.SourceWikiProvenance) bool {
+	if read == nil || persisted == nil || read.State != persisted.State && !(read.State == "stale" && persisted.State == "ready") {
+		return false
+	}
+	readForComparison := *read
+	readForComparison.State = persisted.State
+	readJSON, readErr := json.Marshal(readForComparison)
+	persistedJSON, persistedErr := json.Marshal(persisted)
+	return readErr == nil && persistedErr == nil && equalJSONBytes(readJSON, persistedJSON)
+}
+
 // sourceWikiPageCanBeMergedWithAttempt accepts a foreign page-level primary
 // provenance only when the current page is an exact projection of its stored,
 // independently attributed contributions and contains this exact attempt
@@ -103,6 +114,26 @@ func (s *sourceWikiService) sourceWikiPageCanBeMergedWithAttempt(ctx context.Con
 		return false, err
 	}
 	if len(rows) == 0 || len(rows) > types.SourceWikiContributionMaxCount {
+		return false, nil
+	}
+	// GetPageBySlug may return an authorized page with a synthesized stale
+	// primary state after its whole-page applicability check. Read only the
+	// persisted provenance metadata for this exact page version to validate the
+	// contribution projection; do not alter the read object or its read gate.
+	var persistedPage struct {
+		SourceProvenance *types.SourceWikiProvenance `gorm:"column:source_provenance"`
+	}
+	lookup := s.db.WithContext(ctx).Model(&types.WikiPage{}).Select("source_provenance").Where(
+		"id=? AND tenant_id=? AND knowledge_base_id=? AND version=?", page.ID, page.TenantID, page.KnowledgeBaseID, page.Version,
+	).Take(&persistedPage)
+	if lookup.Error != nil {
+		if lookup.Error == gorm.ErrRecordNotFound {
+			return false, nil
+		}
+		return false, lookup.Error
+	}
+	persistedPrimaryProvenance := persistedPage.SourceProvenance
+	if !sourceWikiReadProvenanceMatchesPersisted(page.SourceProvenance, persistedPrimaryProvenance) {
 		return false, nil
 	}
 	seen := make(map[string]bool, len(rows))
@@ -148,8 +179,8 @@ func (s *sourceWikiService) sourceWikiPageCanBeMergedWithAttempt(ctx context.Con
 		if row.SourceID == attempt.SourceID && row.TopicKind == attempt.TopicKind && row.TopicKey == attempt.TopicKey {
 			targetFound = true
 		}
-		if page.SourceProvenance.SourceID == row.SourceID && page.SourceProvenance.TopicKind == row.TopicKind &&
-			page.SourceProvenance.TopicKey == row.TopicKey {
+		if persistedPrimaryProvenance.SourceID == row.SourceID && persistedPrimaryProvenance.TopicKind == row.TopicKind &&
+			persistedPrimaryProvenance.TopicKey == row.TopicKey {
 			if primary != nil {
 				return false, nil
 			}
@@ -163,7 +194,7 @@ func (s *sourceWikiService) sourceWikiPageCanBeMergedWithAttempt(ctx context.Con
 		!sourceWikiBodyCompositionMatches(page.Content, bodyParts) || page.Title != primary.Title || page.Summary != primary.Summary {
 		return false, nil
 	}
-	pageProvenance, err := json.Marshal(page.SourceProvenance)
+	pageProvenance, err := json.Marshal(persistedPrimaryProvenance)
 	if err != nil {
 		return false, err
 	}
