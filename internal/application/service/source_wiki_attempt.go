@@ -94,7 +94,8 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 	if s.db.Dialector.Name() != "postgres" {
 		return nil, fmt.Errorf("source Wiki requires PostgreSQL")
 	}
-	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kb.ID, SourceIDs: []string{req.SourceID}}}
+	// Merge reads need the whole KB projection; BeginSourceRead still reuses any narrower caller source/file/tag scope.
+	targets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: kb.ID}}
 	ctx, release, err := beginSourceRead(ctx, s.kb, targets)
 	if err != nil {
 		return nil, err
