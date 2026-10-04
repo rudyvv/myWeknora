@@ -39,3 +39,11 @@ Root assumed host-only commit/PG operations after the execution chat reported en
 Regression helper commit `d3cfcfde9272663491f3dbc4df78e4c37f6cbb72` has separate Standards 0 / Spec 0 static review. Its one new integration test file is staged for assembly in the main tree, currently untracked, and has not yet passed actual PostgreSQL validation. A targeted A+B replacement test is assigned to the same helper. Main owns production repairs; root owns actual PG and host commits. Neither slice completion nor unit/compile results constitute whole-ticket acceptance.
 
 Standards: 2 findings, worst P2. Spec: 3 findings, worst P1.
+
+## Partial repair validation (root isolated copy)
+
+Before the main chat finished mixed-source repair, root tested a fixed code-only copy of d8e plus its two small null-array/fallback patches and the reviewed d3 regression file. Windows tar initially rejected unrelated Chinese documentation names; the code-only archive extracted successfully. No main source was changed by this test copy.
+
+Actual PG results: affected handoff PASS 11.12s; oversized-fallback terminal items PASS 9.93s; stronger exact-module terminal generation FAIL 20.11s (package 43.758s). The target attempt was ready and had its own successful generation call, but public page reading returned stale. A second targeted diagnostic run FAIL 12.20s (package 16.524s) showed stored current WikiPage version 2 / new ready provenance, while its current contribution row was version 1 / ready / new snapshot. `publishCardWithBatchState` discarded the updated page returned by `UpdatePage`, then persisted the contribution using the unchanged caller version. Root sent this concrete cause to the same main execution chat for correction in the existing fenced transaction, preserving the read gate. These results validate two repairs, not whole-ticket acceptance.
+
+Logs: `C:/Users/28211/AppData/Local/Temp/weknora-root-t16-two-fix-isolated-pg.jsonl` and `C:/Users/28211/AppData/Local/Temp/weknora-root-t16-two-fix-diagnostic-pg.jsonl`. Root sessions 94547/84912 collected, no concurrent PG. Main continues mixed replacement and actual-version persistence; helper adds the matching independent A+B replacement regression. No new publication-wide budget requirement or premature next ticket was introduced.
