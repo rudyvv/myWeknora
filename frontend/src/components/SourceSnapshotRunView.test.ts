@@ -259,7 +259,7 @@ test('source run view renders only allowlisted measured telemetry and preserves 
     assert.ok(!text.includes('invented_metric'))
     assert.ok(text.includes('缓存: 已用 0 B · 限额 0 B · 逻辑载荷'))
     assert.ok(text.includes('保留原文: 未知'))
-    assert.ok(text.includes('向量: 已用 1 KiB · 限额未报告 · 物理测量'))
+    assert.ok(text.includes('向量: 已用 1 KiB · 未报告限额 · 物理测量'))
     assert.ok(text.includes('实际输入 Token: 5'))
     assert.ok(text.includes('估算输入 Token: 40'))
     assert.ok(text.includes('Embedding 调用: 0'))
