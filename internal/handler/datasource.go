@@ -83,7 +83,7 @@ func (h *DataSourceHandler) getOwnedDataSource(
 func writeSourceLifecycleError(c *gin.Context, status int, sourceID, operation string, err error) {
 	code, message, known := sourceLifecyclePublicError(err, operation)
 	if !known && err != nil {
-		logger.Errorf(c.Request.Context(), "[DataSource] source lifecycle %s failed for id=%s: %v", operation, sourceID, err)
+		logger.Errorf(c.Request.Context(), "[DataSource] source lifecycle %s failed for id=%s code=%s error_type=%T", operation, sourceID, code, err)
 	}
 	c.JSON(status, gin.H{"code": code, "error": message})
 }
