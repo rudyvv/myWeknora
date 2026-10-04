@@ -722,6 +722,23 @@ export default {
       queryDisabled: '知识不可搜索和阅读',
       cleanup: { pending: '等待清理', running: '正在清理', failed: '清理失败', completed: '知识已清除' }
     },
+    sourceRun: {
+      ariaLabel: '源码运行详情', unknown: '未知',
+      detectedHead: '检测到的 HEAD', targetCommit: '处理目标', publishedCommit: '已发布 SHA', phase: '运行阶段', lastSuccess: '最近成功发布',
+      headUnavailable: '无法检测 HEAD', targetUnavailable: '尚未确定目标', publishedShaUnknown: '已发布（SHA 不可用）', notPublished: '尚未发布', publicationUnknown: '无法确认发布状态', lastSuccessUnknown: '时间不可用', noSuccessfulPublication: '尚无成功发布',
+      failedRetained: '运行失败；已保留当前发布', failedPublicationUnknown: '运行失败；无法确认发布状态', failedFirstPublication: '首次发布失败；尚无已发布版本', stateUnknown: '未知快照状态：{state}', phaseUnknown: '未知运行阶段：{phase}',
+      states: { fetching: '正在获取固定提交', parsing: '正在解析源码', indexing: '正在建立索引', ready: '准备发布', published: '已发布', failed: '失败' },
+      phases: { queued: '排队中', waiting_for_catch_up: '等待追赶', retry_wait: '等待重试', running: '运行中', target_resolved: '目标已确定', fetching: '获取中', parsing: '解析中', indexing: '建立索引中', publishing: '发布中', ready: '准备发布', published: '已发布', failed: '失败', canceled: '已取消', superseded: '已被更新任务取代' },
+      manifestComplete: '成员清单完整', manifestIncomplete: '成员清单不完整', manifestUnknown: '成员清单状态未知', members: '成员', files: '纳入文件', chunks: '源码块', added: '新增', changed: '变更', deleted: '删除/排除', renamed: '重命名', parsed: '已解析文件', reusedFiles: '复用文件', reusedChunks: '复用块', embeddedChunks: '新建向量', reusedVectors: '复用向量',
+      telemetryTitle: '已测量的运行遥测', selectedBytes: '纳入原始字节数', phaseDurations: '源码阶段耗时（本次运行）', qualityTitle: '已解析文件质量', storageTitle: '存储用量', modelUsageTitle: '模型用量', coverageTitle: 'Wiki 覆盖',
+      milliseconds: '{value} 毫秒', limitUnknown: '未报告限额', storageLimit: '限额 {value}', storageValue: '已用 {used} · {limit} · {measurement}',
+      storage: { cache: '缓存', staging: '暂存', original: '保留原文', vectors: '向量' },
+      measurements: { logical_payload: '逻辑载荷', physical: '物理测量' },
+      quality: { structural: '结构化', partial: '部分解析', syntax_error: '语法错误', degraded: '降级解析', unknown_preprocess: '预处理状态未知', text_fallback: '文本回退' },
+      modelUsage: { embedding_calls: 'Embedding 调用', generation_calls: '生成调用', input_tokens: '实际输入 Token', output_tokens: '实际输出 Token', estimated_input_tokens: '估算输入 Token' },
+      coverage: { eligible: '符合条件', ready: '就绪', stale: '过期', failed: '失败', ungenerated: '未生成', deferred: '延后' },
+      leaseRecoveries: '租约恢复次数', cleanupResidue: '残留清理项', filterMembers: '筛选源码成员', filterPlaceholder: '筛选文件路径', parseReused: '复用了解析结果', version: '版本', pagination: '源码清单分页', previousPage: '上一页', nextPage: '下一页'
+    },
     logs: '日志',
     syncModeLabel: '同步模式',
     createTitle: '添加数据源',

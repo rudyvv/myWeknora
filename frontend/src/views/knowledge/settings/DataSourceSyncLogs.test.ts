@@ -48,6 +48,7 @@ test('sync history distinguishes initial queue, catch-up, retry wait and hard fa
     started_at: '2026-09-30T01:02:03Z', finished_at: null,
     items_total: 0, items_created: 0, items_updated: 0, items_deleted: 0,
     items_skipped: 0, items_failed: 0, error_message: '',
+    result: id === 'first' ? { source: { snapshot: { id: 'snapshot-one' }, members: [] } } : undefined,
   })
   const logs = [
     log('first', 'queued', 'queued'),
@@ -64,7 +65,15 @@ test('sync history distinguishes initial queue, catch-up, retry wait and hard fa
   const view = loadSyncLogs({
     '@/api/datasource': { async getSyncLogs() { return { data: logs } } },
     'vue-i18n': { useI18n: () => ({ t: (key: string) => labels[key] || key }) },
-    '@/components/SourceSnapshotRunView.vue': { __esModule: true, default: { render: () => null } },
+    '@/components/SourceSnapshotRunView.vue': {
+      __esModule: true,
+      default: {
+        props: ['result', 'phase'],
+        render(this: { result: any; phase?: string }) {
+          return h('span', { class: 'source-run-props' }, `${this.result.snapshot.id}:${this.phase}`)
+        },
+      },
+    },
     './syncLogDisplay': loadSyncLogDisplay(),
   })
   const props = reactive({ dataSourceId: 'source-1', dataSourceName: 'Repository', dataSourceType: 'gitlab', visible: false })
@@ -77,6 +86,9 @@ test('sync history distinguishes initial queue, catch-up, retry wait and hard fa
     await settle()
     const statuses = Array.from(host.querySelectorAll<HTMLElement>('.tl-status')).map(node => node.textContent?.trim())
     assert.deepEqual(statuses, ['待同步', '等待追赶', '等待重试', '失败'])
+    host.querySelector<HTMLElement>('.timeline-item')?.click()
+    await settle()
+    assert.equal(host.querySelector('.source-run-props')?.textContent, 'snapshot-one:queued')
   } finally {
     app.unmount()
     host.remove()

@@ -51,16 +51,51 @@ export interface SyncItemError {
   message?: string
 }
 
-export interface SyncResultDetail {
-  source?: {
-    snapshot: { id: string; state: string; commit_sha: string; detected_commit_sha?: string; target_commit_sha?: string; publication_checked?: boolean; project_id: string; repository_url: string;
-      manifest_complete: boolean; member_count: number; file_count: number; chunk_count: number; error?: string; previous_commit_sha?: string;
-      previous_snapshot_id?: string;
-      published_at?: string; last_successful_published_at?: string; previous_published_at?: string;
-      added_count?: number; changed_count?: number; deleted_count?: number; renamed_count?: number;
-      parsed_count?: number; reused_file_count?: number; reused_chunk_count?: number; embedded_chunk_count?: number; reused_vector_count?: number };
-    members: Array<{ path: string; status: string; reason: string; source_file_id: string; file_version_id: string; change?: string; previous_path?: string; parse_reused?: boolean }>;
+export interface SourceRunTelemetry {
+  schema_version: 1
+  phase_duration_ms?: Record<string, number>
+  selected_bytes?: number
+  storage?: Partial<Record<'cache' | 'staging' | 'original' | 'vectors', {
+    used_bytes: number
+    limit_bytes?: number
+    measurement: 'logical_payload' | 'physical'
+  }>>
+  quality_counts?: Record<string, number>
+  model_usage?: {
+    embedding_calls?: number
+    generation_calls?: number
+    input_tokens?: number
+    output_tokens?: number
+    estimated_input_tokens?: number
   }
+  lease_recoveries?: number
+  cleanup_residue_count?: number
+  published_commit_sha?: string
+  wiki_coverage?: {
+    eligible: number
+    ready: number
+    stale: number
+    failed: number
+    ungenerated: number
+    deferred: number
+  }
+}
+
+export interface SourceRunResult {
+  snapshot: {
+    id: string; state: string; commit_sha: string; detected_commit_sha?: string; target_commit_sha?: string; publication_checked?: boolean; project_id: string; repository_url: string;
+    manifest_complete?: boolean; member_count?: number; file_count?: number; chunk_count?: number; error?: string; previous_commit_sha?: string;
+    previous_snapshot_id?: string;
+    published_at?: string; last_successful_published_at?: string; previous_published_at?: string;
+    added_count?: number; changed_count?: number; deleted_count?: number; renamed_count?: number;
+    parsed_count?: number; reused_file_count?: number; reused_chunk_count?: number; embedded_chunk_count?: number; reused_vector_count?: number
+  }
+  members: Array<{ path: string; status: string; reason: string; source_file_id: string; file_version_id: string; change?: string; previous_path?: string; parse_reused?: boolean }>
+  telemetry?: SourceRunTelemetry
+}
+
+export interface SyncResultDetail {
+  source?: SourceRunResult
   total?: number
   created?: number
   updated?: number

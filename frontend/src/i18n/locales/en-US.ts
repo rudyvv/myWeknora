@@ -6367,6 +6367,23 @@ export default {
       queryDisabled: 'Knowledge unavailable for search and reading',
       cleanup: { pending: 'Clearing queued', running: 'Clearing', failed: 'Clearing failed', completed: 'Knowledge cleared' }
     },
+    sourceRun: {
+      ariaLabel: 'Source run details', unknown: 'Unknown',
+      detectedHead: 'Detected HEAD', targetCommit: 'Processing target', publishedCommit: 'Published SHA', phase: 'Run phase', lastSuccess: 'Last successful publication',
+      headUnavailable: 'Could not detect HEAD', targetUnavailable: 'No target established', publishedShaUnknown: 'Published (SHA unavailable)', notPublished: 'Not published', publicationUnknown: 'Publication state unknown', lastSuccessUnknown: 'Timestamp unavailable', noSuccessfulPublication: 'No successful publication',
+      failedRetained: 'Run failed; current publication retained', failedPublicationUnknown: 'Run failed; publication state unknown', failedFirstPublication: 'First publication failed; no published version', stateUnknown: 'Unknown snapshot state: {state}', phaseUnknown: 'Unknown run phase: {phase}',
+      states: { fetching: 'Fetching fixed commit', parsing: 'Parsing source', indexing: 'Building indexes', ready: 'Ready to publish', published: 'Published', failed: 'Failed' },
+      phases: { queued: 'Queued', waiting_for_catch_up: 'Waiting for catch-up', retry_wait: 'Waiting to retry', running: 'Running', target_resolved: 'Target resolved', fetching: 'Fetching', parsing: 'Parsing', indexing: 'Indexing', publishing: 'Publishing', ready: 'Ready to publish', published: 'Published', failed: 'Failed', canceled: 'Canceled', superseded: 'Superseded' },
+      manifestComplete: 'Manifest complete', manifestIncomplete: 'Manifest incomplete', manifestUnknown: 'Manifest status unknown', members: 'Members', files: 'Included files', chunks: 'Source chunks', added: 'Added', changed: 'Changed', deleted: 'Deleted/excluded', renamed: 'Renamed', parsed: 'Parsed files', reusedFiles: 'Reused files', reusedChunks: 'Reused chunks', embeddedChunks: 'New vectors', reusedVectors: 'Reused vectors',
+      telemetryTitle: 'Measured run telemetry', selectedBytes: 'Selected original bytes', phaseDurations: 'Source phase duration (this run)', qualityTitle: 'Parsed-file quality', storageTitle: 'Storage usage', modelUsageTitle: 'Model usage', coverageTitle: 'Wiki coverage',
+      milliseconds: '{value} ms', limitUnknown: 'limit not reported', storageLimit: 'limit {value}', storageValue: '{used} used · {limit} · {measurement}',
+      storage: { cache: 'Cache', staging: 'Staging', original: 'Retained originals', vectors: 'Vectors' },
+      measurements: { logical_payload: 'logical payload', physical: 'physical measurement' },
+      quality: { structural: 'Structural', partial: 'Partial', syntax_error: 'Syntax errors', degraded: 'Degraded', unknown_preprocess: 'Unknown preprocessing', text_fallback: 'Text fallback' },
+      modelUsage: { embedding_calls: 'Embedding calls', generation_calls: 'Generation calls', input_tokens: 'Actual input tokens', output_tokens: 'Actual output tokens', estimated_input_tokens: 'Estimated input tokens' },
+      coverage: { eligible: 'Eligible', ready: 'Ready', stale: 'Stale', failed: 'Failed', ungenerated: 'Ungenerated', deferred: 'Deferred' },
+      leaseRecoveries: 'Lease recoveries', cleanupResidue: 'Cleanup residue', filterMembers: 'Filter source members', filterPlaceholder: 'Filter file paths', parseReused: 'Parse reused', version: 'Version', pagination: 'Source manifest pages', previousPage: 'Previous', nextPage: 'Next'
+    },
     logs: 'Logs',
     syncModeLabel: 'Sync mode',
     syncMode: {
