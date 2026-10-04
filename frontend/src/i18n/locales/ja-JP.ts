@@ -6367,6 +6367,23 @@ export default {
       queryDisabled: 'ナレッジを検索・閲覧できません',
       cleanup: { pending: '消去待ち', running: '消去中', failed: '消去失敗', completed: 'ナレッジを消去しました' }
     },
+    sourceRun: {
+      ariaLabel: 'ソース実行の詳細', unknown: '不明',
+      detectedHead: '検出した HEAD', targetCommit: '処理対象', publishedCommit: '公開済み SHA', phase: '実行フェーズ', lastSuccess: '最終公開成功',
+      headUnavailable: 'HEAD を検出できません', targetUnavailable: '対象は未確定です', publishedShaUnknown: '公開済み（SHA 不明）', notPublished: '未公開', publicationUnknown: '公開状態を確認できません', lastSuccessUnknown: '時刻不明', noSuccessfulPublication: '公開成功なし',
+      failedRetained: '実行失敗。現在の公開版は保持されています', failedPublicationUnknown: '実行失敗。公開状態を確認できません', failedFirstPublication: '初回公開に失敗。公開版はありません', stateUnknown: '不明なスナップショット状態：{state}', phaseUnknown: '不明な実行フェーズ：{phase}',
+      states: { fetching: '固定コミットを取得中', parsing: 'ソースを解析中', indexing: 'インデックス作成中', ready: '公開準備完了', published: '公開済み', failed: '失敗' },
+      phases: { queued: '待機中', waiting_for_catch_up: '追いつき待ち', retry_wait: '再試行待ち', running: '実行中', target_resolved: '対象確定', fetching: '取得中', parsing: '解析中', indexing: 'インデックス作成中', publishing: '公開中', ready: '公開準備完了', published: '公開済み', failed: '失敗', canceled: 'キャンセル済み', superseded: '後続の実行に置き換え済み' },
+      manifestComplete: 'マニフェスト完了', manifestIncomplete: 'マニフェスト未完了', manifestUnknown: 'マニフェスト状態不明', members: 'メンバー', files: '対象ファイル', chunks: 'ソースチャンク', added: '追加', changed: '変更', deleted: '削除/除外', renamed: '名前変更', parsed: '解析済みファイル', reusedFiles: '再利用ファイル', reusedChunks: '再利用チャンク', embeddedChunks: '新規ベクトル', reusedVectors: '再利用ベクトル',
+      telemetryTitle: '計測済み実行テレメトリ', selectedBytes: '対象の元データ量', phaseDurations: 'ソース処理時間（今回）', qualityTitle: '解析済みファイルの品質', storageTitle: 'ストレージ使用量', modelUsageTitle: 'モデル使用量', coverageTitle: 'Wiki カバレッジ',
+      milliseconds: '{value} ミリ秒', limitUnknown: '上限未報告', storageLimit: '上限 {value}', storageValue: '使用 {used} · {limit} · {measurement}',
+      storage: { cache: 'キャッシュ', staging: 'ステージング', original: '保持中の原文', vectors: 'ベクトル' },
+      measurements: { logical_payload: '論理ペイロード', physical: '物理測定' },
+      quality: { structural: '構造解析', partial: '部分解析', syntax_error: '構文エラー', degraded: '縮退解析', unknown_preprocess: '前処理不明', text_fallback: 'テキストフォールバック' },
+      modelUsage: { embedding_calls: 'Embedding 呼び出し', generation_calls: '生成呼び出し', input_tokens: '実入力 Token', output_tokens: '実出力 Token', estimated_input_tokens: '推定入力 Token' },
+      coverage: { eligible: '対象', ready: '準備完了', stale: '古い状態', failed: '失敗', ungenerated: '未生成', deferred: '延期' },
+      leaseRecoveries: 'リース復旧回数', cleanupResidue: 'クリーンアップ残件', filterMembers: 'ソースメンバーを絞り込む', filterPlaceholder: 'ファイルパスで絞り込み', parseReused: '解析結果を再利用', version: 'バージョン', pagination: 'ソースマニフェストのページ', previousPage: '前へ', nextPage: '次へ'
+    },
     logs: 'ログ',
     syncModeLabel: '同期モード',
     syncMode: {

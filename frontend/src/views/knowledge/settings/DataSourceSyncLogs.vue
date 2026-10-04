@@ -307,7 +307,7 @@ const groupedLogs = computed(() => {
 
               <!-- Expanded -->
               <div v-if="expandedId === log.id" class="tl-detail" @click.stop>
-                <SourceSnapshotRunView v-if="log.result?.source" :result="log.result.source" />
+                <SourceSnapshotRunView v-if="log.result?.source" :result="log.result.source" :phase="log.source_run_phase" />
                 <div class="detail-row">
                   <span class="detail-label">{{ t('datasource.logDetail.startTime') }}</span>
                   <span>{{ formatTime(log.started_at) }}</span>

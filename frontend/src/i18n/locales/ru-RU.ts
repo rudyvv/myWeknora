@@ -722,6 +722,23 @@ export default {
       queryDisabled: 'Знания недоступны для поиска и чтения',
       cleanup: { pending: 'Ожидает очистки', running: 'Очистка выполняется', failed: 'Ошибка очистки', completed: 'Знания очищены' }
     },
+    sourceRun: {
+      ariaLabel: 'Сведения о запуске источника', unknown: 'Неизвестно',
+      detectedHead: 'Обнаруженный HEAD', targetCommit: 'Целевой коммит', publishedCommit: 'Опубликованный SHA', phase: 'Этап запуска', lastSuccess: 'Последняя успешная публикация',
+      headUnavailable: 'Не удалось определить HEAD', targetUnavailable: 'Цель не определена', publishedShaUnknown: 'Опубликовано (SHA недоступен)', notPublished: 'Не опубликовано', publicationUnknown: 'Состояние публикации неизвестно', lastSuccessUnknown: 'Время недоступно', noSuccessfulPublication: 'Успешных публикаций нет',
+      failedRetained: 'Запуск завершился ошибкой; текущая публикация сохранена', failedPublicationUnknown: 'Запуск завершился ошибкой; состояние публикации неизвестно', failedFirstPublication: 'Первая публикация не удалась; опубликованной версии нет', stateUnknown: 'Неизвестное состояние снимка: {state}', phaseUnknown: 'Неизвестный этап запуска: {phase}',
+      states: { fetching: 'Получение фиксированного коммита', parsing: 'Разбор исходного кода', indexing: 'Построение индексов', ready: 'Готово к публикации', published: 'Опубликовано', failed: 'Ошибка' },
+      phases: { queued: 'В очереди', waiting_for_catch_up: 'Ожидание актуализации', retry_wait: 'Ожидание повтора', running: 'Выполняется', target_resolved: 'Цель определена', fetching: 'Получение', parsing: 'Разбор', indexing: 'Индексирование', publishing: 'Публикация', ready: 'Готово к публикации', published: 'Опубликовано', failed: 'Ошибка', canceled: 'Отменено', superseded: 'Заменено новым запуском' },
+      manifestComplete: 'Манифест полный', manifestIncomplete: 'Манифест неполный', manifestUnknown: 'Состояние манифеста неизвестно', members: 'Элементы', files: 'Включённые файлы', chunks: 'Фрагменты кода', added: 'Добавлено', changed: 'Изменено', deleted: 'Удалено/исключено', renamed: 'Переименовано', parsed: 'Обработанные файлы', reusedFiles: 'Повторно использованные файлы', reusedChunks: 'Повторно использованные фрагменты', embeddedChunks: 'Новые векторы', reusedVectors: 'Повторно использованные векторы',
+      telemetryTitle: 'Измеренная телеметрия запуска', selectedBytes: 'Размер выбранных исходных данных', phaseDurations: 'Длительность этапов исходного кода (этот запуск)', qualityTitle: 'Качество обработанных файлов', storageTitle: 'Использование хранилища', modelUsageTitle: 'Использование моделей', coverageTitle: 'Покрытие Wiki',
+      milliseconds: '{value} мс', limitUnknown: 'лимит не сообщён', storageLimit: 'лимит {value}', storageValue: 'использовано {used} · {limit} · {measurement}',
+      storage: { cache: 'Кэш', staging: 'Промежуточное хранилище', original: 'Сохранённые оригиналы', vectors: 'Векторы' },
+      measurements: { logical_payload: 'логический объём данных', physical: 'физическое измерение' },
+      quality: { structural: 'Структурный разбор', partial: 'Частичный разбор', syntax_error: 'Синтаксические ошибки', degraded: 'Упрощённый разбор', unknown_preprocess: 'Неизвестная предобработка', text_fallback: 'Текстовый резервный режим' },
+      modelUsage: { embedding_calls: 'Вызовы эмбеддингов', generation_calls: 'Вызовы генерации', input_tokens: 'Фактические входные токены', output_tokens: 'Фактические выходные токены', estimated_input_tokens: 'Оценка входных токенов' },
+      coverage: { eligible: 'Подходит', ready: 'Готово', stale: 'Устарело', failed: 'Ошибка', ungenerated: 'Не создано', deferred: 'Отложено' },
+      leaseRecoveries: 'Восстановления аренды', cleanupResidue: 'Остатки очистки', filterMembers: 'Фильтр элементов исходного кода', filterPlaceholder: 'Фильтр путей файлов', parseReused: 'Разбор повторно использован', version: 'Версия', pagination: 'Страницы манифеста исходного кода', previousPage: 'Назад', nextPage: 'Далее'
+    },
     logs: 'Журнал',
     syncModeLabel: 'Режим синхронизации',
     createTitle: 'Добавить источник данных',

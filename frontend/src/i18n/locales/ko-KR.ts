@@ -722,6 +722,23 @@ export default {
       queryDisabled: '지식을 검색하거나 읽을 수 없음',
       cleanup: { pending: '정리 대기 중', running: '정리 중', failed: '정리 실패', completed: '지식 정리 완료' }
     },
+    sourceRun: {
+      ariaLabel: '소스 실행 상세', unknown: '알 수 없음',
+      detectedHead: '감지된 HEAD', targetCommit: '처리 대상', publishedCommit: '게시된 SHA', phase: '실행 단계', lastSuccess: '마지막 게시 성공',
+      headUnavailable: 'HEAD를 감지하지 못함', targetUnavailable: '대상이 아직 정해지지 않음', publishedShaUnknown: '게시됨(SHA 알 수 없음)', notPublished: '게시되지 않음', publicationUnknown: '게시 상태를 확인할 수 없음', lastSuccessUnknown: '시간을 알 수 없음', noSuccessfulPublication: '게시 성공 기록 없음',
+      failedRetained: '실행 실패; 현재 게시본 유지됨', failedPublicationUnknown: '실행 실패; 게시 상태를 확인할 수 없음', failedFirstPublication: '첫 게시 실패; 게시된 버전 없음', stateUnknown: '알 수 없는 스냅샷 상태: {state}', phaseUnknown: '알 수 없는 실행 단계: {phase}',
+      states: { fetching: '고정 커밋 가져오는 중', parsing: '소스 구문 분석 중', indexing: '인덱스 생성 중', ready: '게시 준비 완료', published: '게시됨', failed: '실패' },
+      phases: { queued: '대기열에 있음', waiting_for_catch_up: '최신 상태 반영 대기', retry_wait: '재시도 대기', running: '실행 중', target_resolved: '대상 확정됨', fetching: '가져오는 중', parsing: '구문 분석 중', indexing: '인덱싱 중', publishing: '게시 중', ready: '게시 준비 완료', published: '게시됨', failed: '실패', canceled: '취소됨', superseded: '새 실행으로 대체됨' },
+      manifestComplete: '매니페스트 완료', manifestIncomplete: '매니페스트 미완료', manifestUnknown: '매니페스트 상태 알 수 없음', members: '구성원', files: '포함된 파일', chunks: '소스 청크', added: '추가', changed: '변경', deleted: '삭제/제외', renamed: '이름 변경', parsed: '파싱된 파일', reusedFiles: '재사용 파일', reusedChunks: '재사용 청크', embeddedChunks: '새 벡터', reusedVectors: '재사용 벡터',
+      telemetryTitle: '측정된 실행 텔레메트리', selectedBytes: '선택된 원본 바이트', phaseDurations: '소스 단계 시간(이번 실행)', qualityTitle: '파싱된 파일 품질', storageTitle: '저장소 사용량', modelUsageTitle: '모델 사용량', coverageTitle: 'Wiki 범위',
+      milliseconds: '{value}밀리초', limitUnknown: '한도 미보고', storageLimit: '한도 {value}', storageValue: '사용 {used} · {limit} · {measurement}',
+      storage: { cache: '캐시', staging: '스테이징', original: '보존 원본', vectors: '벡터' },
+      measurements: { logical_payload: '논리 페이로드', physical: '물리 측정' },
+      quality: { structural: '구조 분석', partial: '부분 분석', syntax_error: '구문 오류', degraded: '저하 분석', unknown_preprocess: '전처리 알 수 없음', text_fallback: '텍스트 대체 처리' },
+      modelUsage: { embedding_calls: '임베딩 호출', generation_calls: '생성 호출', input_tokens: '실제 입력 토큰', output_tokens: '실제 출력 토큰', estimated_input_tokens: '추정 입력 토큰' },
+      coverage: { eligible: '대상', ready: '준비됨', stale: '오래됨', failed: '실패', ungenerated: '미생성', deferred: '연기됨' },
+      leaseRecoveries: '리스 복구', cleanupResidue: '정리 잔여 항목', filterMembers: '소스 구성원 필터', filterPlaceholder: '파일 경로 필터', parseReused: '파싱 재사용', version: '버전', pagination: '소스 매니페스트 페이지', previousPage: '이전', nextPage: '다음'
+    },
     logs: '로그',
     syncModeLabel: '동기화 모드',
     createTitle: '데이터 소스 추가',
