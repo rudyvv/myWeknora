@@ -778,7 +778,12 @@ func (s *sourceWikiService) persistSourceWikiImpactPlan(ctx context.Context, pay
 				return err
 			}
 			if len(rows) <= types.SourceWikiBatchMaxCandidates {
+				alreadyCurrent := make(map[int64]bool, len(rows))
 				for _, row := range rows {
+					if sourceWikiContributionReadyForSnapshot(row, payload) {
+						alreadyCurrent[row.ID] = true
+						continue
+					}
 					if err := markSourceWikiContributionStaleInTx(tx, payload, row, impact.FallbackReason,
 						"The bounded source impact proof was unavailable; this source contribution remains stale.", now); err != nil {
 						return err
@@ -799,6 +804,13 @@ func (s *sourceWikiService) persistSourceWikiImpactPlan(ctx context.Context, pay
 					pageVersion := 0
 					if len(group) == 1 {
 						pageID, pageVersion = &group[0].PageID, group[0].PageVersion
+					}
+					if len(group) == 1 && alreadyCurrent[group[0].ID] {
+						items = append(items, sourceWikiUpdateItem(plan.ID, topicKey, pageID, "carry_forward",
+							"same_snapshot_already_ready", "This exact source contribution is already ready and applicable to the accepted snapshot.",
+							"completed", pageVersion, group[0].EvidenceSHA256, group[0].DependencyFingerprint,
+							map[string]any{"snapshot_id": payload.SnapshotID}, now))
+						continue
 					}
 					items = append(items, sourceWikiUpdateItem(plan.ID, topicKey, pageID, "regenerate",
 						"source_wide_stale_fallback", impact.FallbackReason, "pending", pageVersion, "", "",
@@ -858,7 +870,7 @@ func (s *sourceWikiService) persistSourceWikiImpactPlan(ctx context.Context, pay
 				}
 				removed := removalProofs[topic.TopicKey]
 				if removed && found {
-					removed, err = s.removeSourceWikiContributionInTx(tx, payload, row, now)
+					removed, err = s.removeSourceWikiContributionInTx(tx, payload, row, payload.SnapshotID, now)
 					if err != nil {
 						return err
 					}
@@ -1030,6 +1042,14 @@ func carrySourceWikiContributionInTx(tx *gorm.DB, payload types.SourceWikiUpdate
 
 func markSourceWikiContributionStaleInTx(tx *gorm.DB, payload types.SourceWikiUpdatePayload, row types.SourceWikiPageContribution,
 	reasonCode, reason string, now time.Time) error {
+	var page types.WikiPage
+	if err := tx.Where("id=? AND tenant_id=? AND knowledge_base_id=? AND version=?",
+		row.PageID, payload.TenantID, payload.KnowledgeBaseID, row.PageVersion).Take(&page).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil
+		}
+		return err
+	}
 	var fields map[string]json.RawMessage
 	if len(row.Contribution) > 0 && json.Unmarshal(row.Contribution, &fields) == nil {
 		var provenance types.SourceWikiProvenance
@@ -1047,18 +1067,53 @@ func markSourceWikiContributionStaleInTx(tx *gorm.DB, payload types.SourceWikiUp
 	if len(row.Contribution) > 0 {
 		updates["contribution"] = row.Contribution
 	}
-	if err := tx.Model(&types.SourceWikiPageContribution{}).Where("id=? AND revision_id IS NULL", row.ID).Updates(updates).Error; err != nil {
-		return err
+	updated := tx.Model(&types.SourceWikiPageContribution{}).Where(
+		"id=? AND page_id=? AND source_id=? AND topic_kind=? AND topic_key=? AND revision_id IS NULL AND page_version=? AND applicable_snapshot_id=? AND target_snapshot_id=? AND state=?",
+		row.ID, row.PageID, row.SourceID, row.TopicKind, row.TopicKey, row.PageVersion, row.ApplicableSnapshotID, row.TargetSnapshotID, row.State,
+	).Updates(updates)
+	if updated.Error != nil {
+		return updated.Error
 	}
-	var page types.WikiPage
-	if err := tx.Where("id=? AND tenant_id=? AND knowledge_base_id=?", row.PageID, payload.TenantID, payload.KnowledgeBaseID).Take(&page).Error; err != nil {
-		return err
+	if updated.RowsAffected != 1 {
+		return nil
 	}
 	if page.SourceProvenance != nil && page.SourceProvenance.SourceID == payload.DataSourceID && page.SourceProvenance.TopicKey == row.TopicKey {
 		page.SourceProvenance.State = "stale"
-		return tx.Model(&types.WikiPage{}).Where("id=? AND version=?", page.ID, page.Version).Update("source_provenance", page.SourceProvenance).Error
+		return tx.Model(&types.WikiPage{}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND version=?",
+			page.ID, payload.TenantID, payload.KnowledgeBaseID, row.PageVersion).Update("source_provenance", page.SourceProvenance).Error
 	}
 	return nil
+}
+
+func sourceWikiContributionReadyForSnapshot(row types.SourceWikiPageContribution, payload types.SourceWikiUpdatePayload) bool {
+	if row.ID == 0 || row.SourceID != payload.DataSourceID || row.State != "ready" ||
+		row.ApplicableSnapshotID != payload.SnapshotID || row.TargetSnapshotID != payload.SnapshotID || len(row.Contribution) == 0 {
+		return false
+	}
+	var stored sourceWikiStoredContribution
+	if json.Unmarshal(row.Contribution, &stored) != nil || stored.HasUnattributedBody == nil || *stored.HasUnattributedBody ||
+		stored.SourceProvenance == nil || stored.Content == "" || stored.SourceRefs == nil ||
+		stored.TopicKind != row.TopicKind || stored.TopicKey != row.TopicKey {
+		return false
+	}
+	provenance := stored.SourceProvenance
+	if provenance.SourceID != row.SourceID || provenance.TopicKind != row.TopicKind || provenance.TopicKey != row.TopicKey ||
+		provenance.State != "ready" || provenance.ApplicableSnapshotID != payload.SnapshotID || len(provenance.Evidence) == 0 {
+		return false
+	}
+	originSnapshot := provenance.Evidence[0].SnapshotID
+	if originSnapshot == "" {
+		return false
+	}
+	refs := make([]string, 0, len(provenance.Evidence))
+	for _, evidence := range provenance.Evidence {
+		if evidence.DataSourceID != row.SourceID || evidence.SnapshotID != originSnapshot || evidence.ID == "" ||
+			evidence.KnowledgeID == "" || evidence.FileVersionID == "" || evidence.Path == "" {
+			return false
+		}
+		refs = append(refs, evidence.KnowledgeID+"|"+evidence.Path)
+	}
+	return equalSortedSourceWikiIDs(stored.SourceRefs, refs)
 }
 
 // verifySourceWikiRemovalsInTx performs one independent last-mile absence proof

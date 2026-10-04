@@ -187,6 +187,11 @@ func (s *sourceWikiService) runSourceWikiBatch(parent context.Context, batchID s
 			case errors.Is(err, repository.ErrSourceWikiBatchInvalidState), errors.Is(err, repository.ErrSourceWikiBatchNotFound):
 				_ = ledger.UpdateProgress(context.WithoutCancel(base), batchID, current.Phase, "failed", current.CurrentTopicKey, "batch execution state no longer matches its fixed plan", current.Cursor, time.Now())
 				return
+			case errors.Is(err, ErrSourceWikiUpdateBaseVersionChanged):
+				if failErr := ledger.UpdateProgress(context.WithoutCancel(base), batchID, current.Phase, "failed", current.CurrentTopicKey, err.Error(), current.Cursor, time.Now()); failErr != nil {
+					logger.Warnf(ctx, "[SourceWikiBatch] batch %s could not persist its page-version fence failure: %v", batchID, failErr)
+				}
+				return
 			default:
 				logger.Warnf(ctx, "[SourceWikiBatch] batch %s step deferred: %v", batchID, err)
 				if !waitSourceWikiBatch(ctx, 10*time.Second) {
@@ -809,10 +814,11 @@ func (s *sourceWikiService) revalidateStagedBatchCandidate(ctx context.Context, 
 	if existing == nil && attempt.StagedPageVersion > 0 {
 		return fail("staged page was removed before publication; safe rebase is unavailable")
 	}
-	if existing != nil && existing.SourceProvenance != nil && existing.SourceProvenance.SourceID != attempt.SourceID {
-		return fail("staged page now contains provenance from another source")
+	mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(ctx, existing, attempt, checkpoint.Evidence)
+	if mergeErr != nil {
+		return false, mergeErr
 	}
-	if !sourceWikiPageSourcesAreMergeable(existing, checkpoint.Evidence) {
+	if !mergeable {
 		return fail("latest page references cannot be safely merged with the staged candidate")
 	}
 	if batch.QADueAt == nil || !time.Now().Before(*batch.QADueAt) || !time.Now().Before(batch.DeadlineAt) ||

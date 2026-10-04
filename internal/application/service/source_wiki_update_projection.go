@@ -35,6 +35,145 @@ type sourceWikiPageContributionProjection struct {
 	replacement    types.WikiPage
 }
 
+type sourceWikiEvidenceOwnerIdentity struct {
+	evidenceID    string
+	sourceFileID  string
+	fileVersionID string
+	snapshotID    string
+}
+
+// sourceWikiEvidenceRefOwners collapses only duplicate ownership of the same
+// evidence/file-version/snapshot tuple. Distinct files or source snapshots
+// remain separate owners even if an evidence identifier is reused.
+func sourceWikiEvidenceRefOwners(pageID string, version int, contributions []types.SourceWikiContribution) []types.SourceWikiEvidenceRef {
+	seen := make(map[sourceWikiEvidenceOwnerIdentity]bool)
+	refs := make([]types.SourceWikiEvidenceRef, 0)
+	for _, contribution := range contributions {
+		for _, evidence := range contribution.Evidence {
+			identity := sourceWikiEvidenceOwnerIdentity{
+				evidenceID: evidence.ID, sourceFileID: evidence.KnowledgeID,
+				fileVersionID: evidence.FileVersionID, snapshotID: evidence.SnapshotID,
+			}
+			if seen[identity] {
+				continue
+			}
+			seen[identity] = true
+			refs = append(refs, types.SourceWikiEvidenceRef{
+				ID: uuid.NewString(), PageID: pageID, Version: version, EvidenceID: evidence.ID,
+				SourceFileID: evidence.KnowledgeID, FileVersionID: evidence.FileVersionID,
+				SnapshotID: evidence.SnapshotID, Path: evidence.Path, CommitSHA: evidence.CommitSHA,
+			})
+		}
+	}
+	return refs
+}
+
+// sourceWikiPageCanBeMergedWithAttempt accepts a foreign page-level primary
+// provenance only when the current page is an exact projection of its stored,
+// independently attributed contributions and contains this exact attempt
+// target. Page-level provenance is deliberately not rewritten here; the
+// projection writer chooses the primary contribution after a successful write.
+func (s *sourceWikiService) sourceWikiPageCanBeMergedWithAttempt(ctx context.Context, page *types.WikiPage,
+	attempt *types.SourceWikiAttempt, evidence []collectedWikiEvidence) (bool, error) {
+	if page == nil {
+		return true, nil
+	}
+	if attempt == nil || page.ID == "" || page.Version <= 0 || attempt.SourceID == "" || attempt.TopicKind == "" ||
+		attempt.TopicKey == "" || attempt.SnapshotID == "" || page.TenantID != attempt.TenantID ||
+		page.KnowledgeBaseID != attempt.KnowledgeBaseID || len(evidence) == 0 {
+		return false, nil
+	}
+	for _, item := range evidence {
+		if item.Evidence.DataSourceID != attempt.SourceID || item.Evidence.SnapshotID != attempt.SnapshotID {
+			return false, nil
+		}
+	}
+	if page.SourceProvenance == nil {
+		return sourceWikiPageSourcesAreMergeable(page, evidence), nil
+	}
+	if page.SourceProvenance.SourceID == attempt.SourceID && sourceWikiPageSourcesAreMergeable(page, evidence) {
+		return true, nil
+	}
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("source Wiki mixed-page contribution reader is not configured")
+	}
+	var rows []types.SourceWikiPageContribution
+	if err := s.db.WithContext(ctx).Where("page_id=? AND revision_id IS NULL", page.ID).
+		Order("source_id ASC, topic_kind ASC, topic_key ASC").Limit(types.SourceWikiContributionMaxCount + 1).Find(&rows).Error; err != nil {
+		return false, err
+	}
+	if len(rows) == 0 || len(rows) > types.SourceWikiContributionMaxCount {
+		return false, nil
+	}
+	seen := make(map[string]bool, len(rows))
+	var primary *sourceWikiStoredContribution
+	targetFound := false
+	bodyParts := make([]string, 0, len(rows))
+	allRefs := make([]string, 0)
+	for i := range rows {
+		row := rows[i]
+		var stored sourceWikiStoredContribution
+		if row.PageID != page.ID || row.PageVersion != page.Version || row.SourceID == "" || row.TopicKind == "" || row.TopicKey == "" ||
+			row.ApplicableSnapshotID == "" || row.TargetSnapshotID == "" || (row.State != "ready" && row.State != "stale") ||
+			len(row.Contribution) == 0 || json.Unmarshal(row.Contribution, &stored) != nil || stored.HasUnattributedBody == nil ||
+			*stored.HasUnattributedBody || stored.SourceProvenance == nil || stored.TopicKind != row.TopicKind || stored.TopicKey != row.TopicKey ||
+			stored.Title == "" || stored.Content == "" || stored.SourceRefs == nil {
+			return false, nil
+		}
+		identity := sourceWikiContributionStorageKey(row.SourceID, row.TopicKind, row.TopicKey)
+		if seen[identity] {
+			return false, nil
+		}
+		seen[identity] = true
+		provenance := stored.SourceProvenance
+		if provenance.SourceID != row.SourceID || provenance.TopicKind != row.TopicKind || provenance.TopicKey != row.TopicKey ||
+			provenance.ApplicableSnapshotID != row.ApplicableSnapshotID || provenance.State != row.State || len(provenance.Evidence) == 0 {
+			return false, nil
+		}
+		originSnapshot := provenance.Evidence[0].SnapshotID
+		if originSnapshot == "" {
+			return false, nil
+		}
+		refs := make([]string, 0, len(provenance.Evidence))
+		for _, sourceEvidence := range provenance.Evidence {
+			if sourceEvidence.DataSourceID != row.SourceID || sourceEvidence.SnapshotID != originSnapshot || sourceEvidence.ID == "" ||
+				sourceEvidence.KnowledgeID == "" || sourceEvidence.FileVersionID == "" || sourceEvidence.Path == "" {
+				return false, nil
+			}
+			refs = append(refs, sourceEvidence.KnowledgeID+"|"+sourceEvidence.Path)
+		}
+		if !equalSortedSourceWikiIDs(stored.SourceRefs, refs) {
+			return false, nil
+		}
+		if row.SourceID == attempt.SourceID && row.TopicKind == attempt.TopicKind && row.TopicKey == attempt.TopicKey {
+			targetFound = true
+		}
+		if page.SourceProvenance.SourceID == row.SourceID && page.SourceProvenance.TopicKind == row.TopicKind &&
+			page.SourceProvenance.TopicKey == row.TopicKey {
+			if primary != nil {
+				return false, nil
+			}
+			copy := stored
+			primary = &copy
+		}
+		bodyParts = append(bodyParts, stored.Content)
+		allRefs = append(allRefs, stored.SourceRefs...)
+	}
+	if !targetFound || primary == nil || !equalSortedSourceWikiIDs(page.SourceRefs, allRefs) ||
+		!sourceWikiBodyCompositionMatches(page.Content, bodyParts) || page.Title != primary.Title || page.Summary != primary.Summary {
+		return false, nil
+	}
+	pageProvenance, err := json.Marshal(page.SourceProvenance)
+	if err != nil {
+		return false, err
+	}
+	primaryProvenance, err := json.Marshal(primary.SourceProvenance)
+	if err != nil {
+		return false, err
+	}
+	return equalJSONBytes(pageProvenance, primaryProvenance), nil
+}
+
 // projectSourceWikiContributionReplacementInTx replaces only the generated
 // source/topic body, then renders the page from all validated stored bodies.
 // Foreign source contributions are never reconstructed from page-level refs.
@@ -257,16 +396,9 @@ func (p *sourceWikiPageContributionProjection) persistInTx(tx *gorm.DB, page *ty
 	if err := tx.Where("page_id=? AND revision_id IS NULL", page.ID).Delete(&types.SourceWikiEvidenceRef{}).Error; err != nil {
 		return err
 	}
-	for _, contribution := range p.updated.Contributions {
-		for _, evidence := range contribution.Evidence {
-			ref := types.SourceWikiEvidenceRef{
-				ID: uuid.NewString(), PageID: page.ID, Version: page.Version, EvidenceID: evidence.ID,
-				SourceFileID: evidence.KnowledgeID, FileVersionID: evidence.FileVersionID,
-				SnapshotID: evidence.SnapshotID, Path: evidence.Path, CommitSHA: evidence.CommitSHA,
-			}
-			if err := tx.Create(&ref).Error; err != nil {
-				return err
-			}
+	for _, ref := range sourceWikiEvidenceRefOwners(page.ID, page.Version, p.updated.Contributions) {
+		if err := tx.Create(&ref).Error; err != nil {
+			return err
 		}
 	}
 	return nil
@@ -276,7 +408,11 @@ func (p *sourceWikiPageContributionProjection) persistInTx(tx *gorm.DB, page *ty
 // Mixed pages are reprojected from the surviving contribution records; any
 // manual text, legacy body, or inconsistent source-ref projection fails closed.
 func (s *sourceWikiService) removeSourceWikiContributionInTx(tx *gorm.DB, payload types.SourceWikiUpdatePayload,
-	row types.SourceWikiPageContribution, now time.Time) (bool, error) {
+	row types.SourceWikiPageContribution, confirmedCompleteSnapshotID string, now time.Time) (bool, error) {
+	if confirmedCompleteSnapshotID == "" || confirmedCompleteSnapshotID != payload.SnapshotID ||
+		row.SourceID != payload.DataSourceID || row.TargetSnapshotID != confirmedCompleteSnapshotID {
+		return false, nil
+	}
 	var page types.WikiPage
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND version=?",
 		row.PageID, payload.TenantID, payload.KnowledgeBaseID, row.PageVersion).Take(&page).Error; err != nil {
@@ -297,12 +433,38 @@ func (s *sourceWikiService) removeSourceWikiContributionInTx(tx *gorm.DB, payloa
 	storedByIdentity := make(map[string]sourceWikiStoredContribution, len(rows))
 	bodyParts := make([]string, 0, len(rows))
 	allRefs := make([]string, 0)
+	validatedPublications := make(map[string]string, len(rows))
 	var primary *sourceWikiStoredContribution
 	removedFound := false
 	for i := range rows {
 		candidate := rows[i]
+		removedTarget := candidate.ID == row.ID && candidate.PageID == row.PageID && candidate.SourceID == payload.DataSourceID &&
+			candidate.TopicKind == row.TopicKind && candidate.TopicKey == row.TopicKey &&
+			candidate.TargetSnapshotID == confirmedCompleteSnapshotID && candidate.ApplicableSnapshotID == row.ApplicableSnapshotID
+		if !removedTarget {
+			if candidate.TargetSnapshotID != candidate.ApplicableSnapshotID {
+				return false, nil
+			}
+			publishedSnapshot, ok := validatedPublications[candidate.SourceID]
+			if !ok {
+				var publication types.SourcePublication
+				if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where(
+					"data_source_id=? AND tenant_id=? AND knowledge_base_id=?", candidate.SourceID, payload.TenantID, payload.KnowledgeBaseID,
+				).Take(&publication).Error; err != nil {
+					if err == gorm.ErrRecordNotFound {
+						return false, nil
+					}
+					return false, err
+				}
+				publishedSnapshot = publication.SnapshotID
+				validatedPublications[candidate.SourceID] = publishedSnapshot
+			}
+			if publishedSnapshot != candidate.ApplicableSnapshotID {
+				return false, nil
+			}
+		}
 		var stored sourceWikiStoredContribution
-		if candidate.PageVersion != page.Version || candidate.TargetSnapshotID != candidate.ApplicableSnapshotID ||
+		if candidate.PageVersion != page.Version || candidate.TargetSnapshotID != candidate.ApplicableSnapshotID && !removedTarget ||
 			candidate.State != "ready" && candidate.State != "stale" || len(candidate.Contribution) == 0 ||
 			json.Unmarshal(candidate.Contribution, &stored) != nil || stored.HasUnattributedBody == nil || *stored.HasUnattributedBody ||
 			stored.SourceProvenance == nil || stored.TopicKind != candidate.TopicKind || stored.TopicKey != candidate.TopicKey ||
@@ -441,16 +603,9 @@ func (s *sourceWikiService) removeSourceWikiContributionInTx(tx *gorm.DB, payloa
 	if err := tx.Where("page_id=? AND revision_id IS NULL", page.ID).Delete(&types.SourceWikiEvidenceRef{}).Error; err != nil {
 		return false, err
 	}
-	for _, contribution := range updated.Contributions {
-		for _, evidence := range contribution.Evidence {
-			ref := types.SourceWikiEvidenceRef{
-				ID: uuid.NewString(), PageID: page.ID, Version: page.Version, EvidenceID: evidence.ID,
-				SourceFileID: evidence.KnowledgeID, FileVersionID: evidence.FileVersionID,
-				SnapshotID: evidence.SnapshotID, Path: evidence.Path, CommitSHA: evidence.CommitSHA,
-			}
-			if err := tx.Create(&ref).Error; err != nil {
-				return false, err
-			}
+	for _, ref := range sourceWikiEvidenceRefOwners(page.ID, page.Version, updated.Contributions) {
+		if err := tx.Create(&ref).Error; err != nil {
+			return false, err
 		}
 	}
 	if err := updateWikiBacklinksInTx(tx, page.KnowledgeBaseID, page.Slug, oldOutLinks, page.OutLinks); err != nil {

@@ -377,7 +377,13 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 		if existing != nil {
 			currentVersion = existing.Version
 			if existing.SourceProvenance != nil && existing.SourceProvenance.SourceID != attempt.SourceID {
-				return cleanup("module page contains provenance from another source and cannot be safely rebased")
+				mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(workCtx, existing, attempt, checkpoint.Evidence)
+				if mergeErr != nil {
+					return cleanup("cannot verify the foreign-primary module page contribution fence: " + mergeErr.Error())
+				}
+				if !mergeable {
+					return cleanup("module page contains provenance from another source without an exact current contribution for this attempt")
+				}
 			}
 		}
 
@@ -395,8 +401,14 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 				}
 			}
 			if attempt.Phase == "merge" {
-				if existing != nil && !sourceWikiPageSourcesAreMergeable(existing, checkpoint.Evidence) {
-					return cleanup("latest module page has source references that cannot be safely merged")
+				if existing != nil {
+					mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(workCtx, existing, attempt, checkpoint.Evidence)
+					if mergeErr != nil {
+						return cleanup("cannot verify the latest module page contribution projection: " + mergeErr.Error())
+					}
+					if !mergeable {
+						return cleanup("latest module page has source references that cannot be safely merged")
+					}
 				}
 				var latest any
 				if existing != nil {
@@ -457,8 +469,14 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			if checkpoint.RebaseRounds >= 2 {
 				return cleanup("module page changed too many times to safely rebase")
 			}
-			if existing != nil && !sourceWikiPageSourcesAreMergeable(existing, checkpoint.Evidence) {
-				return cleanup("latest module page has source references that cannot be safely merged")
+			if existing != nil {
+				mergeable, mergeErr := s.sourceWikiPageCanBeMergedWithAttempt(workCtx, existing, attempt, checkpoint.Evidence)
+				if mergeErr != nil {
+					return cleanup("cannot verify the latest module page contribution projection: " + mergeErr.Error())
+				}
+				if !mergeable {
+					return cleanup("latest module page has source references that cannot be safely merged")
+				}
 			}
 			if checkpoint.SourceDraft == "" {
 				checkpoint.SourceDraft = draftText

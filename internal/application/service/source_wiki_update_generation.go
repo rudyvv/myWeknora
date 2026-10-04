@@ -430,16 +430,30 @@ func (s *sourceWikiService) validateSourceWikiUpdateGenerationBase(ctx context.C
 		SnapshotID string `json:"generation_snapshot_id"`
 	}
 	if json.Unmarshal(item.Details, &details) != nil || details.SnapshotID != snapshotID {
-		return ErrSourceWikiUpdateBaseVersionChanged
+		return fmt.Errorf("%w: generation snapshot does not match the running plan item", ErrSourceWikiUpdateBaseVersionChanged)
 	}
 	if item.PageID == nil {
 		if existing != nil || item.ExpectedPageVersion != 0 || baseVersion != 0 {
-			return ErrSourceWikiUpdateBaseVersionChanged
+			actualPageID, actualVersion := "<missing>", 0
+			if existing != nil {
+				actualPageID, actualVersion = existing.ID, existing.Version
+			}
+			return fmt.Errorf("%w: plan expected no page (version 0), lookup found page %q at version %d with base version %d",
+				ErrSourceWikiUpdateBaseVersionChanged, actualPageID, actualVersion, baseVersion)
 		}
 		return nil
 	}
-	if existing == nil || existing.ID != *item.PageID || existing.Version != item.ExpectedPageVersion || baseVersion != item.ExpectedPageVersion {
-		return ErrSourceWikiUpdateBaseVersionChanged
+	if existing == nil {
+		return fmt.Errorf("%w: plan expected page %q at version %d, lookup found no page (base version %d)",
+			ErrSourceWikiUpdateBaseVersionChanged, *item.PageID, item.ExpectedPageVersion, baseVersion)
+	}
+	if existing.ID != *item.PageID {
+		return fmt.Errorf("%w: plan expected page %q at version %d, slug lookup returned page %q at version %d (base version %d)",
+			ErrSourceWikiUpdateBaseVersionChanged, *item.PageID, item.ExpectedPageVersion, existing.ID, existing.Version, baseVersion)
+	}
+	if existing.Version != item.ExpectedPageVersion || baseVersion != item.ExpectedPageVersion {
+		return fmt.Errorf("%w: page %q version fence expected %d, lookup returned %d and attempt base is %d",
+			ErrSourceWikiUpdateBaseVersionChanged, existing.ID, item.ExpectedPageVersion, existing.Version, baseVersion)
 	}
 	return nil
 }
