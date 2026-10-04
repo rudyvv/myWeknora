@@ -17,6 +17,7 @@ const require = createRequire(import.meta.url)
 const { createApp, h, nextTick, reactive } = require('vue') as typeof import('vue')
 const { createI18n } = require('vue-i18n') as typeof import('vue-i18n')
 const componentPath = fileURLToPath(new URL('./SourceSnapshotRunView.vue', import.meta.url))
+const srcRoot = resolve(dirname(componentPath), '..')
 
 function createTestApp(root: Parameters<typeof createApp>[0]) {
   const app = createApp(root)
@@ -30,14 +31,27 @@ function loadComponent(path: string, stubChildComponents = false): any {
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} as any }
   new Function('require', 'module', 'exports', compiled)((name: string) => {
+    if (name.startsWith('@/') && name.endsWith('.vue')) {
+      return { __esModule: true, default: stubChildComponents ? {} : loadComponent(resolve(srcRoot, name.slice(2)), stubChildComponents) }
+    }
     if (name.endsWith('.vue')) {
       return { __esModule: true, default: stubChildComponents ? {} : loadComponent(resolve(dirname(path), name), stubChildComponents) }
     }
     if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence reader') } }
     if (name === '@/api/knowledge-base') return { async getSourceFile() { return { data: { file_version_id: 'version-one', path: 'src/Service.java', content: 'class Service {}', commit_sha: 'a'.repeat(40), quality: 'structural', symbols: [] } } } }
+    if (name === '@/utils/sourceQuality') return loadTypeScriptModule(resolve(srcRoot, 'utils/sourceQuality.ts'))
     return require(name)
   }, module, module.exports)
   return module.exports.default
+}
+
+function loadTypeScriptModule(path: string): any {
+  const compiled = ts.transpileModule(readFileSync(path, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const module = { exports: {} as any }
+  new Function('require', 'module', 'exports', compiled)(require, module, module.exports)
+  return module.exports
 }
 
 function loadSourceSnapshotRunView(stubChildComponents = false): any {
@@ -164,6 +178,27 @@ test('failed target is not reported as published and absent telemetry stays unkn
   } finally { app.unmount(); host.remove() }
 })
 
+test('legacy failed snapshot uses its resolved commit as detected and target, not publication', async () => {
+  const component = loadSourceSnapshotRunView(true)
+  const host = document.createElement('div')
+  document.body.append(host)
+  const target = 'a'.repeat(40)
+  const previousPublication = 'b'.repeat(40)
+  const result = reactive({ snapshot: {
+    id: 'legacy-failed-run', state: 'failed', commit_sha: target, previous_commit_sha: previousPublication,
+    publication_checked: true, project_id: '123', repository_url: 'https://gitlab.local/repo', manifest_complete: false,
+  }, members: [] })
+  const app = createTestApp({ render: () => h(component, { result }) })
+  app.mount(host)
+  try {
+    await nextTick()
+    assert.ok(host.textContent?.includes(`检测到的 HEAD: ${target}`))
+    assert.ok(host.textContent?.includes(`处理目标: ${target}`))
+    assert.ok(host.textContent?.includes(`已发布 SHA: ${previousPublication}`))
+    assert.ok(!host.textContent?.includes(`已发布 SHA: ${target}`))
+  } finally { app.unmount(); host.remove() }
+})
+
 test('published snapshot proves publication but does not invent a missing SHA', async () => {
   const component = loadSourceSnapshotRunView(true)
   const host = document.createElement('div')
@@ -209,13 +244,14 @@ test('source run view renders only allowlisted measured telemetry and preserves 
       wiki_coverage: { eligible: 1, ready: 0, stale: 0, failed: 0, ungenerated: 1, deferred: 0 },
     },
   })
-  const app = createTestApp({ render: () => h(component, { result, phase: 'published' }) })
+  const app = createTestApp({ render: () => h(component, { result, phase: 'publishing' }) })
   app.mount(host)
   try {
     await nextTick()
     const text = host.textContent || ''
     assert.ok(text.includes('纳入原始字节数: 0 B'))
-    assert.ok(text.includes('获取中: 1234 毫秒'))
+    assert.ok(text.includes('获取中: 1,234 毫秒'))
+    assert.ok(text.includes('运行阶段: 发布中'))
     assert.ok(text.includes('解析中: 0 毫秒'))
     assert.ok(text.includes('建立索引中: 未知'))
     assert.ok(text.includes('结构化: 1'))

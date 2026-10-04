@@ -14,10 +14,8 @@ const pageSize = 50
 const unknown = computed(() => t('datasource.sourceRun.unknown'))
 const telemetry = computed(() => props.result.telemetry?.schema_version === 1 ? props.result.telemetry : undefined)
 
-const detectedSHA = computed(() => props.result.snapshot.detected_commit_sha ||
-  (props.result.snapshot.state === 'published' ? props.result.snapshot.commit_sha : ''))
-const targetSHA = computed(() => props.result.snapshot.target_commit_sha ||
-  (props.result.snapshot.state === 'failed' ? '' : props.result.snapshot.commit_sha))
+const detectedSHA = computed(() => props.result.snapshot.detected_commit_sha || props.result.snapshot.commit_sha)
+const targetSHA = computed(() => props.result.snapshot.target_commit_sha || props.result.snapshot.commit_sha)
 const publishedSHA = computed(() => telemetry.value?.published_commit_sha?.trim() ||
   (props.result.snapshot.state === 'published' ? props.result.snapshot.commit_sha : '') ||
   props.result.snapshot.previous_commit_sha || '')
@@ -46,7 +44,7 @@ const statusLabel = computed(() => {
     ? t(`datasource.sourceRun.states.${props.result.snapshot.state}`)
     : t('datasource.sourceRun.stateUnknown', { state: props.result.snapshot.state || unknown.value })
 })
-const phaseStates = new Set(['queued', 'waiting_for_catch_up', 'retry_wait', 'running', 'target_resolved', 'fetching', 'parsing', 'indexing', 'ready', 'published', 'failed', 'canceled', 'superseded'])
+const phaseStates = new Set(['queued', 'waiting_for_catch_up', 'retry_wait', 'running', 'target_resolved', 'fetching', 'parsing', 'indexing', 'publishing', 'ready', 'published', 'failed', 'canceled', 'superseded'])
 const phaseLabel = computed(() => {
   if (!props.phase) return unknown.value
   return phaseStates.has(props.phase)
