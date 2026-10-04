@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -36,6 +37,36 @@ type sourceWikiUpdateInventoryData struct {
 	complete      bool
 }
 
+var errSourceWikiUpdateInventoryBudgetExceeded = errors.New("source Wiki update inventory exceeded its adapter work budget")
+
+const (
+	sourceWikiUpdateInventoryMaxWork = 1_500_000
+	sourceWikiUpdateInventoryMaxRefs = 500_000
+)
+
+type sourceWikiUpdateInventoryBudget struct {
+	work int
+	refs int
+}
+
+func (b *sourceWikiUpdateInventoryBudget) consume(work, refs int) error {
+	if b == nil {
+		return nil
+	}
+	if work < 0 || refs < 0 || work > sourceWikiUpdateInventoryMaxWork || refs > sourceWikiUpdateInventoryMaxRefs ||
+		b.work > sourceWikiUpdateInventoryMaxWork-work || b.refs > sourceWikiUpdateInventoryMaxRefs-refs {
+		return errSourceWikiUpdateInventoryBudgetExceeded
+	}
+	b.work += work
+	b.refs += refs
+	return nil
+}
+
+type sourceWikiNextImpactIndex struct {
+	parsedFileIDs map[string]bool
+	flowFileIDs   map[string]map[string]bool
+}
+
 // ProcessPublishedSourceWikiUpdate consumes an accepted publication only
 // after rechecking the database-derived source, snapshot, and configuration
 // fences. It plans conservatively: incomplete inputs leave all old answers
@@ -54,7 +85,10 @@ func (s *sourceWikiService) ProcessPublishedSourceWikiUpdate(ctx context.Context
 	if durable.ConfigGeneration != payload.ConfigGeneration {
 		return s.finishSupersededSourceWikiUpdate(ctx, durable.ID, "configuration_generation_changed")
 	}
-	if durable.Status == "completed" || durable.Status == "superseded" {
+	if durable.Status == "completed" {
+		return s.dispatchPendingSourceWikiRegeneration(ctx, payload)
+	}
+	if durable.Status == "superseded" {
 		return nil
 	}
 	if durable.Status != "pending" && durable.Status != "running" {
@@ -79,11 +113,17 @@ func (s *sourceWikiService) ProcessPublishedSourceWikiUpdate(ctx context.Context
 		previous, previousLoaded, err := repository.LoadSourceWikiImpactSnapshot(s.db.WithContext(ctx), payload.TenantID,
 			payload.KnowledgeBaseID, payload.DataSourceID, durable.PreviousSnapshotID, types.SourceWikiImpactPublishedComplete)
 		if err != nil {
+			if reason, deterministic := sourceWikiImpactLoadFallbackReason(err); deterministic {
+				return s.persistSourceWikiImpactFallback(ctx, payload, durable, impact, reason)
+			}
 			return fmt.Errorf("load previous published source Wiki impact snapshot: %w", err)
 		}
 		next, nextLoaded, err := repository.LoadSourceWikiImpactSnapshot(s.db.WithContext(ctx), payload.TenantID,
 			payload.KnowledgeBaseID, payload.DataSourceID, payload.SnapshotID, types.SourceWikiImpactPublishedComplete)
 		if err != nil {
+			if reason, deterministic := sourceWikiImpactLoadFallbackReason(err); deterministic {
+				return s.persistSourceWikiImpactFallback(ctx, payload, durable, impact, reason)
+			}
 			return fmt.Errorf("load next published source Wiki impact snapshot: %w", err)
 		}
 		previous.Relations, err = s.resolveSourceWikiRelations(ctx, payload.TenantID, payload.KnowledgeBaseID,
@@ -101,6 +141,9 @@ func (s *sourceWikiService) ProcessPublishedSourceWikiUpdate(ctx context.Context
 		data, err := s.loadSourceWikiUpdateInventories(ctx, payload, durable.PreviousSnapshotID,
 			previous, previousLoaded, next, nextLoaded)
 		if err != nil {
+			if errors.Is(err, errSourceWikiUpdateInventoryBudgetExceeded) {
+				return s.persistSourceWikiImpactFallback(ctx, payload, durable, impact, "topic_inventory_budget_exceeded")
+			}
 			return fmt.Errorf("load source Wiki topic inventories: %w", err)
 		}
 		inventory = data.next
@@ -115,7 +158,27 @@ func (s *sourceWikiService) ProcessPublishedSourceWikiUpdate(ctx context.Context
 			return s.persistSourceWikiImpactFallback(ctx, payload, durable, impact, "topic_inventory_incomplete")
 		}
 	}
-	return s.persistSourceWikiImpactPlan(ctx, payload, durable, impact, inventory)
+	if err := s.persistSourceWikiImpactPlan(ctx, payload, durable, impact, inventory); err != nil {
+		return err
+	}
+	return s.dispatchPendingSourceWikiRegeneration(ctx, payload)
+}
+
+func sourceWikiImpactLoadFallbackReason(err error) (string, bool) {
+	var loadErr *repository.SourceWikiImpactLoadError
+	if !errors.As(err, &loadErr) || loadErr == nil {
+		return "", false
+	}
+	switch {
+	case errors.Is(err, repository.ErrSourceWikiImpactProofIncomplete):
+		return "impact_load_proof_incomplete_" + string(loadErr.ReasonCode), true
+	case errors.Is(err, repository.ErrSourceWikiImpactSnapshotInvalid):
+		return "impact_load_snapshot_invalid_" + string(loadErr.ReasonCode), true
+	case errors.Is(err, repository.ErrSourceWikiImpactLoadBudgetExceeded):
+		return "impact_load_budget_exceeded_" + string(loadErr.ReasonCode), true
+	default:
+		return "", false
+	}
 }
 
 func (s *sourceWikiService) finishSupersededSourceWikiUpdate(ctx context.Context, planID, reason string) error {
@@ -157,6 +220,7 @@ func (s *sourceWikiService) loadSourceWikiUpdateInventories(ctx context.Context,
 	previousSnapshotID string, previous types.SourceWikiImpactSnapshot, previousLoaded *repository.SourceWikiSkeletonSnapshot,
 	next types.SourceWikiImpactSnapshot, nextLoaded *repository.SourceWikiSkeletonSnapshot) (sourceWikiUpdateInventoryData, error) {
 	data := sourceWikiUpdateInventoryData{complete: true}
+	budget := &sourceWikiUpdateInventoryBudget{}
 	if !previousLoaded.Complete || !nextLoaded.Complete {
 		data.complete = false
 	}
@@ -165,6 +229,9 @@ func (s *sourceWikiService) loadSourceWikiUpdateInventories(ctx context.Context,
 	}
 	if err := validateSourceWikiSkeletonInputSnapshot(nextLoaded, payload.TenantID, payload.DataSourceID, payload.SnapshotID); err != nil {
 		data.complete = false
+	}
+	if err := budget.consume(sourceWikiImpactSnapshotAdapterWork(previous)+sourceWikiImpactSnapshotAdapterWork(next), 0); err != nil {
+		return sourceWikiUpdateInventoryData{}, err
 	}
 	var coverage []types.SourceWikiCoverageTopic
 	if err := s.db.WithContext(ctx).Where("tenant_id=? AND knowledge_base_id=? AND source_id=?", payload.TenantID, payload.KnowledgeBaseID, payload.DataSourceID).
@@ -198,6 +265,17 @@ func (s *sourceWikiService) loadSourceWikiUpdateInventories(ctx context.Context,
 	nextSkeleton, err := sourceWikiSkeletonPlanForImpact(next, nextLoaded)
 	if err != nil {
 		data.complete = false
+	}
+	if err := budget.consume(len(previousSkeleton)+len(nextSkeleton), 0); err != nil {
+		return sourceWikiUpdateInventoryData{}, err
+	}
+	nextIndex, err := buildSourceWikiNextImpactIndex(next, budget)
+	if err != nil {
+		return sourceWikiUpdateInventoryData{}, err
+	}
+	removalEvidence, err := sourceWikiBuildRemovalEvidenceBounded(next, nextLoaded, budget)
+	if err != nil {
+		return sourceWikiUpdateInventoryData{}, err
 	}
 	previousTopics := make(map[string]sourceWikiUpdateTopic)
 	for _, topic := range previousSkeleton {
@@ -248,18 +326,37 @@ func (s *sourceWikiService) loadSourceWikiUpdateInventories(ctx context.Context,
 		}
 		previousTopics[row.TopicKey] = topic
 	}
+	previousTopicWork, previousTopicRefs := sourceWikiUpdateTopicMapWork(previousTopics)
+	if err := budget.consume(previousTopicWork, previousTopicRefs); err != nil {
+		return sourceWikiUpdateInventoryData{}, err
+	}
 	data.previous = makeSourceWikiImpactTopicInventory(previous, previousTopics, previousLoaded, nil, true)
 	nextTopics := make(map[string]sourceWikiUpdateTopic, len(nextSkeleton)+len(previousTopics))
 	for _, topic := range nextSkeleton {
+		if err := budget.consume(1, 0); err != nil {
+			return sourceWikiUpdateInventoryData{}, err
+		}
 		candidate := sourceWikiUpdateTopic{TopicKey: topic.TopicKey, Kind: topic.Kind, ModulePath: topic.ModulePath, SourceOwned: true}
 		if old, exists := previousTopics[topic.TopicKey]; exists {
 			candidate.SourceOwned, candidate.EvidenceSHA = old.SourceOwned, old.EvidenceSHA
-			candidate.DependencyIDs = sourceWikiImpactDependenciesForNext(topic, old, next)
+			var valid bool
+			candidate.DependencyIDs, valid, err = sourceWikiImpactDependenciesForNext(topic, old, nextIndex, budget)
+			if err != nil {
+				return sourceWikiUpdateInventoryData{}, err
+			}
+			if !valid {
+				data.complete = false
+			}
+			if err := budget.consume(len(candidate.DependencyIDs), len(candidate.DependencyIDs)); err != nil {
+				return sourceWikiUpdateInventoryData{}, err
+			}
 		}
 		nextTopics[topic.TopicKey] = candidate
 	}
-	removalEvidence := sourceWikiBuildRemovalEvidence(next, nextLoaded)
 	for key, old := range previousTopics {
+		if err := budget.consume(1, 0); err != nil {
+			return sourceWikiUpdateInventoryData{}, err
+		}
 		if _, exists := nextTopics[key]; exists {
 			continue
 		}
@@ -267,8 +364,18 @@ func (s *sourceWikiService) loadSourceWikiUpdateInventories(ctx context.Context,
 			continue
 		}
 		retained := old
-		retained.DependencyIDs = intersectSourceWikiIDs(old.DependencyIDs, sourceWikiParsedIDs(next))
+		if err := budget.consume(len(old.DependencyIDs), len(old.DependencyIDs)); err != nil {
+			return sourceWikiUpdateInventoryData{}, err
+		}
+		retained.DependencyIDs = intersectSourceWikiIDs(old.DependencyIDs, nextIndex.parsedFileIDs)
 		nextTopics[key] = retained
+	}
+	nextTopicWork, nextTopicRefs := sourceWikiUpdateTopicMapWork(nextTopics)
+	if err := budget.consume(nextTopicWork, nextTopicRefs); err != nil {
+		return sourceWikiUpdateInventoryData{}, err
+	}
+	if err := budget.consume(len(previousLoaded.Members)+len(nextLoaded.Members), 0); err != nil {
+		return sourceWikiUpdateInventoryData{}, err
 	}
 	data.next = makeSourceWikiImpactTopicInventory(next, nextTopics, nextLoaded, nextLoaded, data.complete)
 	data.previous.Complete = data.complete
@@ -365,14 +472,54 @@ func sourceWikiModulePathForTopic(kind, key string) string {
 	return strings.TrimPrefix(key, "module/")
 }
 
-func sourceWikiParsedIDs(snapshot types.SourceWikiImpactSnapshot) map[string]bool {
-	result := make(map[string]bool)
+func sourceWikiImpactSnapshotAdapterWork(snapshot types.SourceWikiImpactSnapshot) int {
+	work := len(snapshot.Members) + len(snapshot.Relations)
 	for _, member := range snapshot.Members {
-		if member.Status == "parsed" && member.SourceFileID != "" {
-			result[member.SourceFileID] = true
+		work += len(member.Facts)
+	}
+	return work
+}
+
+func sourceWikiUpdateTopicMapWork(topics map[string]sourceWikiUpdateTopic) (work, refs int) {
+	work = len(topics)
+	for _, topic := range topics {
+		work += len(topic.DependencyIDs)
+		refs += len(topic.DependencyIDs)
+	}
+	return work, refs
+}
+
+func buildSourceWikiNextImpactIndex(snapshot types.SourceWikiImpactSnapshot, budget *sourceWikiUpdateInventoryBudget) (*sourceWikiNextImpactIndex, error) {
+	index := &sourceWikiNextImpactIndex{parsedFileIDs: make(map[string]bool), flowFileIDs: make(map[string]map[string]bool)}
+	for _, member := range snapshot.Members {
+		work := 1 + len(member.Facts)
+		if err := budget.consume(work, 0); err != nil {
+			return nil, err
+		}
+		if member.Status != "parsed" {
+			continue
+		}
+		if member.SourceFileID != "" {
+			index.parsedFileIDs[member.SourceFileID] = true
+		}
+		if member.Generated {
+			continue
+		}
+		for _, fact := range member.Facts {
+			if fact.Kind != "api_request" || member.SourceFileID == "" {
+				continue
+			}
+			route := sourceWikiCanonicalRoute(fact.HTTPMethod + " " + fact.RoutePath)
+			if route == "" {
+				continue
+			}
+			if index.flowFileIDs[route] == nil {
+				index.flowFileIDs[route] = make(map[string]bool)
+			}
+			index.flowFileIDs[route][member.SourceFileID] = true
 		}
 	}
-	return result
+	return index, nil
 }
 
 func intersectSourceWikiIDs(ids []string, allowed map[string]bool) []string {
@@ -385,14 +532,21 @@ func intersectSourceWikiIDs(ids []string, allowed map[string]bool) []string {
 	return sourceWikiSortedUniqueIDs(result)
 }
 
-func sourceWikiImpactDependenciesForNext(topic types.SourceWikiTopic, old sourceWikiUpdateTopic, next types.SourceWikiImpactSnapshot) []string {
+func sourceWikiImpactDependenciesForNext(topic types.SourceWikiTopic, old sourceWikiUpdateTopic, next *sourceWikiNextImpactIndex,
+	budget *sourceWikiUpdateInventoryBudget) ([]string, bool, error) {
 	if topic.Kind != "flow" {
-		return intersectSourceWikiIDs(old.DependencyIDs, sourceWikiParsedIDs(next))
+		if err := budget.consume(len(old.DependencyIDs), len(old.DependencyIDs)); err != nil {
+			return nil, false, err
+		}
+		return intersectSourceWikiIDs(old.DependencyIDs, next.parsedFileIDs), true, nil
 	}
 	ids := map[string]bool{}
 	for _, relation := range topic.Relations {
+		if err := budget.consume(1, 0); err != nil {
+			return nil, false, err
+		}
 		if relation.DataSourceID != topic.SourceID || relation.SnapshotID != topic.SnapshotID || relation.TenantID == 0 {
-			return nil
+			return nil, false, nil
 		}
 		for _, fileID := range []string{relation.FromFileID, relation.ToFileID} {
 			if fileID != "" {
@@ -402,11 +556,14 @@ func sourceWikiImpactDependenciesForNext(topic types.SourceWikiTopic, old source
 		if relation.Kind == "http_route" {
 			var refs []types.SourceRelationFactRef
 			if len(relation.Context) == 0 || json.Unmarshal(relation.Context, &refs) != nil || refs == nil {
-				return nil
+				return nil, false, nil
+			}
+			if err := budget.consume(len(refs), len(refs)); err != nil {
+				return nil, false, err
 			}
 			for _, ref := range refs {
 				if ref.DataSourceID != topic.SourceID || ref.SnapshotID != topic.SnapshotID || ref.FileID == "" || ref.FileVersionID == "" || ref.Path == "" {
-					return nil
+					return nil, false, nil
 				}
 				ids[ref.FileID] = true
 			}
@@ -414,22 +571,18 @@ func sourceWikiImpactDependenciesForNext(topic types.SourceWikiTopic, old source
 	}
 	if len(topic.Relations) == 0 {
 		route := strings.TrimPrefix(topic.TopicKey, "flow/")
-		for _, member := range next.Members {
-			if member.Status != "parsed" || member.Generated {
-				continue
-			}
-			for _, fact := range member.Facts {
-				if fact.Kind == "api_request" && sourceWikiCanonicalRoute(fact.HTTPMethod+" "+fact.RoutePath) == route && member.SourceFileID != "" {
-					ids[member.SourceFileID] = true
-				}
-			}
+		for id := range next.flowFileIDs[sourceWikiCanonicalRoute(route)] {
+			ids[id] = true
 		}
 	}
 	result := make([]string, 0, len(ids))
 	for id := range ids {
 		result = append(result, id)
 	}
-	return intersectSourceWikiIDs(result, sourceWikiParsedIDs(next))
+	if err := budget.consume(len(result), len(result)); err != nil {
+		return nil, false, err
+	}
+	return intersectSourceWikiIDs(result, next.parsedFileIDs), true, nil
 }
 
 type sourceWikiRemovalEvidence struct {
@@ -440,15 +593,24 @@ type sourceWikiRemovalEvidence struct {
 }
 
 func sourceWikiBuildRemovalEvidence(snapshot types.SourceWikiImpactSnapshot, loaded *repository.SourceWikiSkeletonSnapshot) sourceWikiRemovalEvidence {
+	evidence, _ := sourceWikiBuildRemovalEvidenceBounded(snapshot, loaded, nil)
+	return evidence
+}
+
+func sourceWikiBuildRemovalEvidenceBounded(snapshot types.SourceWikiImpactSnapshot, loaded *repository.SourceWikiSkeletonSnapshot,
+	budget *sourceWikiUpdateInventoryBudget) (sourceWikiRemovalEvidence, error) {
 	evidence := sourceWikiRemovalEvidence{modulePaths: map[string]bool{}, routes: map[string]bool{}}
 	if loaded == nil || !loaded.Complete || !snapshot.ManifestComplete || len(snapshot.Members) != snapshot.ExpectedMemberCount {
-		return evidence
+		return evidence, nil
 	}
 	evidence.manifestComplete = true
 	evidence.flowComplete = snapshot.RelationsComplete && snapshot.ExpectedRelationCount >= 0 &&
 		len(snapshot.Relations) == snapshot.ExpectedRelationCount && len(snapshot.Relations) <= types.SourceWikiSkeletonMaxRelations
 	factCount, factBytes := 0, 0
 	for _, member := range snapshot.Members {
+		if err := budget.consume(1+len(member.Facts), 0); err != nil {
+			return sourceWikiRemovalEvidence{}, err
+		}
 		if member.Path == "" {
 			evidence.manifestComplete = false
 			evidence.flowComplete = false
@@ -486,6 +648,9 @@ func sourceWikiBuildRemovalEvidence(snapshot types.SourceWikiImpactSnapshot, loa
 		}
 	}
 	for _, relation := range snapshot.Relations {
+		if err := budget.consume(1, 0); err != nil {
+			return sourceWikiRemovalEvidence{}, err
+		}
 		if relation.TenantID != snapshot.TenantID || relation.DataSourceID != snapshot.SourceID || relation.SnapshotID != snapshot.SnapshotID {
 			evidence.flowComplete = false
 			continue
@@ -498,7 +663,7 @@ func sourceWikiBuildRemovalEvidence(snapshot types.SourceWikiImpactSnapshot, loa
 			}
 		}
 	}
-	return evidence
+	return evidence, nil
 }
 
 func sourceWikiTopicMayBeProvenRemoved(topic sourceWikiUpdateTopic, evidence sourceWikiRemovalEvidence) bool {
@@ -610,6 +775,12 @@ func (s *sourceWikiService) persistSourceWikiImpactPlan(ctx context.Context, pay
 				return err
 			}
 			if len(rows) <= types.SourceWikiBatchMaxCandidates {
+				for _, row := range rows {
+					if err := markSourceWikiContributionStaleInTx(tx, payload, row, impact.FallbackReason,
+						"The bounded source impact proof was unavailable; this source contribution remains stale.", now); err != nil {
+						return err
+					}
+				}
 				byTopic := make(map[string][]types.SourceWikiPageContribution, len(rows))
 				for _, row := range rows {
 					byTopic[row.TopicKey] = append(byTopic[row.TopicKey], row)
@@ -684,7 +855,7 @@ func (s *sourceWikiService) persistSourceWikiImpactPlan(ctx context.Context, pay
 				}
 				removed := removalProofs[topic.TopicKey]
 				if removed && found {
-					removed, err = removeSourceWikiContributionInTx(tx, payload, row, now)
+					removed, err = s.removeSourceWikiContributionInTx(tx, payload, row, now)
 					if err != nil {
 						return err
 					}
@@ -885,68 +1056,6 @@ func markSourceWikiContributionStaleInTx(tx *gorm.DB, payload types.SourceWikiUp
 		return tx.Model(&types.WikiPage{}).Where("id=? AND version=?", page.ID, page.Version).Update("source_provenance", page.SourceProvenance).Error
 	}
 	return nil
-}
-
-func removeSourceWikiContributionInTx(tx *gorm.DB, payload types.SourceWikiUpdatePayload, row types.SourceWikiPageContribution, now time.Time) (bool, error) {
-	var page types.WikiPage
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND version=?",
-		row.PageID, payload.TenantID, payload.KnowledgeBaseID, row.PageVersion).Take(&page).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return false, nil
-		}
-		return false, err
-	}
-	var count int64
-	if err := tx.Model(&types.SourceWikiPageContribution{}).Where("page_id=? AND revision_id IS NULL", row.PageID).Count(&count).Error; err != nil {
-		return false, err
-	}
-	if count != 1 || page.SourceProvenance == nil || page.SourceProvenance.SourceID != payload.DataSourceID || page.SourceProvenance.TopicKey != row.TopicKey {
-		return false, nil
-	}
-	var fields struct {
-		Content             string                      `json:"content"`
-		HasUnattributedBody *bool                       `json:"has_unattributed_body"`
-		SourceProvenance    *types.SourceWikiProvenance `json:"source_provenance"`
-	}
-	if json.Unmarshal(row.Contribution, &fields) != nil || fields.HasUnattributedBody == nil || *fields.HasUnattributedBody || fields.SourceProvenance == nil {
-		return false, nil
-	}
-	origin := ""
-	if len(fields.SourceProvenance.Evidence) > 0 {
-		origin = fields.SourceProvenance.Evidence[0].SnapshotID
-	}
-	set := types.SourceWikiContributionSet{TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID,
-		Contributions: []types.SourceWikiContribution{{SourceID: payload.DataSourceID, TopicKind: row.TopicKind, TopicKey: row.TopicKey,
-			OriginSnapshotID: origin, ApplicableSnapshotID: fields.SourceProvenance.ApplicableSnapshotID,
-			Body: fields.Content, Evidence: fields.SourceProvenance.Evidence, State: types.SourceWikiContributionStale}}}
-	_, err := source.ReplaceSourceWikiContribution(set, types.SourceWikiContributionTarget{
-		TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID, SourceID: payload.DataSourceID,
-		TopicKind: row.TopicKind, TopicKey: row.TopicKey, SnapshotID: payload.SnapshotID,
-	}, types.SourceWikiContributionOutcome{Kind: types.SourceWikiContributionOutcomeConfirmedDeleted, CompleteSnapshotID: payload.SnapshotID})
-	if err != nil {
-		return false, nil
-	}
-	if err := tx.Where("id=? AND source_id=? AND topic_kind=? AND topic_key=? AND revision_id IS NULL", row.ID, payload.DataSourceID, row.TopicKind, row.TopicKey).
-		Delete(&types.SourceWikiPageContribution{}).Error; err != nil {
-		return false, err
-	}
-	page.SourceProvenance.State = "stale"
-	if err := tx.Model(&types.WikiPage{}).Where("id=? AND version=?", page.ID, page.Version).Updates(map[string]any{
-		"source_provenance": page.SourceProvenance, "updated_at": now,
-	}).Error; err != nil {
-		return false, err
-	}
-	var remaining int64
-	if err := tx.Model(&types.SourceWikiPageContribution{}).Where("page_id=? AND revision_id IS NULL", row.PageID).Count(&remaining).Error; err != nil {
-		return false, err
-	}
-	if remaining == 0 {
-		if err := tx.Model(&types.WikiPage{}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND version=?", page.ID, payload.TenantID, payload.KnowledgeBaseID, page.Version).
-			Update("status", types.WikiPageStatusArchived).Error; err != nil {
-			return false, err
-		}
-	}
-	return true, nil
 }
 
 // verifySourceWikiRemovalsInTx performs one independent last-mile absence proof

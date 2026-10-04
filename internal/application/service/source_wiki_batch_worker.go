@@ -70,6 +70,19 @@ func (s *sourceWikiService) runSourceWikiBatch(parent context.Context, batchID s
 	if parent == nil {
 		parent = context.Background()
 	}
+	defer func() {
+		if parent.Err() != nil {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
+		defer cleanupCancel()
+		if err := s.reconcileSourceWikiUpdateBatch(cleanupCtx, batchID); err != nil {
+			logger.Warnf(cleanupCtx, "[SourceWikiBatch] update-plan reconciliation for batch %s deferred: %v", batchID, err)
+		}
+		if err := s.ResumePendingSourceWikiUpdates(cleanupCtx); err != nil {
+			logger.Warnf(cleanupCtx, "[SourceWikiBatch] pending source Wiki regeneration dispatch deferred after batch %s: %v", batchID, err)
+		}
+	}()
 	base := parent
 	var batch types.SourceWikiBatch
 	if err := s.db.WithContext(base).Where("id = ?", batchID).Take(&batch).Error; err != nil {
@@ -731,6 +744,10 @@ func (s *sourceWikiService) processSourceWikiBatchPublish(ctx context.Context, l
 	currentVersion := 0
 	if existing != nil {
 		currentVersion = existing.Version
+	}
+	if err := s.validateSourceWikiUpdateGenerationBase(ctx, batch.ID, topic.TopicKey, batch.SnapshotID, existing, currentVersion); err != nil {
+		return false, ledger.UpdateProgress(ctx, batch.ID, "publishing", "failed", topic.TopicKey,
+			"the target Wiki page changed after this source update was planned; the stale candidate was not published", batch.Cursor, time.Now())
 	}
 	if currentVersion != attempt.StagedPageVersion {
 		if published, checkErr := s.sourceWikiBatchCandidateAlreadyPublished(ctx, batch, attempt.ID); checkErr != nil {

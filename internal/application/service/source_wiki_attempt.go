@@ -575,7 +575,13 @@ func (s *sourceWikiService) loadOrCreateSourceWikiAttempt(ctx context.Context, l
 		if existingAttempt, found, lookupErr := s.existingSourceWikiBatchTopicAttempt(ctx, ledger, kb, req, module, publication.SnapshotID, &expectedSource, model); lookupErr != nil {
 			return nil, lookupErr
 		} else if found {
+			if err := s.validateSourceWikiUpdateGenerationBase(ctx, req.BatchID, req.TopicKey, publication.SnapshotID, existing, existingAttempt.BasePageVersion); err != nil {
+				return nil, err
+			}
 			return existingAttempt, nil
+		}
+		if err := s.validateSourceWikiUpdateGenerationBase(ctx, req.BatchID, req.TopicKey, publication.SnapshotID, existing, baseVersion); err != nil {
+			return nil, err
 		}
 	}
 	attemptID := uuid.NewString()
