@@ -579,6 +579,123 @@ func TestPlanSourceWikiImpactRejectsCrossSourceAndDuplicateIdentities(t *testing
 	}
 }
 
+func TestPlanSourceWikiImpactStableModuleInventoryDoesNotRescan(t *testing.T) {
+	member := impactMember("app/OrdersController.java", "controller", "controller-v1", "controller",
+		impactFact("java_type", "OrdersController", "", "", 1))
+	previous := impactSnapshot("old", types.SourceWikiImpactPublishedComplete, []types.SourceWikiImpactMember{member}, nil)
+	nextMember := firstWithVersion(member, "controller-v2")
+	next := impactSnapshot("new", types.SourceWikiImpactPreparingComplete, []types.SourceWikiImpactMember{nextMember}, nil)
+	topics := []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+		impactTopic("module/app", "module", "app", "module", []string{"controller"}, true),
+	}
+	modules := []types.SourceWikiImpactModule{impactModule("app", "controller")}
+	oldInventory := impactInventory(previous, topics, modules)
+	newInventory := impactInventory(next, cloneImpactTopics(topics), cloneImpactModules(modules))
+
+	plan, err := PlanSourceWikiImpact(previous, next, []types.SourceWikiImpactTopicInventory{oldInventory, newInventory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.RescanSkeleton || containsString(plan.RescanReasons, "module_inventory_changed") {
+		t.Fatalf("stable module inventory spuriously rescanned: %+v", plan)
+	}
+}
+
+func TestPlanSourceWikiImpactChangedModuleInventoryRescans(t *testing.T) {
+	controller := impactMember("app/OrdersController.java", "controller", "controller-v1", "controller",
+		impactFact("java_type", "OrdersController", "", "", 1))
+	note := impactMember("app/README.md", "note", "note-v1", "note")
+	previous := impactSnapshot("old", types.SourceWikiImpactPublishedComplete, []types.SourceWikiImpactMember{controller, note}, nil)
+	next := impactSnapshot("new", types.SourceWikiImpactPreparingComplete, []types.SourceWikiImpactMember{controller, note}, nil)
+	oldTopics := []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+		impactTopic("module/app", "module", "app", "module", []string{"controller"}, true),
+	}
+	newTopics := cloneImpactTopics(oldTopics)
+	newTopics[1] = impactTopic("module/app", "module", "app", "module", []string{"controller", "note"}, true)
+	oldInventory := impactInventory(previous, oldTopics, []types.SourceWikiImpactModule{impactModule("app", "controller")})
+	newInventory := impactInventory(next, newTopics, []types.SourceWikiImpactModule{impactModule("app", "controller", "note")})
+
+	plan, err := PlanSourceWikiImpact(previous, next, []types.SourceWikiImpactTopicInventory{oldInventory, newInventory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.RescanSkeleton || !containsString(plan.RescanReasons, "module_inventory_changed") {
+		t.Fatalf("changed module inventory missed skeleton rescan: %+v", plan)
+	}
+}
+
+func TestPlanSourceWikiImpactDoesNotRemoveModuleWhenStructuralMemberRemains(t *testing.T) {
+	helper := impactMember("app/Helper.java", "helper", "helper-v1", "helper",
+		impactFact("java_type", "Helper", "", "", 1))
+	previous := impactSnapshot("old", types.SourceWikiImpactPublishedComplete, []types.SourceWikiImpactMember{helper}, nil)
+	next := impactSnapshot("new", types.SourceWikiImpactPreparingComplete,
+		[]types.SourceWikiImpactMember{firstWithVersion(helper, "helper-v2")}, nil)
+	oldInventory := impactInventory(previous, []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+		impactTopic("module/app", "module", "app", "module", []string{"helper"}, true),
+	}, []types.SourceWikiImpactModule{impactModule("app", "helper")})
+	newInventory := impactInventory(next, []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+	}, nil)
+
+	plan, err := PlanSourceWikiImpact(previous, next, []types.SourceWikiImpactTopicInventory{oldInventory, newInventory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Removed) != 0 || !impactHasReason(plan, "module/app", "topic_missing_next_inventory_removal_unproven") {
+		t.Fatalf("retained structural member was treated as module deletion: %+v", plan)
+	}
+}
+
+func TestPlanSourceWikiImpactDoesNotRemoveFlowWhenEntryMemberRemains(t *testing.T) {
+	request := impactMember("web/orders.js", "request", "request-v1", "request",
+		impactFact("api_request", "orders", "GET", "/orders", 1))
+	previous := impactSnapshot("old", types.SourceWikiImpactPublishedComplete, []types.SourceWikiImpactMember{request}, nil)
+	nextRequest := firstWithVersion(request, "request-v2")
+	nextRequest.Facts = nil
+	nextRequest.ExpectedFactCount = 0
+	next := impactSnapshot("new", types.SourceWikiImpactPreparingComplete, []types.SourceWikiImpactMember{nextRequest}, nil)
+	oldInventory := impactInventory(previous, []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+		impactTopic("flow/GET /orders", "flow", "", "flow", []string{"request"}, true),
+	}, nil)
+	newInventory := impactInventory(next, []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+	}, nil)
+
+	plan, err := PlanSourceWikiImpact(previous, next, []types.SourceWikiImpactTopicInventory{oldInventory, newInventory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Removed) != 0 || !impactHasReason(plan, "flow/GET /orders", "topic_missing_next_inventory_removal_unproven") {
+		t.Fatalf("retained flow entry member was treated as route deletion: %+v", plan)
+	}
+}
+
+func TestPlanSourceWikiImpactRemovesFlowWhenEntryMemberDisappears(t *testing.T) {
+	request := impactMember("web/orders.js", "request", "request-v1", "request",
+		impactFact("api_request", "orders", "GET", "/orders", 1))
+	previous := impactSnapshot("old", types.SourceWikiImpactPublishedComplete, []types.SourceWikiImpactMember{request}, nil)
+	next := impactSnapshot("new", types.SourceWikiImpactPreparingComplete, nil, nil)
+	oldInventory := impactInventory(previous, []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+		impactTopic("flow/GET /orders", "flow", "", "flow", []string{"request"}, true),
+	}, nil)
+	newInventory := impactInventory(next, []types.SourceWikiImpactTopicDependencies{
+		impactTopic("system", "system", "", "overview", nil, false),
+	}, nil)
+
+	plan, err := PlanSourceWikiImpact(previous, next, []types.SourceWikiImpactTopicInventory{oldInventory, newInventory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Removed) != 1 || plan.Removed[0].TopicKey != "flow/GET /orders" {
+		t.Fatalf("physically removed flow entry was not confirmed: %+v", plan)
+	}
+}
+
 func impactSnapshot(snapshotID string, stage types.SourceWikiImpactSnapshotStage, members []types.SourceWikiImpactMember,
 	relations []types.SourceCodeRelation) types.SourceWikiImpactSnapshot {
 	return types.SourceWikiImpactSnapshot{

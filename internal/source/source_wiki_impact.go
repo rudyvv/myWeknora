@@ -74,6 +74,11 @@ type sourceWikiImpactRelation struct {
 	CausalRefs  []sourceWikiImpactFactRef
 }
 
+type sourceWikiImpactFlowEntry struct {
+	FileID string
+	Path   string
+}
+
 type sourceWikiImpactRelationDelta struct {
 	Reason      string
 	CausalPaths []string
@@ -90,6 +95,7 @@ type sourceWikiImpactSnapshotIndex struct {
 	input                  types.SourceWikiImpactSnapshot
 	membersByPath          map[string]types.SourceWikiImpactMember
 	membersByID            map[string]types.SourceWikiImpactMember
+	membersByDirectory     map[string]int
 	factsByPath            map[string][]string
 	factEvidenceByFileID   map[string]map[sourceWikiImpactFactIdentity]bool
 	memberFingerprints     map[string]string
@@ -99,6 +105,7 @@ type sourceWikiImpactSnapshotIndex struct {
 	moduleFacts            map[string]bool
 	moduleEvidenceComplete map[string]bool
 	flowFacts              map[string]bool
+	flowEntryMembers       map[string][]sourceWikiImpactFlowEntry
 	flowEvidenceComplete   bool
 	interfaceConfig        map[string]bool
 }
@@ -274,10 +281,11 @@ func PlanSourceWikiImpact(previous, next types.SourceWikiImpactSnapshot,
 	if !work.add(len(previousInventory.modules) + len(nextInventory.modules)) {
 		return fallback("graph_work_limit_exceeded")
 	}
-	moduleChanged, err := sameSourceWikiImpactModuleInventory(previousInventory, nextInventory, work)
+	sameModuleInventory, err := sameSourceWikiImpactModuleInventory(previousInventory, nextInventory, work)
 	if err != nil {
 		return fallback(sourceWikiImpactFallbackReason(err))
 	}
+	moduleChanged := !sameModuleInventory
 	if moduleChanged {
 		structureChanged = true
 	}
@@ -337,7 +345,7 @@ func PlanSourceWikiImpact(previous, next types.SourceWikiImpactSnapshot,
 			continue
 		}
 		if !hasNew {
-			if sourceWikiImpactRemovalProven(oldTopic, nextIndex, nextInventory) {
+			if sourceWikiImpactRemovalProven(oldTopic, previousIndex, nextIndex, previousInventory, nextInventory) {
 				plan.Removed = append(plan.Removed, types.SourceWikiRemovedTopic{TopicKey: topicKey, Reason: "source_contribution_absent_from_complete_next_snapshot"})
 				plan.RescanSkeleton = true
 				plan.RescanReasons = append(plan.RescanReasons, "source_topic_contribution_removed")
@@ -471,12 +479,14 @@ func indexSourceWikiImpactSnapshot(snapshot types.SourceWikiImpactSnapshot, fact
 	index := &sourceWikiImpactSnapshotIndex{
 		input: snapshot, membersByPath: make(map[string]types.SourceWikiImpactMember, len(snapshot.Members)),
 		membersByID:          make(map[string]types.SourceWikiImpactMember, len(snapshot.Members)),
+		membersByDirectory:   make(map[string]int),
 		factsByPath:          make(map[string][]string, len(snapshot.Members)),
 		factEvidenceByFileID: make(map[string]map[sourceWikiImpactFactIdentity]bool, len(snapshot.Members)),
 		memberFingerprints:   make(map[string]string, len(snapshot.Members)),
 		outgoing:             make(map[string][]int), touching: make(map[string][]int),
 		moduleFacts: make(map[string]bool), moduleEvidenceComplete: make(map[string]bool),
-		flowFacts: make(map[string]bool), flowEvidenceComplete: true, interfaceConfig: make(map[string]bool),
+		flowFacts: make(map[string]bool), flowEntryMembers: make(map[string][]sourceWikiImpactFlowEntry),
+		flowEvidenceComplete: true, interfaceConfig: make(map[string]bool),
 	}
 	seenVersions := make(map[string]bool, len(snapshot.Members))
 	for _, member := range snapshot.Members {
@@ -497,6 +507,7 @@ func indexSourceWikiImpactSnapshot(snapshot types.SourceWikiImpactSnapshot, fact
 			return nil, "member_facts_incomplete", nil
 		}
 		modulePath := path.Dir(member.Path)
+		index.membersByDirectory[modulePath]++
 		if _, initialized := index.moduleEvidenceComplete[modulePath]; !initialized {
 			index.moduleEvidenceComplete[modulePath] = true
 		}
@@ -574,6 +585,9 @@ func indexSourceWikiImpactSnapshot(snapshot types.SourceWikiImpactSnapshot, fact
 			if !member.Generated && fact.Kind == "api_request" {
 				if route := canonicalImpactRoute(fact.HTTPMethod + " " + fact.RoutePath); route != "" {
 					index.flowFacts[route] = true
+					index.flowEntryMembers[route] = append(index.flowEntryMembers[route], sourceWikiImpactFlowEntry{
+						FileID: member.SourceFileID, Path: member.Path,
+					})
 				}
 			}
 			if impactFactIsInterfaceConfig(fact) {
@@ -692,6 +706,9 @@ func indexSourceWikiImpactSnapshot(snapshot types.SourceWikiImpactSnapshot, fact
 		if relation.Kind == "http_route" {
 			if route := canonicalImpactRoute(relation.FromKey); route != "" {
 				index.flowFacts[route] = true
+				index.flowEntryMembers[route] = append(index.flowEntryMembers[route], sourceWikiImpactFlowEntry{
+					FileID: relation.FromFileID, Path: relation.FromPath,
+				})
 			}
 		}
 	}
@@ -1334,19 +1351,41 @@ func sourceWikiImpactTopicFingerprint(snapshot *sourceWikiImpactSnapshotIndex, i
 	return sha256Hex(encoded), scope, nil
 }
 
-func sourceWikiImpactRemovalProven(topic types.SourceWikiImpactTopicDependencies, next *sourceWikiImpactSnapshotIndex,
-	nextInventory *sourceWikiImpactInventoryIndex) bool {
+func sourceWikiImpactRemovalProven(topic types.SourceWikiImpactTopicDependencies,
+	previous, next *sourceWikiImpactSnapshotIndex, previousInventory, nextInventory *sourceWikiImpactInventoryIndex) bool {
 	if !topic.SourceOwned {
 		return false
 	}
 	switch topic.Kind {
 	case "module":
-		moduleEvidenceComplete, hasMembers := next.moduleEvidenceComplete[topic.ModulePath]
+		oldModule, hadOldModule := previousInventory.modules[topic.ModulePath]
+		if !hadOldModule || len(oldModule.FileIDs) == 0 || previous.membersByDirectory[topic.ModulePath] == 0 {
+			return false
+		}
 		return !next.moduleFacts[topic.ModulePath] && nextInventory.modules[topic.ModulePath].Path == "" &&
-			(!hasMembers || moduleEvidenceComplete)
+			next.membersByDirectory[topic.ModulePath] == 0
 	case "flow":
 		route := canonicalImpactRoute(strings.TrimPrefix(topic.TopicKey, "flow/"))
-		return route != "" && len(topic.DependencyFileIDs) > 0 && next.flowEvidenceComplete && !next.flowFacts[route]
+		if route == "" || len(topic.DependencyFileIDs) == 0 || !next.flowEvidenceComplete || next.flowFacts[route] {
+			return false
+		}
+		previousEntries := previous.flowEntryMembers[route]
+		if len(previousEntries) == 0 {
+			return false
+		}
+		for _, entry := range previousEntries {
+			if entry.Path != "" {
+				if _, exists := next.membersByPath[entry.Path]; exists {
+					return false
+				}
+			}
+			if entry.FileID != "" {
+				if _, exists := next.membersByID[entry.FileID]; exists {
+					return false
+				}
+			}
+		}
+		return true
 	default:
 		return false
 	}
