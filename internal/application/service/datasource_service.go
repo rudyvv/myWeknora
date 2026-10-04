@@ -144,6 +144,9 @@ func (s *DataSourceService) GetDataSource(ctx context.Context, id string) (*type
 	if err != nil {
 		return nil, err
 	}
+	if err := s.loadSourceCleanup(ctx, ds); err != nil {
+		return nil, err
+	}
 	return ds, nil
 }
 
@@ -153,6 +156,23 @@ func (s *DataSourceService) ListDataSources(ctx context.Context, kbID string) ([
 	if err != nil {
 		logger.Errorf(ctx, "failed to list data sources: %v", err)
 		return nil, err
+	}
+	if cleanupRepo, ok := s.syncLogRepo.(interfaces.SourceLifecycleRepository); ok {
+		ids := make([]string, 0, len(dataSources))
+		for _, ds := range dataSources {
+			if ds != nil {
+				ids = append(ids, ds.ID)
+			}
+		}
+		operations, findErr := cleanupRepo.FindSourceCleanups(ctx, ids)
+		if findErr != nil {
+			return nil, findErr
+		}
+		for _, ds := range dataSources {
+			if ds != nil {
+				ds.SourceCleanup = operations[ds.ID]
+			}
+		}
 	}
 
 	// Attach latest sync log to each data source
@@ -164,6 +184,26 @@ func (s *DataSourceService) ListDataSources(ctx context.Context, kbID string) ([
 	}
 
 	return dataSources, nil
+}
+
+func (s *DataSourceService) loadSourceCleanup(ctx context.Context, ds *types.DataSource) error {
+	if ds == nil {
+		return nil
+	}
+	config, err := ds.ParseConfig()
+	if err != nil || config == nil {
+		return nil
+	}
+	mode, err := datasource.ContentMode(config)
+	if err != nil || mode != datasource.ContentModeSource {
+		return nil
+	}
+	cleanupRepo, ok := s.syncLogRepo.(interfaces.SourceLifecycleRepository)
+	if !ok {
+		return nil
+	}
+	ds.SourceCleanup, err = cleanupRepo.FindSourceCleanup(ctx, ds.ID)
+	return err
 }
 
 // UpdateDataSource updates an existing data source
@@ -180,6 +220,11 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 	if existing.Type == types.ConnectorTypeWeComDrive || ds.Type == types.ConnectorTypeWeComDrive {
 		return nil, datasource.ErrDataSourceInvalid
 	}
+	// Lifecycle state is server-owned and must survive PUT; callers cannot
+	// turn an unbound source back into a connected one by omitting these fields.
+	ds.SourceBindingState = existing.SourceBindingState
+	ds.SourceQueryEnabled = existing.SourceQueryEnabled
+	ds.SourceCleanup = existing.SourceCleanup
 
 	if ds.KnowledgeBaseID == "" {
 		ds.KnowledgeBaseID = existing.KnowledgeBaseID
@@ -242,11 +287,17 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 		if err := datasource.ValidateContentMode(ds.Type, config); err != nil {
 			return nil, err
 		}
+		if isSourceModeDataSource(existing) && !sourceLifecycleAllowsConnection(existing) {
+			mode, modeErr := datasource.ContentMode(config)
+			if modeErr != nil || mode != datasource.ContentModeSource {
+				return nil, fmt.Errorf("an unbound or cleared source cannot change content mode")
+			}
+		}
 		if err := saveSourceRulesVersion(ds, config); err != nil {
 			return nil, err
 		}
 	}
-	if hasCreds && (ds.Type != existing.Type || configActuallyChanged) {
+	if hasCreds && (ds.Type != existing.Type || configActuallyChanged) && sourceLifecycleAllowsConnection(existing) {
 		if err := s.validateDataSourceConfig(ctx, ds); err != nil {
 			return nil, err
 		}
@@ -292,6 +343,9 @@ func (s *DataSourceService) UpdateDataSourceCredentials(
 	existing, err := s.dsRepo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if isSourceModeDataSource(existing) && !sourceLifecycleAllowsConnection(existing) {
+		return nil, datasource.ErrDataSourceNotActive
 	}
 	parsed, err := existing.ParseConfig()
 	if err != nil {
@@ -350,7 +404,8 @@ func (s *DataSourceService) advanceSourceConfigGeneration(ctx context.Context, b
 	if modeOf(before) != datasource.ContentModeSource && modeOf(after) != datasource.ContentModeSource {
 		return nil
 	}
-	return control.AdvanceSourceConfig(ctx, after, modeOf(after) == datasource.ContentModeSource)
+	enabled := modeOf(after) == datasource.ContentModeSource && sourceLifecycleAllowsConnection(after)
+	return control.AdvanceSourceConfig(ctx, after, enabled)
 }
 
 // restoreSourceConfigurationFromStored repairs the brief pre-write fence when
@@ -369,7 +424,7 @@ func (s *DataSourceService) restoreSourceConfigurationFromStored(ctx context.Con
 	enabled := false
 	if config, err := current.ParseConfig(); err == nil {
 		mode, err := datasource.ContentMode(config)
-		enabled = err == nil && mode == datasource.ContentModeSource
+		enabled = err == nil && mode == datasource.ContentModeSource && sourceLifecycleAllowsConnection(current)
 	}
 	if err := control.AdvanceSourceConfig(ctx, current, enabled); err != nil {
 		logger.Warnf(ctx, "failed to restore persisted source config generation ds=%s: %v", dataSourceID, err)
@@ -489,6 +544,9 @@ func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string)
 	if err != nil {
 		return err
 	}
+	if isSourceModeDataSource(ds) && !sourceLifecycleAllowsConnection(ds) {
+		return fmt.Errorf("unbound or cleared source cannot be validated")
+	}
 
 	// Get connector
 	connector, err := s.connectorRegistry.Get(ds.Type)
@@ -539,6 +597,9 @@ func (s *DataSourceService) ListAvailableResources(
 	if err != nil {
 		return nil, err
 	}
+	if isSourceModeDataSource(ds) && !sourceLifecycleAllowsConnection(ds) {
+		return nil, fmt.Errorf("unbound or cleared source cannot enumerate external resources")
+	}
 
 	// Get connector
 	connector, err := s.connectorRegistry.Get(ds.Type)
@@ -580,6 +641,9 @@ func (s *DataSourceService) ResolveResourceAncestors(
 	if err != nil {
 		return nil, err
 	}
+	if isSourceModeDataSource(ds) && !sourceLifecycleAllowsConnection(ds) {
+		return nil, fmt.Errorf("unbound or cleared source cannot enumerate external resources")
+	}
 
 	connector, err := s.connectorRegistry.Get(ds.Type)
 	if err != nil {
@@ -620,6 +684,9 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		return nil, err
 	}
 	sourceMode := mode == datasource.ContentModeSource
+	if sourceMode && !sourceLifecycleAllowsConnection(ds) {
+		return nil, fmt.Errorf("unbound or cleared source cannot be synchronized")
+	}
 	if sourceMode && ds.Status == types.DataSourceStatusPaused {
 		return nil, datasource.ErrDataSourceNotActive
 	}
@@ -777,11 +844,114 @@ func (s *DataSourceService) PauseDataSource(ctx context.Context, id string) erro
 	return nil
 }
 
+// UnbindDataSource fences all connector work while retaining every currently
+// published source read. There is intentionally no implicit rebind path.
+func (s *DataSourceService) UnbindDataSource(ctx context.Context, id string) (*types.DataSource, error) {
+	ds, err := s.GetDataSource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !isSourceModeDataSource(ds) {
+		return nil, fmt.Errorf("unbind is only available for source-mode data sources")
+	}
+	control, ok := s.syncLogRepo.(interfaces.SourceLifecycleRepository)
+	if !ok {
+		return nil, datasource.ErrSourcePipelineUnavailable
+	}
+	if err := control.UnbindSourceSync(ctx, ds); err != nil {
+		return nil, err
+	}
+	s.scheduler.Remove(id)
+	updated, err := s.GetDataSource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceUpdated,
+		"data_source", ds.ID, types.AuditOutcomeSuccess,
+		map[string]any{"name": ds.Name, "type": ds.Type, "source_lifecycle": "unbound"})
+	return updated, nil
+}
+
+// ClearSource immediately denies source reads and persists a resumable
+// current-and-history withdrawal before any bounded physical cleanup begins.
+func (s *DataSourceService) ClearSource(ctx context.Context, id string, confirm bool, scope string) (*types.DataSource, error) {
+	if !confirm || scope != types.SourceCleanupScopeCurrentAndHistory {
+		return nil, fmt.Errorf("clear-source requires confirm=true and scope=%q", types.SourceCleanupScopeCurrentAndHistory)
+	}
+	ds, err := s.GetDataSource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !isSourceModeDataSource(ds) {
+		return nil, fmt.Errorf("clear-source is only available for source-mode data sources")
+	}
+	control, ok := s.syncLogRepo.(interfaces.SourceLifecycleRepository)
+	if !ok {
+		return nil, datasource.ErrSourcePipelineUnavailable
+	}
+	if _, err := control.AcceptSourceCleanup(ctx, ds, scope); err != nil {
+		return nil, err
+	}
+	s.scheduler.Remove(id)
+	updated, err := s.GetDataSource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceUpdated,
+		"data_source", ds.ID, types.AuditOutcomeAccepted,
+		map[string]any{"name": ds.Name, "type": ds.Type, "source_lifecycle": "clearing"})
+	return updated, nil
+}
+
+func (s *DataSourceService) RetryClearSource(ctx context.Context, id string, operationID string) (*types.DataSource, error) {
+	if operationID == "" {
+		return nil, fmt.Errorf("operation_id is required")
+	}
+	ds, err := s.GetDataSource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !isSourceModeDataSource(ds) {
+		return nil, fmt.Errorf("clear-source retry is only available for source-mode data sources")
+	}
+	control, ok := s.syncLogRepo.(interfaces.SourceLifecycleRepository)
+	if !ok {
+		return nil, datasource.ErrSourcePipelineUnavailable
+	}
+	if _, err := control.RetrySourceCleanup(ctx, ds, operationID); err != nil {
+		return nil, err
+	}
+	updated, err := s.GetDataSource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func isSourceModeDataSource(ds *types.DataSource) bool {
+	if ds == nil {
+		return false
+	}
+	config, err := ds.ParseConfig()
+	if err != nil || config == nil {
+		return false
+	}
+	mode, err := datasource.ContentMode(config)
+	return err == nil && mode == datasource.ContentModeSource
+}
+
+func sourceLifecycleAllowsConnection(ds *types.DataSource) bool {
+	return datasource.SourceLifecycleAllowsConnection(ds)
+}
+
 // ResumeDataSource resumes a paused data source
 func (s *DataSourceService) ResumeDataSource(ctx context.Context, id string) error {
 	ds, err := s.GetDataSource(ctx, id)
 	if err != nil {
 		return err
+	}
+	if isSourceModeDataSource(ds) && !sourceLifecycleAllowsConnection(ds) {
+		return fmt.Errorf("an unbound or cleared source cannot be resumed")
 	}
 
 	ds.Status = types.DataSourceStatusActive

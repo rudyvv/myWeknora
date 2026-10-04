@@ -6350,6 +6350,23 @@ export default {
     paused: 'Paused',
     resumed: 'Resumed',
     pauseFailed: 'Failed to pause',
+    unbind: 'Unbind source',
+    unbindConfirm: 'Unbind this repository source? Its current and historical knowledge will remain available for search and reading.',
+    unbindSuccess: 'Source unbound; its knowledge is retained',
+    unbindFailed: 'Failed to unbind source',
+    sourceClear: 'Clear source knowledge',
+    sourceClearConfirm: 'Clear this source’s currently indexed and historical repository knowledge from this knowledge base? Once accepted, it will no longer be available for search or reading.',
+    sourceClearSubmitted: 'Source knowledge clearing started',
+    sourceClearFailed: 'Failed to start source knowledge clearing',
+    sourceClearRetry: 'Retry clearing source knowledge',
+    sourceClearRetrySubmitted: 'Source knowledge clearing retried',
+    sourceClearRetryFailed: 'Failed to retry source knowledge clearing',
+    sourceLifecycle: {
+      binding: { bound: 'Bound', unbound: 'Unbound' },
+      queryEnabled: 'Knowledge available for search and reading',
+      queryDisabled: 'Knowledge unavailable for search and reading',
+      cleanup: { pending: 'Clearing queued', running: 'Clearing', failed: 'Clearing failed', completed: 'Knowledge cleared' }
+    },
     logs: 'Logs',
     syncModeLabel: 'Sync mode',
     syncMode: {

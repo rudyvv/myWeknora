@@ -76,7 +76,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 
 	for _, ds := range dataSources {
-		schedule, _ := scheduledSync(ds)
+		schedule, sourceMode := scheduledSync(ds)
+		if sourceMode && !SourceLifecycleAllowsConnection(ds) {
+			continue
+		}
 		if schedule == "" {
 			continue
 		}
@@ -86,6 +89,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		}
 	}
 	s.recoverSourceTriggers(ctx, dataSources)
+	s.processSourceCleanups(ctx)
 	s.relaySourcePublicationOutbox(ctx)
 	s.collectRetiredSourceVersions(ctx)
 	if _, err := s.cron.AddFunc("@every 30s", func() { s.reconcileSourceTriggers(context.Background()) }); err != nil {
@@ -108,6 +112,9 @@ func (s *Scheduler) AddOrUpdate(ds *types.DataSource) error {
 	schedule, sourceMode := scheduledSync(ds)
 	active := ds != nil && ds.Status == types.DataSourceStatusActive
 	errorSource := ds != nil && ds.Status == types.DataSourceStatusError && sourceMode && GitLabSourceReconciliationEligible(ds)
+	if sourceMode && !SourceLifecycleAllowsConnection(ds) {
+		active, errorSource = false, false
+	}
 	if (active || errorSource) && sourceMode {
 		if err := s.recoverQueuedSourceRuns(context.Background(), ds); err != nil {
 			logger.Errorf(context.Background(), "[Scheduler] failed to recover source triggers for ds=%s: %v", ds.ID, err)
@@ -220,6 +227,7 @@ func (s *Scheduler) recoverQueuedSourceRuns(ctx context.Context, ds *types.DataS
 }
 
 func (s *Scheduler) reconcileSourceTriggers(ctx context.Context) {
+	s.processSourceCleanups(ctx)
 	s.relaySourcePublicationOutbox(ctx)
 	s.collectRetiredSourceVersions(ctx)
 	if _, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
@@ -267,12 +275,27 @@ func (s *Scheduler) recoverSourceTriggers(ctx context.Context, activeSources []*
 	}
 	for _, ds := range activeSources {
 		_, sourceMode := scheduledSync(ds)
-		if !sourceMode {
+		if !sourceMode || !SourceLifecycleAllowsConnection(ds) {
 			continue
 		}
 		if err := s.recoverQueuedSourceRuns(ctx, ds); err != nil {
 			logger.Errorf(ctx, "[Scheduler] failed to recover source triggers for ds=%s: %v", ds.ID, err)
 		}
+	}
+}
+
+func (s *Scheduler) processSourceCleanups(ctx context.Context) {
+	repository, ok := s.syncLogRepo.(interfaces.SourceLifecycleRepository)
+	if !ok {
+		return
+	}
+	processed, err := repository.ProcessSourceCleanupBatch(ctx, 20)
+	if err != nil {
+		logger.Errorf(ctx, "[Scheduler] failed to process source cleanup operations: %v", err)
+		return
+	}
+	if processed > 0 {
+		logger.Infof(ctx, "[Scheduler] advanced %d source cleanup operation(s)", processed)
 	}
 }
 

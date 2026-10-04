@@ -53,6 +53,28 @@ func TestDataSourceResponse_NilSafe(t *testing.T) {
 	assert.Equal(t, []*DataSourceResponse{}, NewDataSourceResponses(nil))
 }
 
+func TestDataSourceResponse_SourceLifecycleIsSourceOnly(t *testing.T) {
+	sourceCfg := types.DataSourceConfig{
+		Type:     types.ConnectorTypeGitLab,
+		Settings: map[string]interface{}{"content_mode": "source"},
+	}
+	sourceConfig, err := sourceCfg.ToJSON()
+	assert.NoError(t, err)
+	sourceBody, err := json.Marshal(NewDataSourceResponse(&types.DataSource{ID: "source", Config: sourceConfig}))
+	assert.NoError(t, err)
+	assert.Contains(t, string(sourceBody), `"source_lifecycle":{"binding_state":"bound","query_enabled":true}`)
+
+	documentCfg := types.DataSourceConfig{
+		Type:     types.ConnectorTypeGitLab,
+		Settings: map[string]interface{}{"content_mode": "document"},
+	}
+	documentConfig, err := documentCfg.ToJSON()
+	assert.NoError(t, err)
+	documentBody, err := json.Marshal(NewDataSourceResponse(&types.DataSource{ID: "document", Config: documentConfig}))
+	assert.NoError(t, err)
+	assert.NotContains(t, string(documentBody), "source_lifecycle")
+}
+
 func TestDataSourceResponse_RSSFeedURLsFromCredentials(t *testing.T) {
 	cfg := types.DataSourceConfig{
 		Type: types.ConnectorTypeRSS,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -16,6 +17,9 @@ type stubDataSourceService struct {
 	interfaces.DataSourceService
 	getSyncLogs   func(ctx context.Context, dsID string, limit int, offset int) ([]*types.SyncLog, error)
 	getDataSource func(ctx context.Context, id string) (*types.DataSource, error)
+	unbind        func(ctx context.Context, id string) (*types.DataSource, error)
+	clear         func(ctx context.Context, id string, confirm bool, scope string) (*types.DataSource, error)
+	retryClear    func(ctx context.Context, id string, operationID string) (*types.DataSource, error)
 }
 
 func (s *stubDataSourceService) GetSyncLogs(ctx context.Context, dsID string, limit int, offset int) ([]*types.SyncLog, error) {
@@ -28,6 +32,27 @@ func (s *stubDataSourceService) GetSyncLogs(ctx context.Context, dsID string, li
 func (s *stubDataSourceService) GetDataSource(ctx context.Context, id string) (*types.DataSource, error) {
 	if s.getDataSource != nil {
 		return s.getDataSource(ctx, id)
+	}
+	return nil, nil
+}
+
+func (s *stubDataSourceService) UnbindDataSource(ctx context.Context, id string) (*types.DataSource, error) {
+	if s.unbind != nil {
+		return s.unbind(ctx, id)
+	}
+	return nil, nil
+}
+
+func (s *stubDataSourceService) ClearSource(ctx context.Context, id string, confirm bool, scope string) (*types.DataSource, error) {
+	if s.clear != nil {
+		return s.clear(ctx, id, confirm, scope)
+	}
+	return nil, nil
+}
+
+func (s *stubDataSourceService) RetryClearSource(ctx context.Context, id string, operationID string) (*types.DataSource, error) {
+	if s.retryClear != nil {
+		return s.retryClear(ctx, id, operationID)
 	}
 	return nil, nil
 }
@@ -55,6 +80,9 @@ func newDataSourceTestRouter(h *DataSourceHandler) *gin.Engine {
 		c.Next()
 	})
 	r.GET("/datasource/:id/logs", h.GetSyncLogs)
+	r.POST("/datasource/:id/unbind", h.UnbindDataSource)
+	r.POST("/datasource/:id/clear-source", h.ClearSource)
+	r.POST("/datasource/:id/clear-source/retry", h.RetryClearSource)
 	return r
 }
 
@@ -62,6 +90,95 @@ func withDSCtx(req *http.Request, tenantID uint64) *http.Request {
 	ctx := req.Context()
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
 	return req.WithContext(ctx)
+}
+
+func TestDataSource_SourceLifecycleHTTPContracts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	config, err := (func() (*types.DataSourceConfig, error) {
+		cfg := &types.DataSourceConfig{Type: types.ConnectorTypeGitLab, Settings: map[string]interface{}{"content_mode": "source"}}
+		blob, marshalErr := cfg.ToJSON()
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		parsed := &types.DataSourceConfig{}
+		if unmarshalErr := json.Unmarshal(blob, parsed); unmarshalErr != nil {
+			return nil, unmarshalErr
+		}
+		return parsed, nil
+	})()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configBlob, err := config.ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataSource := func(binding string, queryEnabled bool, cleanup *types.SourceCleanupOperation) *types.DataSource {
+		return &types.DataSource{ID: "ds1", KnowledgeBaseID: "kb1", Config: configBlob,
+			SourceBindingState: binding, SourceQueryEnabled: queryEnabled, SourceCleanup: cleanup}
+	}
+	service := &stubDataSourceService{
+		getDataSource: func(_ context.Context, _ string) (*types.DataSource, error) {
+			return dataSource(types.SourceBindingBound, true, nil), nil
+		},
+		unbind: func(_ context.Context, id string) (*types.DataSource, error) {
+			if id != "ds1" {
+				t.Fatalf("unexpected source id %q", id)
+			}
+			return dataSource(types.SourceBindingUnbound, true, nil), nil
+		},
+		clear: func(_ context.Context, id string, confirm bool, scope string) (*types.DataSource, error) {
+			if id != "ds1" || !confirm || scope != types.SourceCleanupScopeCurrentAndHistory {
+				t.Fatalf("unexpected clear request: %q %t %q", id, confirm, scope)
+			}
+			return dataSource(types.SourceBindingUnbound, false, &types.SourceCleanupOperation{
+				ID: "op1", Status: types.SourceCleanupPending, Retryable: false,
+			}), nil
+		},
+		retryClear: func(_ context.Context, id string, operationID string) (*types.DataSource, error) {
+			if id != "ds1" || operationID != "op1" {
+				t.Fatalf("unexpected retry request: %q %q", id, operationID)
+			}
+			return dataSource(types.SourceBindingUnbound, false, &types.SourceCleanupOperation{
+				ID: "op1", Status: types.SourceCleanupPending, Retryable: false,
+			}), nil
+		},
+	}
+	kbService := &stubKBServiceForDS{getByID: func(_ context.Context, _ string) (*types.KnowledgeBase, error) {
+		return &types.KnowledgeBase{ID: "kb1", TenantID: 1}, nil
+	}}
+	router := newDataSourceTestRouter(NewDataSourceHandler(service, kbService))
+	for _, test := range []struct {
+		name, path, body string
+		status           int
+		wantLifecycle    string
+	}{
+		{name: "unbind", path: "/datasource/ds1/unbind", body: `{}`, status: http.StatusOK,
+			wantLifecycle: `"source_lifecycle":{"binding_state":"unbound","query_enabled":true}`},
+		{name: "clear", path: "/datasource/ds1/clear-source", body: `{"confirm":true,"scope":"current_and_history"}`, status: http.StatusAccepted,
+			wantLifecycle: `"source_lifecycle":{"binding_state":"unbound","query_enabled":false,"cleanup":{"id":"op1","status":"pending","retryable":false}}`},
+		{name: "retry", path: "/datasource/ds1/clear-source/retry", body: `{"operation_id":"op1"}`, status: http.StatusAccepted,
+			wantLifecycle: `"source_lifecycle":{"binding_state":"unbound","query_enabled":false,"cleanup":{"id":"op1","status":"pending","retryable":false}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := withDSCtx(httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body)), 1)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("expected %d, got %d: %s", test.status, response.Code, response.Body.String())
+			}
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := envelope["data"]; !ok || envelope["status"] != nil {
+				t.Fatalf("expected the fixed data envelope, got %s", response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), test.wantLifecycle) {
+				t.Fatalf("response missing lifecycle state %s: %s", test.wantLifecycle, response.Body.String())
+			}
+		})
+	}
 }
 
 func TestDataSource_GetSyncLogs_ValidLimitWithinBounds(t *testing.T) {

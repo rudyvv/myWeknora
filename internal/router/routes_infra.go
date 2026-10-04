@@ -331,6 +331,9 @@ func RegisterDataSourceRoutes(
 		ds.POST("/:id/sync", g.Admin(), handler.ManualSync)
 		ds.POST("/:id/pause", g.Admin(), handler.PauseDataSource)
 		ds.POST("/:id/resume", g.Admin(), handler.ResumeDataSource)
+		ds.POST("/:id/unbind", g.Admin(), handler.UnbindDataSource)
+		ds.POST("/:id/clear-source", g.Admin(), handler.ClearSource)
+		ds.POST("/:id/clear-source/retry", g.Admin(), handler.RetryClearSource)
 
 		// Sync logs — Viewer+ (read-only audit trail)
 		ds.GET("/:id/logs", g.Viewer(), handler.GetSyncLogs)

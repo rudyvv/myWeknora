@@ -114,6 +114,13 @@ type DataSource struct {
 	// Number of days to keep sync logs (default: 30)
 	SyncLogRetentionDays int `json:"sync_log_retention_days" gorm:"default:30"`
 
+	// Source-only lifecycle columns. They are persisted for immediate query
+	// revocation and worker fencing, but exposed through the redacted DTO only
+	// for source-mode data sources.
+	SourceBindingState string                  `json:"-" gorm:"column:source_binding_state;default:bound"`
+	SourceQueryEnabled bool                    `json:"-" gorm:"column:source_query_enabled;default:true"`
+	SourceCleanup      *SourceCleanupOperation `json:"-" gorm:"-"`
+
 	// Creation timestamp
 	CreatedAt time.Time `json:"created_at"`
 

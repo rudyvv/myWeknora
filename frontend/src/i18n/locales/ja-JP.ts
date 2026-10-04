@@ -6350,6 +6350,23 @@ export default {
     paused: '一時停止しました',
     resumed: '再開しました',
     pauseFailed: '一時停止に失敗しました',
+    unbind: 'ソースの連携を解除',
+    unbindConfirm: 'このリポジトリソースの連携を解除しますか？現在および過去のナレッジは引き続き検索・閲覧できます。',
+    unbindSuccess: 'ソースの連携を解除しました。ナレッジは保持されています',
+    unbindFailed: 'ソースの連携解除に失敗しました',
+    sourceClear: 'ソースのナレッジを消去',
+    sourceClearConfirm: 'このナレッジベースから、このソースの現在インデックス済みおよび過去のリポジトリナレッジを消去しますか？リクエストが受理されると、すぐに検索・閲覧できなくなります。',
+    sourceClearSubmitted: 'ソースナレッジの消去を開始しました',
+    sourceClearFailed: 'ソースナレッジの消去を開始できませんでした',
+    sourceClearRetry: 'ソースナレッジの消去を再試行',
+    sourceClearRetrySubmitted: 'ソースナレッジの消去を再試行しました',
+    sourceClearRetryFailed: 'ソースナレッジの消去を再試行できませんでした',
+    sourceLifecycle: {
+      binding: { bound: '連携中', unbound: '連携解除済み' },
+      queryEnabled: 'ナレッジを検索・閲覧できます',
+      queryDisabled: 'ナレッジを検索・閲覧できません',
+      cleanup: { pending: '消去待ち', running: '消去中', failed: '消去失敗', completed: 'ナレッジを消去しました' }
+    },
     logs: 'ログ',
     syncModeLabel: '同期モード',
     syncMode: {

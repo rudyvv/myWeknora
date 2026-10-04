@@ -509,6 +509,104 @@ func (h *DataSourceHandler) ResumeDataSource(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "active"})
 }
 
+// UnbindDataSource disconnects a source without withdrawing its published
+// content. The request is intentionally empty; source-mode validation and
+// ownership checks happen before the lifecycle service is called.
+func (h *DataSourceHandler) UnbindDataSource(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := h.getTenantID(c)
+	if tenantID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	ds, status, msg := h.getOwnedDataSource(ctx, tenantID, c.Param("id"))
+	if status != http.StatusOK {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var request map[string]any
+	if err := c.ShouldBindJSON(&request); err != nil || request == nil || len(request) != 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unbind request must be an empty JSON object"})
+		return
+	}
+	lifecycle, ok := h.service.(interfaces.DataSourceLifecycleService)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source lifecycle is unavailable"})
+		return
+	}
+	updated, err := lifecycle.UnbindDataSource(ctx, ds.ID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": dto.NewDataSourceResponse(updated)})
+}
+
+func (h *DataSourceHandler) ClearSource(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := h.getTenantID(c)
+	if tenantID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	ds, status, msg := h.getOwnedDataSource(ctx, tenantID, c.Param("id"))
+	if status != http.StatusOK {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var request struct {
+		Confirm bool   `json:"confirm"`
+		Scope   string `json:"scope"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil || !request.Confirm || request.Scope != types.SourceCleanupScopeCurrentAndHistory {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "confirm=true and scope=current_and_history are required"})
+		return
+	}
+	lifecycle, ok := h.service.(interfaces.DataSourceLifecycleService)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source lifecycle is unavailable"})
+		return
+	}
+	updated, err := lifecycle.ClearSource(ctx, ds.ID, request.Confirm, request.Scope)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"data": dto.NewDataSourceResponse(updated)})
+}
+
+func (h *DataSourceHandler) RetryClearSource(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID := h.getTenantID(c)
+	if tenantID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	ds, status, msg := h.getOwnedDataSource(ctx, tenantID, c.Param("id"))
+	if status != http.StatusOK {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	var request struct {
+		OperationID string `json:"operation_id"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil || request.OperationID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "operation_id is required"})
+		return
+	}
+	lifecycle, ok := h.service.(interfaces.DataSourceLifecycleService)
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "source lifecycle is unavailable"})
+		return
+	}
+	updated, err := lifecycle.RetryClearSource(ctx, ds.ID, request.OperationID)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"data": dto.NewDataSourceResponse(updated)})
+}
+
 // GetSyncLogs godoc
 // @Summary Get sync logs
 // @Description Retrieve sync history for a data source

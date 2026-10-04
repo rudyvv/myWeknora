@@ -87,7 +87,25 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
 		return errors.New("data source id is empty")
 	}
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(ds).Updates(ds).Error; err != nil {
+		var current types.DataSource
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", ds.ID).Take(&current).Error; err != nil {
+			return err
+		}
+		if sourceLifecycleUpdateManaged(&current, ds) {
+			if err := validateSourceLifecycleUpdate(&current, ds); err != nil {
+				return err
+			}
+			result := tx.Model(&types.DataSource{}).
+				Where("id=? AND tenant_id=? AND source_binding_state=? AND source_query_enabled=?",
+					current.ID, current.TenantID, current.SourceBindingState, current.SourceQueryEnabled).
+				Updates(ds)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errSourceConfigurationNotCurrent
+			}
+		} else if err := tx.Model(ds).Updates(ds).Error; err != nil {
 			return err
 		}
 		// GORM Updates(struct) deliberately skips zero values, which would make
@@ -96,6 +114,47 @@ func (r *DataSourceRepository) Update(ctx context.Context, ds *types.DataSource)
 			Where("id = ?", ds.ID).
 			UpdateColumn("sync_deletions", ds.SyncDeletions).Error
 	})
+}
+
+func sourceLifecycleUpdateManaged(current, incoming *types.DataSource) bool {
+	if current == nil || incoming == nil {
+		return false
+	}
+	return sourceModeEnabled(current) || sourceModeEnabled(incoming) ||
+		current.SourceBindingState == types.SourceBindingUnbound ||
+		incoming.SourceBindingState == types.SourceBindingUnbound
+}
+
+func validateSourceLifecycleUpdate(current, incoming *types.DataSource) error {
+	if current == nil || incoming == nil || current.ID != incoming.ID ||
+		current.TenantID != incoming.TenantID || current.KnowledgeBaseID != incoming.KnowledgeBaseID ||
+		current.SourceBindingState != incoming.SourceBindingState ||
+		current.SourceQueryEnabled != incoming.SourceQueryEnabled {
+		return errSourceConfigurationNotCurrent
+	}
+
+	terminal := current.SourceBindingState == types.SourceBindingUnbound ||
+		(sourceModeEnabled(current) && !current.SourceQueryEnabled)
+	if !terminal {
+		return nil
+	}
+	if current.Type != incoming.Type {
+		return errSourceConfigurationNotCurrent
+	}
+	incomingSourceMode := sourceModeEnabled(incoming)
+	if len(incoming.Config) == 0 {
+		incomingSourceMode = sourceModeEnabled(current)
+	}
+	if incomingSourceMode != sourceModeEnabled(current) {
+		return errSourceConfigurationNotCurrent
+	}
+	if len(incoming.Config) > 0 {
+		config, err := incoming.ParseConfig()
+		if err != nil || config != nil && config.HasConfiguredCredentials(incoming.Type) {
+			return errSourceConfigurationNotCurrent
+		}
+	}
+	return nil
 }
 
 // UpdateSyncState updates only fields managed by sync execution. GORM's

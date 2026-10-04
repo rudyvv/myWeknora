@@ -281,6 +281,9 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 		if current.Status == types.DataSourceStatusPaused {
 			return datasource.ErrDataSourceNotActive
 		}
+		if !sourceModeEnabled(current) || !datasource.SourceLifecycleAllowsConnection(current) {
+			return datasource.ErrDataSourceNotActive
+		}
 		if err := r.invalidateSourceGeneration(tx, state, current); err != nil {
 			return err
 		}
@@ -436,7 +439,7 @@ func (r *SyncLogRepository) RegisterGitLabPushTrigger(
 		if sourceConfigFingerprint(ds) != sourceConfigFingerprint(current) || !sourceStateMatchesPersistedDataSource(state, current) {
 			return datasource.ErrGitLabWebhookUnauthorized
 		}
-		if current.Type != types.ConnectorTypeGitLab || !sourceModeEnabled(current) ||
+		if current.Type != types.ConnectorTypeGitLab || !sourceModeEnabled(current) || !datasource.SourceLifecycleAllowsConnection(current) ||
 			(current.Status != types.DataSourceStatusActive && !datasource.GitLabSourceReconciliationEligible(current)) {
 			return datasource.ErrDataSourceNotActive
 		}
@@ -534,7 +537,7 @@ func (r *SyncLogRepository) IsCurrentSourceDelivery(ctx context.Context, ds *typ
 			return err
 		}
 		fingerprint := sourceConfigFingerprint(persisted)
-		if sourceConfigFingerprint(ds) != fingerprint || !sourceModeEnabled(persisted) ||
+		if sourceConfigFingerprint(ds) != fingerprint || !sourceModeEnabled(persisted) || !datasource.SourceLifecycleAllowsConnection(persisted) ||
 			persisted.Status == types.DataSourceStatusPaused || state.ConfigFingerprint != fingerprint {
 			return nil
 		}
@@ -579,17 +582,23 @@ func (r *SyncLogRepository) AdvanceSourceConfig(ctx context.Context, ds *types.D
 			if !sourceModeEnabled(&current) {
 				return nil
 			}
+			if !datasource.SourceLifecycleAllowsConnection(&current) {
+				return nil
+			}
 			return cancelUntrackedQueuedSourceRunsTx(tx, ds.ID, ds.TenantID)
 		}
 		state, err := r.ensureSourceSyncState(tx, ds)
 		if err != nil {
 			return err
 		}
+		current, currentErr := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
+		if currentErr != nil && !errors.Is(currentErr, errSourceConfigurationNotCurrent) {
+			return currentErr
+		}
+		if enabled && currentErr == nil && !datasource.SourceLifecycleAllowsConnection(current) {
+			enabled = false
+		}
 		if !enabled {
-			current, currentErr := lockPersistedSourceDataSource(tx, ds.ID, ds.TenantID)
-			if currentErr != nil && !errors.Is(currentErr, errSourceConfigurationNotCurrent) {
-				return currentErr
-			}
 			if currentErr == nil && sourceModeEnabled(current) {
 				if err := cancelUntrackedQueuedSourceRunsTx(tx, ds.ID, ds.TenantID); err != nil {
 					return err
@@ -662,6 +671,9 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 		}
 		if current.Status == types.DataSourceStatusPaused {
 			return r.invalidatePausedSourceGeneration(tx, state, current)
+		}
+		if !datasource.SourceLifecycleAllowsConnection(current) {
+			return r.invalidateDisabledSourceGeneration(tx, state, current)
 		}
 		if err := r.invalidateSourceGeneration(tx, state, current); err != nil {
 			return err
@@ -1011,6 +1023,9 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 		if current.Status == types.DataSourceStatusPaused {
 			return r.invalidatePausedSourceGeneration(tx, &state, current)
 		}
+		if !datasource.SourceLifecycleAllowsConnection(current) {
+			return r.invalidateDisabledSourceGeneration(tx, &state, current)
+		}
 		if !sourceStateMatchesPersistedDataSource(&state, current) {
 			// The datasource row is authoritative after a crash between the
 			// pre-write config fence and the separate datasource update. Reconcile
@@ -1143,6 +1158,9 @@ func (r *SyncLogRepository) CommitSourceRunResult(ctx context.Context, lease typ
 		var current types.DataSource
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=?", ds.ID, ds.TenantID).Take(&current).Error; err != nil {
 			return err
+		}
+		if !datasource.SourceLifecycleAllowsConnection(&current) {
+			return types.ErrSourceSyncLeaseLost
 		}
 		status := ds.Status
 		if current.Status == types.DataSourceStatusPaused {

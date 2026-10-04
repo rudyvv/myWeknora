@@ -9,6 +9,9 @@ import {
   triggerSync,
   pauseDataSource,
   resumeDataSource,
+  unbindDataSource,
+  clearSourceKnowledge,
+  retrySourceKnowledgeClear,
   type DataSource,
 } from '@/api/datasource'
 import { humanizeCron, relativeTime } from '@/utils/cronHumanize'
@@ -39,6 +42,8 @@ const logsDsId = ref('')
 const logsDsName = ref('')
 const logsDsType = ref('')
 const pollTimer = ref<number | null>(null)
+let listRequestGeneration = 0
+const pendingSourceMutations = ref(new Set<string>())
 const gitLabWebhookVisible = ref(false)
 const gitLabWebhookDataSource = ref<DataSource | null>(null)
 
@@ -57,22 +62,27 @@ function schedulePolling() {
 }
 
 async function loadList(silent = false) {
+  const requestGeneration = ++listRequestGeneration
   if (!silent) loading.value = true
   try {
     const res = await listDataSources(props.kbId)
+    if (requestGeneration !== listRequestGeneration) return
     dataSources.value = res?.data || res || []
     emit('count', dataSources.value.length)
 
-    const hasRunningSync = dataSources.value.some(ds => ds.latest_sync_log?.status === 'running' || ds.latest_sync_log?.status === 'queued')
-    if (hasRunningSync) {
+    const hasPendingWork = dataSources.value.some(ds =>
+      ds.latest_sync_log?.status === 'running' || ds.latest_sync_log?.status === 'queued' ||
+      ['pending', 'running'].includes(ds.source_lifecycle?.cleanup?.status || ''),
+    )
+    if (hasPendingWork) {
       schedulePolling()
     } else {
       stopPolling()
     }
   } catch (e: any) {
-    console.error(e)
+    if (requestGeneration === listRequestGeneration) console.error(e)
   } finally {
-    if (!silent) loading.value = false
+    if (requestGeneration === listRequestGeneration) loading.value = false
   }
 }
 
@@ -82,6 +92,7 @@ function openCreate() {
 }
 
 function openEdit(ds: DataSource) {
+  if (!canEditDataSource(ds)) return
   if (isWeDriveDataSource(ds)) {
     openWeDriveSync()
     return
@@ -115,7 +126,63 @@ async function removeDataSource(ds: DataSource) {
   }
 }
 
+function replaceDataSource(updated: DataSource) {
+  const index = dataSources.value.findIndex(ds => ds.id === updated.id)
+  if (index >= 0) dataSources.value[index] = updated
+}
+
+async function refreshSourceLifecycle(updated: DataSource) {
+  // Invalidate any list request that began before the accepted mutation. Keep
+  // this invalidation even if the subsequent refresh fails; the mutation reply
+  // is still the newest authoritative lifecycle state we have.
+  listRequestGeneration++
+  replaceDataSource(updated)
+  await loadList(true)
+}
+
+async function handleUnbind(ds: DataSource) {
+  if (!canUnbindDataSource(ds) || !beginSourceMutation(ds.id)) return
+  try {
+    const updated = await unbindDataSource(ds.id)
+    await refreshSourceLifecycle(updated)
+    MessagePlugin.success(t('datasource.unbindSuccess'))
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || e?.error || t('datasource.unbindFailed'))
+  } finally {
+    endSourceMutation(ds.id)
+  }
+}
+
+async function handleClearSource(ds: DataSource) {
+  if (!canClearSource(ds) || !beginSourceMutation(ds.id)) return
+  try {
+    const updated = await clearSourceKnowledge(ds.id)
+    await refreshSourceLifecycle(updated)
+    MessagePlugin.success(t('datasource.sourceClearSubmitted'))
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || e?.error || t('datasource.sourceClearFailed'))
+  } finally {
+    endSourceMutation(ds.id)
+  }
+}
+
+async function handleRetrySourceClear(ds: DataSource) {
+  if (!canRetrySourceClear(ds)) return
+  const operationId = ds.source_lifecycle?.cleanup?.id
+  if (!operationId || !beginSourceMutation(ds.id)) return
+  try {
+    const updated = await retrySourceKnowledgeClear(ds.id, operationId)
+    await refreshSourceLifecycle(updated)
+    MessagePlugin.success(t('datasource.sourceClearRetrySubmitted'))
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || e?.error || t('datasource.sourceClearRetryFailed'))
+  } finally {
+    endSourceMutation(ds.id)
+  }
+}
+
 async function handleSync(ds: DataSource) {
+  if (!canSyncDataSource(ds)) return
   try {
     await triggerSync(ds.id)
     MessagePlugin.success(t('datasource.syncTriggered'))
@@ -126,6 +193,7 @@ async function handleSync(ds: DataSource) {
 }
 
 async function handlePause(ds: DataSource) {
+  if (!canOperateSource(ds)) return
   try {
     await pauseDataSource(ds.id)
     MessagePlugin.success(t('datasource.paused'))
@@ -136,6 +204,7 @@ async function handlePause(ds: DataSource) {
 }
 
 async function handleResume(ds: DataSource) {
+  if (!canOperateSource(ds)) return
   try {
     await resumeDataSource(ds.id)
     MessagePlugin.success(t('datasource.resumed'))
@@ -260,6 +329,7 @@ function isSyncRunning(ds: DataSource) {
 }
 
 function openGitLabWebhook(ds: DataSource) {
+  if (!canEditDataSource(ds)) return
   gitLabWebhookDataSource.value = ds
   gitLabWebhookVisible.value = true
 }
@@ -270,6 +340,54 @@ function hasPendingSync(ds: DataSource) {
 
 function isSourceMode(ds: DataSource) {
   return ds.config?.settings?.content_mode === 'source'
+}
+
+function isSourceMutationPending(ds: DataSource) {
+  return isSourceMode(ds) && pendingSourceMutations.value.has(ds.id)
+}
+
+function beginSourceMutation(sourceId: string) {
+  if (pendingSourceMutations.value.has(sourceId)) return false
+  pendingSourceMutations.value = new Set(pendingSourceMutations.value).add(sourceId)
+  return true
+}
+
+function endSourceMutation(sourceId: string) {
+  if (!pendingSourceMutations.value.has(sourceId)) return
+  const next = new Set(pendingSourceMutations.value)
+  next.delete(sourceId)
+  pendingSourceMutations.value = next
+}
+
+function canOperateSource(ds: DataSource) {
+  if (!isSourceMode(ds)) return true
+  if (isSourceMutationPending(ds)) return false
+  const lifecycle = ds.source_lifecycle
+  // Older servers may omit the additive lifecycle DTO. Do not infer query state;
+  // preserve the legacy controls until the server supplies authoritative state.
+  return !lifecycle || (lifecycle.binding_state === 'bound' && lifecycle.query_enabled && !lifecycle.cleanup)
+}
+
+function canEditDataSource(ds: DataSource) {
+  return !isSourceMode(ds) || canOperateSource(ds)
+}
+
+function canSyncDataSource(ds: DataSource) {
+  return !isSourceMode(ds) || canOperateSource(ds)
+}
+
+function canUnbindDataSource(ds: DataSource) {
+  const lifecycle = ds.source_lifecycle
+  return isSourceMode(ds) && !isSourceMutationPending(ds) && !!lifecycle && lifecycle.binding_state === 'bound' && !lifecycle.cleanup
+}
+
+function canClearSource(ds: DataSource) {
+  return isSourceMode(ds) && !isSourceMutationPending(ds) && !!ds.source_lifecycle && !ds.source_lifecycle.cleanup
+}
+
+function canRetrySourceClear(ds: DataSource) {
+  const cleanup = ds.source_lifecycle?.cleanup
+  return isSourceMode(ds) && !isSourceMutationPending(ds) && cleanup?.status === 'failed' && cleanup.retryable
 }
 
 function onEditorSaved() {
@@ -298,12 +416,12 @@ onBeforeUnmount(stopPolling)
 
       <div v-else-if="!loading" class="ds-grid">
         <component
-          :is="canManageDataSource && !isWeDriveDataSource(ds) ? 'button' : 'div'"
+          :is="canManageDataSource && !isWeDriveDataSource(ds) && canEditDataSource(ds) ? 'button' : 'div'"
           v-for="ds in dataSources"
           :key="ds.id"
-          :type="canManageDataSource && !isWeDriveDataSource(ds) ? 'button' : undefined"
-          :class="['ds-card', `ds-card--${ds.type}`, { 'ds-card--clickable': canManageDataSource && !isWeDriveDataSource(ds) }]"
-          @click="canManageDataSource && !isWeDriveDataSource(ds) ? openEdit(ds) : undefined"
+          :type="canManageDataSource && !isWeDriveDataSource(ds) && canEditDataSource(ds) ? 'button' : undefined"
+          :class="['ds-card', `ds-card--${ds.type}`, { 'ds-card--clickable': canManageDataSource && !isWeDriveDataSource(ds) && canEditDataSource(ds) }]"
+          @click="canManageDataSource && !isWeDriveDataSource(ds) && canEditDataSource(ds) ? openEdit(ds) : undefined"
         >
           <div class="ds-card__badge">
             <DataSourceTypeIcon :type="ds.type" variant="badge" />
@@ -324,20 +442,20 @@ onBeforeUnmount(stopPolling)
                   </t-button>
                   <template #dropdown>
                     <t-dropdown-menu>
-                      <t-dropdown-item v-if="canManageDataSource && !isWeDriveDataSource(ds)" @click="openEdit(ds)">
+                      <t-dropdown-item v-if="canManageDataSource && !isWeDriveDataSource(ds) && canEditDataSource(ds)" @click="openEdit(ds)">
                         <t-icon name="edit" /> {{ t('datasource.edit') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource && ds.type === 'gitlab' && isSourceMode(ds)"
+                        v-if="canManageDataSource && ds.type === 'gitlab' && isSourceMode(ds) && canEditDataSource(ds)"
                         @click="openGitLabWebhook(ds)"
                       >
                         <t-icon name="link" /> {{ t('datasource.gitlabWebhook.manage') }}
                       </t-dropdown-item>
-                      <t-dropdown-item v-else-if="canManageDataSource" @click="openWeDriveSync">
+                      <t-dropdown-item v-else-if="canManageDataSource && !isSourceMode(ds)" @click="openWeDriveSync">
                         <t-icon name="setting" /> 在企业微信微盘同步中管理
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource"
+                        v-if="canManageDataSource && canSyncDataSource(ds)"
                         :disabled="hasPendingSync(ds) && !isSourceMode(ds)"
                         @click="handleSync(ds)"
                       >
@@ -348,19 +466,61 @@ onBeforeUnmount(stopPolling)
                         <t-icon name="root-list" /> {{ t('datasource.logs') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && ds.status === 'active'"
+                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && canOperateSource(ds) && ds.status === 'active'"
                         @click="handlePause(ds)"
                       >
                         <t-icon name="pause-circle" /> {{ t('datasource.pause') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-else-if="canManageDataSource && !isWeDriveDataSource(ds) && ds.status === 'paused'"
+                        v-else-if="canManageDataSource && !isWeDriveDataSource(ds) && canOperateSource(ds) && ds.status === 'paused'"
                         @click="handleResume(ds)"
                       >
                         <t-icon name="play-circle" /> {{ t('datasource.resume') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource && !isWeDriveDataSource(ds)"
+                        v-if="canManageDataSource && isSourceMode(ds) && canUnbindDataSource(ds)"
+                        theme="error"
+                      >
+                        <t-popconfirm
+                          :content="t('datasource.unbindConfirm')"
+                          :confirm-btn="{ content: t('datasource.unbind'), theme: 'danger' }"
+                          :cancel-btn="{ content: t('common.cancel') }"
+                          placement="left"
+                          attach="body"
+                          @confirm="handleUnbind(ds)"
+                        >
+                          <span class="ds-dropdown-delete-trigger" @click.stop>
+                            <t-icon name="link" />
+                            <span>{{ t('datasource.unbind') }}</span>
+                          </span>
+                        </t-popconfirm>
+                      </t-dropdown-item>
+                      <t-dropdown-item
+                        v-if="canManageDataSource && canClearSource(ds)"
+                        theme="error"
+                      >
+                        <t-popconfirm
+                          :content="t('datasource.sourceClearConfirm')"
+                          :confirm-btn="{ content: t('datasource.sourceClear'), theme: 'danger' }"
+                          :cancel-btn="{ content: t('common.cancel') }"
+                          placement="left"
+                          attach="body"
+                          @confirm="handleClearSource(ds)"
+                        >
+                          <span class="ds-dropdown-delete-trigger" @click.stop>
+                            <t-icon name="delete" />
+                            <span>{{ t('datasource.sourceClear') }}</span>
+                          </span>
+                        </t-popconfirm>
+                      </t-dropdown-item>
+                      <t-dropdown-item
+                        v-if="canManageDataSource && canRetrySourceClear(ds)"
+                        @click="handleRetrySourceClear(ds)"
+                      >
+                        <t-icon name="refresh" /> {{ t('datasource.sourceClearRetry') }}
+                      </t-dropdown-item>
+                      <t-dropdown-item
+                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && !isSourceMode(ds)"
                         theme="error"
                         class="ds-dropdown-delete-item"
                       >
@@ -390,6 +550,15 @@ onBeforeUnmount(stopPolling)
                 <span class="ds-status-dot" aria-hidden="true" />
                 {{ statusLabel(ds.status) }}
               </span>
+            </p>
+            <p v-if="isSourceMode(ds) && ds.source_lifecycle" class="ds-card__detail">
+              <span>{{ t(`datasource.sourceLifecycle.binding.${ds.source_lifecycle.binding_state}`) }}</span>
+              <span class="ds-card__sep">·</span>
+              <span>{{ t(ds.source_lifecycle.query_enabled ? 'datasource.sourceLifecycle.queryEnabled' : 'datasource.sourceLifecycle.queryDisabled') }}</span>
+              <template v-if="ds.source_lifecycle.cleanup">
+                <span class="ds-card__sep">·</span>
+                <span>{{ t(`datasource.sourceLifecycle.cleanup.${ds.source_lifecycle.cleanup.status}`) }}</span>
+              </template>
             </p>
             <p class="ds-card__detail">
               {{ scheduleLabel(ds.sync_schedule) }}
