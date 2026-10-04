@@ -31,3 +31,19 @@ Contribution: **zero findings**. Persistence, authorization, rendering, proof be
 Decision: contribution slice accepted for assembly into the candidate only. Impact rejected; concrete findings dispatched to the same T06 Luna/xhigh chat, main notified to consume the eventual clean repair. No root product integration, GitHub closure, T19 dispatch or complete T16 acceptance. Overall accepted progress remains **18/22**.
 
 Totals: Standards impact 1 (worst P2), contribution 0; Spec impact 2 (worst P2), contribution 0.
+
+# Impact repair re-review — 8e51573c
+
+Actual verified clean SHA: `8e51573c7ac4e2969609262ffa256e19b14e0bde` (worker corrected an initial full-SHA typo). Same approved baseline; repair changes only implementation and tests. Two independent Sol/high axes reviewed the complete slice plus the repair delta. The previous two findings are fixed. Root's original 14 focused tests and three independent overlay counters all PASS, package 4.580 s. The overlay replaces the old test file and therefore does not claim to run the worker's five newly added regressions.
+
+## Standards
+
+One new hard P2 remains: the new per-flow deletion proof at `source_wiki_impact.go:1367` walks every prior canonical-route entry for each omitted topic without charging the total work counter or caching the result. This violates the approved aggregate work contract. No other actionable smell.
+
+## Spec
+
+One new P2 remains: distinct accepted flow keys normalize to the same route, multiplying unchecked deletion-proof scans by topic count. The source-wide fallback promised for excessive total graph work is bypassed. Cache/precompute bounded route proofs or meter each scan and propagate exhaustion to clear partial plan results.
+
+Root independently instrumented only the loop via temporary Go overlays: 10,000 `api_request` facts for one route and 1,000 whitespace-alias topics, all valid old dependencies, with a complete empty next snapshot. Actual result: **10,000,000 entry checks**, limit 2,000,000, disposition Planned, Removed 1,000, no error. Counter FAIL, package 3.842 s. This is operation-count evidence, not a timing threshold. Original source/test files remain untouched. Log: `C:/Users/28211/AppData/Local/Temp/weknora-root-t16-impact-work-8e51573c.jsonl`.
+
+Decision: small bounded-work repair sent to the same T06 Luna/xhigh worker; main may continue assembling/validating a candidate but must include the subsequent clean repair before final acceptance. No root integration, closure or next-ticket dispatch. Standards 1 / Spec 1, worst P2 in each axis; contribution slice remains accepted. Overall 18/22.
