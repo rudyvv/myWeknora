@@ -27,6 +27,251 @@ type sourceWikiStoredContribution struct {
 	SourceProvenance    *types.SourceWikiProvenance `json:"source_provenance"`
 }
 
+type sourceWikiPageContributionProjection struct {
+	rows           []types.SourceWikiPageContribution
+	updated        types.SourceWikiContributionSet
+	storedByKey    map[string]sourceWikiStoredContribution
+	replacementKey string
+	replacement    types.WikiPage
+}
+
+// projectSourceWikiContributionReplacementInTx replaces only the generated
+// source/topic body, then renders the page from all validated stored bodies.
+// Foreign source contributions are never reconstructed from page-level refs.
+func (s *sourceWikiService) projectSourceWikiContributionReplacementInTx(tx *gorm.DB, existing, page *types.WikiPage,
+	attempt *types.SourceWikiAttempt, inventoryComplete bool) (*sourceWikiPageContributionProjection, error) {
+	if tx == nil || existing == nil || page == nil || attempt == nil || existing.ID == "" || existing.Version <= 0 {
+		return nil, fmt.Errorf("source Wiki contribution replacement lacks page identity")
+	}
+	var current types.WikiPage
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND version=?",
+		existing.ID, attempt.TenantID, attempt.KnowledgeBaseID, existing.Version).Take(&current).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, repository.ErrWikiPageConflict
+		}
+		return nil, err
+	}
+	var rows []types.SourceWikiPageContribution
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("page_id=? AND revision_id IS NULL", current.ID).
+		Order("source_id ASC, topic_kind ASC, topic_key ASC").
+		Limit(types.SourceWikiContributionMaxCount + 1).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 || len(rows) == 1 && rows[0].SourceID == attempt.SourceID &&
+		rows[0].TopicKind == attempt.TopicKind && rows[0].TopicKey == attempt.TopicKey {
+		return nil, nil
+	}
+	if len(rows) > types.SourceWikiContributionMaxCount || current.SourceProvenance == nil {
+		return nil, fmt.Errorf("source Wiki mixed contribution page cannot be safely replaced")
+	}
+	set := types.SourceWikiContributionSet{TenantID: current.TenantID, KnowledgeBaseID: current.KnowledgeBaseID}
+	storedByKey := make(map[string]sourceWikiStoredContribution, len(rows)+1)
+	bodyParts := make([]string, 0, len(rows))
+	allRefs := make([]string, 0)
+	var primary *sourceWikiStoredContribution
+	for i := range rows {
+		row := rows[i]
+		var stored sourceWikiStoredContribution
+		if row.PageVersion != current.Version || (row.State != "ready" && row.State != "stale") || len(row.Contribution) == 0 ||
+			json.Unmarshal(row.Contribution, &stored) != nil || stored.HasUnattributedBody == nil || *stored.HasUnattributedBody ||
+			stored.SourceProvenance == nil || stored.TopicKind != row.TopicKind || stored.TopicKey != row.TopicKey ||
+			stored.Title == "" || stored.Content == "" || stored.SourceRefs == nil {
+			return nil, fmt.Errorf("source Wiki mixed contribution page has an invalid stored projection")
+		}
+		provenance := stored.SourceProvenance
+		if provenance.SourceID != row.SourceID || provenance.TopicKind != row.TopicKind || provenance.TopicKey != row.TopicKey ||
+			provenance.ApplicableSnapshotID != row.ApplicableSnapshotID || provenance.State != row.State ||
+			(provenance.State != "ready" && provenance.State != "stale") || len(provenance.Evidence) == 0 {
+			return nil, fmt.Errorf("source Wiki mixed contribution provenance does not match its stored row")
+		}
+		origin := provenance.Evidence[0].SnapshotID
+		if origin == "" {
+			return nil, fmt.Errorf("source Wiki mixed contribution has no evidence origin snapshot")
+		}
+		for _, evidence := range provenance.Evidence {
+			if evidence.DataSourceID != row.SourceID || evidence.SnapshotID != origin || evidence.ID == "" ||
+				evidence.KnowledgeID == "" || evidence.FileVersionID == "" || evidence.Path == "" {
+				return nil, fmt.Errorf("source Wiki mixed contribution evidence crosses its source or origin snapshot")
+			}
+		}
+		state := types.SourceWikiContributionCurrent
+		if row.State == "stale" {
+			state = types.SourceWikiContributionStale
+		}
+		set.Contributions = append(set.Contributions, types.SourceWikiContribution{
+			SourceID: row.SourceID, TopicKind: row.TopicKind, TopicKey: row.TopicKey,
+			OriginSnapshotID: origin, ApplicableSnapshotID: row.ApplicableSnapshotID,
+			Body: stored.Content, Evidence: append([]types.SourceWikiEvidence(nil), provenance.Evidence...), State: state,
+		})
+		key := sourceWikiContributionStorageKey(row.SourceID, row.TopicKind, row.TopicKey)
+		if _, exists := storedByKey[key]; exists {
+			return nil, fmt.Errorf("source Wiki mixed contribution page has duplicate source/topic identity")
+		}
+		storedByKey[key] = stored
+		bodyParts = append(bodyParts, stored.Content)
+		allRefs = append(allRefs, stored.SourceRefs...)
+		if current.SourceProvenance.SourceID == row.SourceID && current.SourceProvenance.TopicKind == row.TopicKind &&
+			current.SourceProvenance.TopicKey == row.TopicKey {
+			copy := stored
+			primary = &copy
+		}
+	}
+	if primary == nil || !equalSortedSourceWikiIDs(current.SourceRefs, allRefs) ||
+		!sourceWikiBodyCompositionMatches(current.Content, bodyParts) || current.Title != primary.Title || current.Summary != primary.Summary {
+		return nil, fmt.Errorf("source Wiki mixed contribution page content is not an exact contribution projection")
+	}
+	pageProvenance, err := json.Marshal(current.SourceProvenance)
+	if err != nil {
+		return nil, err
+	}
+	primaryProvenance, err := json.Marshal(primary.SourceProvenance)
+	if err != nil {
+		return nil, err
+	}
+	if !equalJSONBytes(pageProvenance, primaryProvenance) {
+		return nil, fmt.Errorf("source Wiki mixed contribution page primary provenance is inconsistent")
+	}
+
+	replacementProvenance := cloneSourceWikiProvenance(page.SourceProvenance)
+	if replacementProvenance == nil || replacementProvenance.SourceID != attempt.SourceID ||
+		replacementProvenance.TopicKind != attempt.TopicKind || replacementProvenance.TopicKey != attempt.TopicKey ||
+		replacementProvenance.ApplicableSnapshotID != attempt.SnapshotID || replacementProvenance.State != "ready" ||
+		len(replacementProvenance.Evidence) == 0 {
+		return nil, fmt.Errorf("source Wiki replacement provenance does not match its fenced attempt")
+	}
+	replacementOrigin := replacementProvenance.Evidence[0].SnapshotID
+	replacement := types.SourceWikiContribution{
+		SourceID: replacementProvenance.SourceID, TopicKind: replacementProvenance.TopicKind,
+		TopicKey: replacementProvenance.TopicKey, OriginSnapshotID: replacementOrigin,
+		ApplicableSnapshotID: replacementProvenance.ApplicableSnapshotID, Body: page.Content,
+		Evidence: append([]types.SourceWikiEvidence(nil), replacementProvenance.Evidence...), State: types.SourceWikiContributionCurrent,
+	}
+	target := types.SourceWikiContributionTarget{
+		TenantID: current.TenantID, KnowledgeBaseID: current.KnowledgeBaseID, SourceID: attempt.SourceID,
+		TopicKind: attempt.TopicKind, TopicKey: attempt.TopicKey, SnapshotID: attempt.SnapshotID,
+	}
+	updated, err := source.ReplaceSourceWikiContribution(set, target, types.SourceWikiContributionOutcome{
+		Kind: types.SourceWikiContributionOutcomeReplace, Replacement: &replacement,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("replace source Wiki contribution: %w", err)
+	}
+	if !inventoryComplete {
+		replacementProvenance.State = "stale"
+		for i := range updated.Contributions {
+			if sourceWikiContributionStorageKey(updated.Contributions[i].SourceID, updated.Contributions[i].TopicKind,
+				updated.Contributions[i].TopicKey) == sourceWikiContributionStorageKey(attempt.SourceID, attempt.TopicKind, attempt.TopicKey) {
+				updated.Contributions[i].State = types.SourceWikiContributionStale
+				break
+			}
+		}
+	}
+	replacementRefsInput := make([]string, 0, len(replacementProvenance.Evidence))
+	for _, evidence := range replacementProvenance.Evidence {
+		replacementRefsInput = append(replacementRefsInput, evidence.KnowledgeID+"|"+evidence.Path)
+	}
+	replacementRefs := sortedSourceWikiIDs(replacementRefsInput)
+	unattributedBody := false
+	replacementKey := sourceWikiContributionStorageKey(attempt.SourceID, attempt.TopicKind, attempt.TopicKey)
+	replacementStored := sourceWikiStoredContribution{
+		TopicKind: attempt.TopicKind, TopicKey: attempt.TopicKey, Title: page.Title, Summary: page.Summary,
+		Content: page.Content, SourceRefs: replacementRefs,
+		HasUnattributedBody: &unattributedBody, SourceProvenance: replacementProvenance,
+	}
+	storedByKey[replacementKey] = replacementStored
+	var projectedBodies, projectedRefs []string
+	for _, contribution := range updated.Contributions {
+		stored, ok := storedByKey[sourceWikiContributionStorageKey(contribution.SourceID, contribution.TopicKind, contribution.TopicKey)]
+		if !ok {
+			return nil, fmt.Errorf("source Wiki replacement projection lost a stored contribution")
+		}
+		projectedBodies = append(projectedBodies, contribution.Body)
+		projectedRefs = append(projectedRefs, stored.SourceRefs...)
+	}
+	if len(projectedBodies) > 16 {
+		sort.Strings(projectedBodies)
+	}
+	primaryContribution := updated.Contributions[0]
+	projectedPrimary := storedByKey[sourceWikiContributionStorageKey(primaryContribution.SourceID, primaryContribution.TopicKind, primaryContribution.TopicKey)]
+	page.Title, page.Summary = projectedPrimary.Title, projectedPrimary.Summary
+	page.Content = strings.Join(projectedBodies, "\n")
+	page.SourceRefs = sortedSourceWikiIDs(projectedRefs)
+	page.SourceProvenance = cloneSourceWikiProvenance(projectedPrimary.SourceProvenance)
+	page.LastEditSource = types.WikiEditSourcePipeline
+	wiki, ok := s.wiki.(*wikiPageService)
+	if !ok {
+		return nil, fmt.Errorf("source Wiki mixed contribution page cannot recalculate links")
+	}
+	page.OutLinks = wiki.parseOutLinks(page.Content)
+	replacementPage := *page
+	replacementPage.Content = replacement.Body
+	replacementPage.Title = replacementStored.Title
+	replacementPage.Summary = replacementStored.Summary
+	replacementPage.SourceRefs = append(types.StringArray(nil), replacementStored.SourceRefs...)
+	replacementPage.SourceProvenance = cloneSourceWikiProvenance(replacementProvenance)
+	return &sourceWikiPageContributionProjection{
+		rows: rows, updated: updated, storedByKey: storedByKey,
+		replacementKey: replacementKey,
+		replacement:    replacementPage,
+	}, nil
+}
+
+func (p *sourceWikiPageContributionProjection) persistInTx(tx *gorm.DB, page *types.WikiPage, attempt *types.SourceWikiAttempt,
+	dependencyIDs, moduleMemberIDs []string, inventoryComplete bool, now time.Time) error {
+	if p == nil || tx == nil || page == nil || attempt == nil || page.Version <= 0 {
+		return fmt.Errorf("source Wiki contribution projection persistence is incomplete")
+	}
+	replacementPage := p.replacement
+	replacementPage.ID, replacementPage.Version = page.ID, page.Version
+	if err := repository.PersistSourceWikiPageContributionInTx(tx, &replacementPage, attempt.TopicKind, attempt.TopicKey,
+		dependencyIDs, moduleMemberIDs, inventoryComplete, now); err != nil {
+		return err
+	}
+	rowsByKey := make(map[string]types.SourceWikiPageContribution, len(p.rows))
+	for _, row := range p.rows {
+		rowsByKey[sourceWikiContributionStorageKey(row.SourceID, row.TopicKind, row.TopicKey)] = row
+	}
+	for _, contribution := range p.updated.Contributions {
+		key := sourceWikiContributionStorageKey(contribution.SourceID, contribution.TopicKind, contribution.TopicKey)
+		if key == p.replacementKey {
+			continue
+		}
+		row, ok := rowsByKey[key]
+		if !ok {
+			return fmt.Errorf("source Wiki replacement projection lost a surviving row")
+		}
+		state := "ready"
+		if contribution.State == types.SourceWikiContributionStale {
+			state = "stale"
+		}
+		result := tx.Model(&types.SourceWikiPageContribution{}).
+			Where("id=? AND page_id=? AND page_version=? AND revision_id IS NULL", row.ID, page.ID, page.Version).
+			Updates(map[string]any{"page_version": page.Version, "state": state, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("surviving source Wiki contribution changed during replacement projection")
+		}
+	}
+	if err := tx.Where("page_id=? AND revision_id IS NULL", page.ID).Delete(&types.SourceWikiEvidenceRef{}).Error; err != nil {
+		return err
+	}
+	for _, contribution := range p.updated.Contributions {
+		for _, evidence := range contribution.Evidence {
+			ref := types.SourceWikiEvidenceRef{
+				ID: uuid.NewString(), PageID: page.ID, Version: page.Version, EvidenceID: evidence.ID,
+				SourceFileID: evidence.KnowledgeID, FileVersionID: evidence.FileVersionID,
+				SnapshotID: evidence.SnapshotID, Path: evidence.Path, CommitSHA: evidence.CommitSHA,
+			}
+			if err := tx.Create(&ref).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // removeSourceWikiContributionInTx removes only an exact attributable body.
 // Mixed pages are reprojected from the surviving contribution records; any
 // manual text, legacy body, or inconsistent source-ref projection fails closed.

@@ -274,11 +274,19 @@ func (s *sourceWikiService) processPendingSourceWikiSkeleton(ctx context.Context
 					(topic.Status != "planned" && topic.Status != "expansion") {
 					return fmt.Errorf("source Wiki skeleton candidate identity or state is invalid")
 				}
-				reasons, err := json.Marshal(topic.UncertaintyReasons)
+				uncertaintyReasons := topic.UncertaintyReasons
+				if uncertaintyReasons == nil {
+					uncertaintyReasons = []string{}
+				}
+				reasons, err := json.Marshal(uncertaintyReasons)
 				if err != nil {
 					return err
 				}
-				relations, err := json.Marshal(topic.Relations)
+				topicRelations := topic.Relations
+				if topicRelations == nil {
+					topicRelations = []types.SourceCodeRelation{}
+				}
+				relations, err := json.Marshal(topicRelations)
 				if err != nil {
 					return err
 				}

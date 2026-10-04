@@ -487,11 +487,6 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 			page.ParentSlug, page.FolderID = existing.ParentSlug, existing.FolderID
 			page.PageMetadata = append(types.JSON(nil), existing.PageMetadata...)
 			page.ChunkRefs = append(types.StringArray(nil), existing.ChunkRefs...)
-			for _, ref := range existing.SourceRefs {
-				if !containsSourceWikiRef(page.SourceRefs, ref) {
-					page.SourceRefs = append(page.SourceRefs, ref)
-				}
-			}
 		}
 		if err = s.publishCard(workCtx, kb, attempt.SourceID, attempt.SnapshotID, currentVersion, existing, page, &expectedSource, modelConfig, attempt, lease); err != nil {
 			if errors.Is(err, repository.ErrWikiPageConflict) {
@@ -773,15 +768,6 @@ func sourceWikiPageSourcesAreMergeable(page *types.WikiPage, evidence []collecte
 		return false
 	}
 	return true
-}
-
-func containsSourceWikiRef(refs types.StringArray, value string) bool {
-	for _, ref := range refs {
-		if ref == value {
-			return true
-		}
-	}
-	return false
 }
 
 func decodeSourceWikiDraftText(value types.JSON) string {

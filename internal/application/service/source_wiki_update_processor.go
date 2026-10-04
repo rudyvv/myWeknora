@@ -210,10 +210,13 @@ func (s *sourceWikiService) persistSourceWikiImpactFallback(ctx context.Context,
 	impact.FallbackReason = reason
 	impact.RescanSkeleton = true
 	impact.RescanReasons = []string{"source_wide_stale_fallback"}
-	return s.persistSourceWikiImpactPlan(ctx, payload, durable, impact, types.SourceWikiImpactTopicInventory{
+	if err := s.persistSourceWikiImpactPlan(ctx, payload, durable, impact, types.SourceWikiImpactTopicInventory{
 		TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID,
 		SourceID: payload.DataSourceID, SnapshotID: payload.SnapshotID, Complete: false,
-	})
+	}); err != nil {
+		return err
+	}
+	return s.dispatchPendingSourceWikiRegeneration(ctx, payload)
 }
 
 func (s *sourceWikiService) loadSourceWikiUpdateInventories(ctx context.Context, payload types.SourceWikiUpdatePayload,

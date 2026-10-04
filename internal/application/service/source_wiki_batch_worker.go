@@ -763,11 +763,6 @@ func (s *sourceWikiService) processSourceWikiBatchPublish(ctx context.Context, l
 		page.ParentSlug, page.FolderID = existing.ParentSlug, existing.FolderID
 		page.PageMetadata = append(types.JSON(nil), existing.PageMetadata...)
 		page.ChunkRefs = append(types.StringArray(nil), existing.ChunkRefs...)
-		for _, ref := range existing.SourceRefs {
-			if !containsSourceWikiRef(page.SourceRefs, ref) {
-				page.SourceRefs = append(page.SourceRefs, ref)
-			}
-		}
 	}
 	err = s.publishStagedCard(ctx, kb, attempt.SourceID, attempt.SnapshotID, currentVersion, existing, page, &expectedSource, expectedModel, &attempt, batch.QAApprovalDigest)
 	if errors.Is(err, repository.ErrWikiPageConflict) {

@@ -615,25 +615,50 @@ func (s *sourceWikiService) publishCardWithBatchState(ctx context.Context, kb *t
 		// Source/wiki writes are a single transaction, including first raw owners.
 		transactionalWiki := NewWikiPageService(repository.NewWikiPageRepository(tx), nil, s.kb, nil, nil)
 		writeCtx := sourceWikiVerifiedWrite(ctx)
-		var writeErr error
-		if existing == nil {
-			_, writeErr = transactionalWiki.CreatePage(writeCtx, page)
-		} else {
-			page.ID = existing.ID
-			page.Version = baseVersion
-			page.FolderID = existing.FolderID
-			_, writeErr = transactionalWiki.UpdatePage(writeCtx, page)
-		}
-		if writeErr != nil {
-			return writeErr
-		}
 		dependencyFileIDs, moduleMemberFileIDs, inventoryComplete, err := sourceWikiContributionInventory(tx, attempt)
 		if err != nil {
 			return err
 		}
-		if err := repository.PersistSourceWikiPageContributionInTx(
-			tx, page, attempt.TopicKind, attempt.TopicKey, dependencyFileIDs, moduleMemberFileIDs, inventoryComplete, time.Now().UTC(),
-		); err != nil {
+		var contributionProjection *sourceWikiPageContributionProjection
+		var writeErr error
+		if existing == nil {
+			var written *types.WikiPage
+			written, writeErr = transactionalWiki.CreatePage(writeCtx, page)
+			if writeErr == nil {
+				if written == nil {
+					return fmt.Errorf("source Wiki page creation returned no persisted page")
+				}
+				*page = *written
+			}
+		} else {
+			page.ID = existing.ID
+			page.Version = baseVersion
+			page.FolderID = existing.FolderID
+			contributionProjection, err = s.projectSourceWikiContributionReplacementInTx(tx, existing, page, attempt, inventoryComplete)
+			if err != nil {
+				return err
+			}
+			var written *types.WikiPage
+			written, writeErr = transactionalWiki.UpdatePage(writeCtx, page)
+			if writeErr == nil {
+				if written == nil {
+					return fmt.Errorf("source Wiki page update returned no persisted page")
+				}
+				*page = *written
+			}
+		}
+		if writeErr != nil {
+			return writeErr
+		}
+		persistNow := time.Now().UTC()
+		if contributionProjection != nil {
+			err = contributionProjection.persistInTx(tx, page, attempt, dependencyFileIDs, moduleMemberFileIDs, inventoryComplete, persistNow)
+		} else {
+			err = repository.PersistSourceWikiPageContributionInTx(
+				tx, page, attempt.TopicKind, attempt.TopicKey, dependencyFileIDs, moduleMemberFileIDs, inventoryComplete, persistNow,
+			)
+		}
+		if err != nil {
 			return err
 		}
 		now := time.Now()
