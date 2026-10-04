@@ -43,6 +43,7 @@ const logsDsName = ref('')
 const logsDsType = ref('')
 const pollTimer = ref<number | null>(null)
 let listRequestGeneration = 0
+const pendingSourceMutations = ref(new Set<string>())
 const gitLabWebhookVisible = ref(false)
 const gitLabWebhookDataSource = ref<DataSource | null>(null)
 
@@ -140,37 +141,43 @@ async function refreshSourceLifecycle(updated: DataSource) {
 }
 
 async function handleUnbind(ds: DataSource) {
-  if (!canUnbindDataSource(ds)) return
+  if (!canUnbindDataSource(ds) || !beginSourceMutation(ds.id)) return
   try {
     const updated = await unbindDataSource(ds.id)
     await refreshSourceLifecycle(updated)
     MessagePlugin.success(t('datasource.unbindSuccess'))
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('datasource.unbindFailed'))
+  } finally {
+    endSourceMutation(ds.id)
   }
 }
 
 async function handleClearSource(ds: DataSource) {
-  if (!canClearSource(ds)) return
+  if (!canClearSource(ds) || !beginSourceMutation(ds.id)) return
   try {
     const updated = await clearSourceKnowledge(ds.id)
     await refreshSourceLifecycle(updated)
     MessagePlugin.success(t('datasource.sourceClearSubmitted'))
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('datasource.sourceClearFailed'))
+  } finally {
+    endSourceMutation(ds.id)
   }
 }
 
 async function handleRetrySourceClear(ds: DataSource) {
   if (!canRetrySourceClear(ds)) return
   const operationId = ds.source_lifecycle?.cleanup?.id
-  if (!operationId) return
+  if (!operationId || !beginSourceMutation(ds.id)) return
   try {
     const updated = await retrySourceKnowledgeClear(ds.id, operationId)
     await refreshSourceLifecycle(updated)
     MessagePlugin.success(t('datasource.sourceClearRetrySubmitted'))
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('datasource.sourceClearRetryFailed'))
+  } finally {
+    endSourceMutation(ds.id)
   }
 }
 
@@ -335,8 +342,26 @@ function isSourceMode(ds: DataSource) {
   return ds.config?.settings?.content_mode === 'source'
 }
 
+function isSourceMutationPending(ds: DataSource) {
+  return isSourceMode(ds) && pendingSourceMutations.value.has(ds.id)
+}
+
+function beginSourceMutation(sourceId: string) {
+  if (pendingSourceMutations.value.has(sourceId)) return false
+  pendingSourceMutations.value = new Set(pendingSourceMutations.value).add(sourceId)
+  return true
+}
+
+function endSourceMutation(sourceId: string) {
+  if (!pendingSourceMutations.value.has(sourceId)) return
+  const next = new Set(pendingSourceMutations.value)
+  next.delete(sourceId)
+  pendingSourceMutations.value = next
+}
+
 function canOperateSource(ds: DataSource) {
   if (!isSourceMode(ds)) return true
+  if (isSourceMutationPending(ds)) return false
   const lifecycle = ds.source_lifecycle
   // Older servers may omit the additive lifecycle DTO. Do not infer query state;
   // preserve the legacy controls until the server supplies authoritative state.
@@ -353,16 +378,16 @@ function canSyncDataSource(ds: DataSource) {
 
 function canUnbindDataSource(ds: DataSource) {
   const lifecycle = ds.source_lifecycle
-  return isSourceMode(ds) && !!lifecycle && lifecycle.binding_state === 'bound' && !lifecycle.cleanup
+  return isSourceMode(ds) && !isSourceMutationPending(ds) && !!lifecycle && lifecycle.binding_state === 'bound' && !lifecycle.cleanup
 }
 
 function canClearSource(ds: DataSource) {
-  return isSourceMode(ds) && !!ds.source_lifecycle && !ds.source_lifecycle.cleanup
+  return isSourceMode(ds) && !isSourceMutationPending(ds) && !!ds.source_lifecycle && !ds.source_lifecycle.cleanup
 }
 
 function canRetrySourceClear(ds: DataSource) {
   const cleanup = ds.source_lifecycle?.cleanup
-  return cleanup?.status === 'failed' && cleanup.retryable
+  return isSourceMode(ds) && !isSourceMutationPending(ds) && cleanup?.status === 'failed' && cleanup.retryable
 }
 
 function onEditorSaved() {

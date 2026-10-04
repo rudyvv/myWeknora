@@ -60,6 +60,8 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
   let holdNextList = false
   let releaseHeldList: (() => void) | undefined
   let failNextList = false
+  let holdNextUnbind = false
+  let releaseHeldUnbind: (() => void) | undefined
   const record = (method: string, ...args: any[]) => calls.push({ method, args: copy(args) })
   const updateRow = (id: string, update: any) => {
     const index = rows.findIndex(row => row.id === id)
@@ -88,7 +90,12 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
     async resumeDataSource(id: string) { record('resumeDataSource', id) },
     async unbindDataSource(id: string) {
       record('unbindDataSource', id)
-      return updateRow(id, { source_lifecycle: { binding_state: 'unbound', query_enabled: true } })
+      const reply = updateRow(id, { source_lifecycle: { binding_state: 'unbound', query_enabled: true } })
+      if (holdNextUnbind) {
+        holdNextUnbind = false
+        return new Promise(resolve => { releaseHeldUnbind = () => resolve(reply) })
+      }
+      return reply
     },
     async clearSourceKnowledge(id: string) {
       record('clearSourceKnowledge', id)
@@ -192,6 +199,8 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
     holdNextList() { holdNextList = true },
     failNextList() { failNextList = true },
     async releaseHeldList() { releaseHeldList?.(); await settle() },
+    holdNextUnbind() { holdNextUnbind = true },
+    async releaseHeldUnbind() { releaseHeldUnbind?.(); await settle() },
     hasMenuItem,
     clickMenuItem,
     confirm,
@@ -336,4 +345,25 @@ test('late pre-clear list cannot restore source controls when post-clear refresh
     assert.ok(!f.hasMenuItem('datasource.edit'), 'older list response must not restore edit')
     assert.ok(!f.hasMenuItem('datasource.syncNow'), 'older list response must not restore sync')
   } finally { await f.releaseHeldList(); await f.close() }
+})
+
+test('same-source clear waits for the in-flight unbind reply', async () => {
+  const f = await fixture({ sources: [source('source-one')] })
+  try {
+    f.holdNextUnbind()
+    await f.clickMenuItem('datasource.unbind')
+    await f.confirm('datasource.unbindConfirm')
+    assert.equal(f.calls.filter(call => call.method === 'unbindDataSource').length, 1)
+    assert.ok(!f.hasMenuItem('datasource.sourceClear'), 'clear must not overlap the outstanding unbind')
+    assert.ok(!f.hasMenuItem('datasource.syncNow'), 'sync is unavailable during a lifecycle write')
+    assert.ok(!f.hasMenuItem('datasource.edit'), 'connection edits are unavailable during a lifecycle write')
+    await f.releaseHeldUnbind()
+    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.binding.unbound'))
+    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryEnabled'))
+    assert.ok(f.hasMenuItem('datasource.sourceClear'), 'clear becomes available after unbind is authoritative')
+    await f.clickMenuItem('datasource.sourceClear')
+    await f.confirm('datasource.sourceClearConfirm')
+    assert.equal(f.calls.filter(call => call.method === 'clearSourceKnowledge').length, 1)
+    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'))
+  } finally { await f.releaseHeldUnbind(); await f.close() }
 })
