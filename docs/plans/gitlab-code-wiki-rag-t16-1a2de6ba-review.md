@@ -54,3 +54,31 @@ The focused test fixture also reparented B's contribution without registering B'
 All executors remain Luna/xhigh. Root retains planning, contract decisions, Sol/high formal review, actual database slot and host commits. All root sessions 57917/41439/30943 are collected. No shared dependency, old container credential, or original main checkout was touched. Only local review records were updated; no GitHub progress comments.
 
 Standards: 2 hard findings, worst P1, plus 1 judgement. Spec: 1 finding, worst P2.
+
+## Frozen regression repair 92c8e41a
+
+Root collected `ROOT_DIRTY_HELPER_READY`, applied gofmt, checked the diff, and saved the single owned test file as clean `92c8e41af43df054b20e3d7386b0abc8e1d30d43` in `flow-config-diagram/WeKnora`. The helper stopped at its narrower workspace permission boundary rather than moving files or retrying writes. Root compile-only validation passed (4.301s; no tests run). No PostgreSQL result is claimed for this new fixture.
+
+Independent Sol/high narrow repair review against helper predecessor `65492277`:
+
+- Standards: 0 hard findings, 1 judgement (possible duplicated expected-reference assertions).
+- Spec: 0 findings. Initial A/B deliveries are drained before generating their cards, B has its exact shared-page raw owner, the shared page begins with independently verified B as primary, and two successive A publications require their own exact ready attempt and completed generation call. Both updates assert B byte/evidence/snapshot preservation and removal of superseded A references.
+
+Migration 116 must be assembled before running this same-e001 multi-origin fixture. This test-slice review does not accept T16 production or authorize the next ticket.
+
+## Frozen service repair d332b8a8
+
+Root saved the main executor's frozen five service files as `d332b8a8a64bfc5a00eead9dd377837feea1ba8e`, then copied only the independently reviewed helper test as `11d719717e363eb9b06a32c439c3a455470f8633`. The repair distinguishes removed A's new target from its old applicability, requires survivors' current publication, avoids downgrading already-ready exact same-snapshot contributions on late fallback, terminates deterministic base-version fence failures, and deduplicates raw owners by complete evidence/file/version/snapshot identity.
+
+Independent Sol/high service repair review:
+
+- Standards: 0 new hard findings, 1 judgement (possible repeated contribution validation between preflight and transaction projections).
+- Spec: 1 P2. `GetPageBySlug` temporarily changes returned page-level provenance from ready to stale when any contribution is inapplicable. After A publishes, persisted B-primary provenance remains ready, while the returned page carries synthetic stale state. The new preflight compares that whole returned provenance with B's persisted ready contribution and rejects valid A replacement (`wiki_page.go:475`, `source_wiki_update_projection.go:174` at d332). Ticket lines 13/16 require independent mixed-page updates across publications.
+
+Root confirmed this code path and sent the exact finding back to the same main Luna/xhigh executor. The correction may read persisted provenance at exact tenant/KB/page/version for projection consistency, while retaining authorized Wiki lookup, every contribution/raw-owner check, the final locked transaction check, and stale answer behavior. This is code-confirmed, not a PostgreSQL result; repository 116 is still being implemented.
+
+Root compile-only validation of assembled 11d719 passed (4.468s; no tests run). Before the last owner-dedup addition, service compile-only and pure contribution tests passed (4.074s and 3.351s); neither is claimed as mixed PostgreSQL acceptance. All root sessions 75510/44294/23934 are collected. T16 remains unaccepted.
+
+The main executor supplied the narrow stale-read correction and root saved it as clean `2cc0d7b5caab189a07dc1d9b7cc11d206f6bcf53`. Independent Sol/high narrow re-review: Standards 0 new hard findings (the prior validation-duplication judgement is unchanged), Spec 0; the d332 P2 is resolved. Only equal provenance or the exact synthesized ready-to-stale state difference is accepted against persisted exact-version metadata. Authorized lookup and final transaction validation are unchanged.
+
+The executor's three-line source-fixture migration load was saved as `6fa327ed224177034dfb560a422d8e4f03aa4559`. Repository migration 116 is still being finalized in its separate owned tree, so these service commits are not a runnable complete PostgreSQL candidate until that slice is assembled. Root confirmed the existing dedicated 57822 PostgreSQL is accepting connections and the safe environment runner exists; no old credentials or shared application service were read or changed.
