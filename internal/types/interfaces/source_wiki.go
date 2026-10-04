@@ -20,6 +20,13 @@ type SourceWikiBatchExecutionService interface {
 	ResumeSourceWikiBatch(context.Context, string)
 	StopSourceWikiBatches()
 }
+
+// SourceWikiUpdateProcessor consumes one accepted durable publication delivery.
+// Implementations must revalidate the source snapshot and configuration
+// generation before changing a page or applicability record.
+type SourceWikiUpdateProcessor interface {
+	ProcessPublishedSourceWikiUpdate(context.Context, types.SourceWikiUpdatePayload) error
+}
 type WikiReadService interface {
 	BeginWikiRead(context.Context, types.SearchTargets) (context.Context, func(), error)
 }

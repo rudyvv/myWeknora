@@ -251,6 +251,14 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewUserResourceFavoriteService))
 	must(container.Provide(service.NewWikiPageService))
 	must(container.Provide(service.NewSourceWikiService))
+	must(container.Provide(func(s interfaces.SourceWikiService) (interfaces.SourceWikiUpdateProcessor, error) {
+		processor, ok := s.(interfaces.SourceWikiUpdateProcessor)
+		if !ok {
+			return nil, fmt.Errorf("source Wiki service does not implement the update processor")
+		}
+		return processor, nil
+	}))
+	must(container.Provide(service.NewSourceWikiUpdateWorker, dig.Name("sourceWikiUpdate")))
 	must(container.Provide(service.NewSourceWikiAttemptRecovery))
 	must(container.Provide(service.NewWikiIngestService, dig.Name("wikiIngest")))
 	must(container.Provide(service.NewWikiLintService))
@@ -496,6 +504,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// persistence succeeded immediately before trigger enqueue failed). Re-arm
 	// them only after the matching handlers are ready.
 	must(container.Invoke(recoverPendingWikiTasks))
+	must(container.Invoke(recoverPendingSourceWikiUpdates))
 	// Resolving the recovery worker constructs SourceWikiService and its full
 	// KnowledgeBaseService dependency graph. Keep this last: ResourceCatalog,
 	// StorageBackendResolver, TenantStoreOwnership and the data-source scheduler

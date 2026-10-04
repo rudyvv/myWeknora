@@ -627,6 +627,15 @@ func (s *sourceWikiService) publishCardWithBatchState(ctx context.Context, kb *t
 		if writeErr != nil {
 			return writeErr
 		}
+		dependencyFileIDs, moduleMemberFileIDs, inventoryComplete, err := sourceWikiContributionInventory(tx, attempt)
+		if err != nil {
+			return err
+		}
+		if err := repository.PersistSourceWikiPageContributionInTx(
+			tx, page, attempt.TopicKind, attempt.TopicKey, dependencyFileIDs, moduleMemberFileIDs, inventoryComplete, time.Now().UTC(),
+		); err != nil {
+			return err
+		}
 		now := time.Now()
 		var result *gorm.DB
 		if stagedCandidate {

@@ -506,6 +506,19 @@ func (s *wikiPageService) GetPageByID(ctx context.Context, id string) (*types.Wi
 		return nil, err
 	}
 	stripWikiPageInlineChunkCitations(page)
+	if page.SourceProvenance != nil && page.SourceProvenance.State == "ready" {
+		if repo, ok := s.repo.(interfaces.WikiSourceApplicabilityRepository); ok {
+			applicable, err := repo.WikiSourceApplicable(ctx, page)
+			if err != nil {
+				return nil, err
+			}
+			if !applicable {
+				p := *page.SourceProvenance
+				p.State = "stale"
+				page.SourceProvenance = &p
+			}
+		}
+	}
 	return page, nil
 }
 

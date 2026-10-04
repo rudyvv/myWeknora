@@ -107,3 +107,52 @@ func recoverPendingWikiTasks(db *gorm.DB, task interfaces.TaskEnqueuer) {
 		logger.Infof(ctx, "[WikiRecovery] recreated %d trigger(s) from durable pending queues", recovered)
 	}
 }
+
+// recoverPendingSourceWikiUpdates recreates one per-KB wake-up task for each
+// durable accepted publication lane. The payload is only a routing hint; the
+// delivery row remains authoritative and is claimed/validated by the worker.
+func recoverPendingSourceWikiUpdates(db *gorm.DB, task interfaces.TaskEnqueuer) {
+	if db == nil || task == nil {
+		return
+	}
+	ctx := context.Background()
+	const activeKnowledgeBase = `EXISTS (
+		SELECT 1 FROM knowledge_bases kb
+		WHERE kb.id = task_pending_ops.scope_id
+			AND kb.tenant_id = task_pending_ops.tenant_id
+			AND kb.deleted_at IS NULL
+	)`
+	cleanup := db.WithContext(ctx).
+		Where("task_type = ? AND scope = ? AND op = ?", types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, "published_snapshot").
+		Where("NOT " + activeKnowledgeBase).
+		Delete(&types.TaskPendingOp{})
+	if cleanup.Error != nil {
+		logger.Warnf(ctx, "[SourceWikiRecovery] failed to clear deleted KB queues: %v", cleanup.Error)
+		return
+	}
+	var scopes []pendingWikiScope
+	if err := db.WithContext(ctx).Model(&types.TaskPendingOp{}).
+		Distinct("tenant_id", "task_type", "scope_id").
+		Where("task_type = ? AND scope = ? AND op = ?", types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, "published_snapshot").
+		Where(activeKnowledgeBase).
+		Find(&scopes).Error; err != nil {
+		logger.Warnf(ctx, "[SourceWikiRecovery] failed to list pending update lanes: %v", err)
+		return
+	}
+	for _, scope := range scopes {
+		if scope.TenantID == 0 || scope.ScopeID == "" {
+			continue
+		}
+		payload, err := json.Marshal(types.SourceWikiUpdateTriggerPayload{TenantID: scope.TenantID, KnowledgeBaseID: scope.ScopeID})
+		if err != nil {
+			logger.Warnf(ctx, "[SourceWikiRecovery] marshal trigger for KB %s failed: %v", scope.ScopeID, err)
+			continue
+		}
+		trigger := asynq.NewTask(types.TypeSourceWikiUpdate, payload,
+			asynq.Queue(types.QueueWiki), asynq.MaxRetry(10), asynq.Timeout(60*time.Minute),
+			asynq.TaskID("source-wiki-update-"+scope.ScopeID))
+		if _, err := task.Enqueue(trigger); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) && !errors.Is(err, asynq.ErrDuplicateTask) {
+			logger.Warnf(ctx, "[SourceWikiRecovery] enqueue trigger for KB %s failed: %v", scope.ScopeID, err)
+		}
+	}
+}

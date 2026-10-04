@@ -63,12 +63,40 @@ func readWikiPageDB(ctx context.Context, base *gorm.DB, sourceWiki bool, table s
  AND jsonb_array_length(COALESCE(` + refs + `,'[]'::jsonb))>0 AND ` + evidence + " AND " + allSources
 	if source.IsWikiAnswerRead(ctx) && table == "wiki_pages" {
 		condition += " AND " + p + "->>'state'='ready' AND " + table + ".status='published' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(" + evidenceArray + ") ae WHERE NOT (" + source.SnapshotSQL(ctx, p+"->>'applicable_snapshot_id'", p+"->>'source_id'", "ae->>'knowledge_id'") + "))"
+		condition += " AND " + wikiPageSourceContributionsAnswerSQL(ctx, table)
 	}
 	// Ordinary wiki rows that contain a source contribution without complete typed
 	// provenance fail closed instead of falling back to the legacy intersect rule.
 	ordinary := p + " IS NULL AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text(COALESCE(" + refs + ",'[]'::jsonb)) fr JOIN source_files sf ON sf.id=split_part(fr,'|',1))"
 
 	return db.Where("(" + ordinary + ") OR (" + condition + ")")
+}
+
+func wikiPageSourceContributionsAnswerSQL(ctx context.Context, table string) string {
+	contributionEvidence := `CASE WHEN jsonb_typeof(c.contribution->'source_provenance'->'evidence')='array'
+		THEN c.contribution->'source_provenance'->'evidence' ELSE '[]'::jsonb END`
+	permission := source.SourcePermissionSQL(ctx, "c.source_id", "ce->>'knowledge_id'")
+	snapshot := source.SnapshotSQL(ctx, "c.applicable_snapshot_id", "c.source_id", "ce->>'knowledge_id'")
+	return `EXISTS(SELECT 1 FROM source_wiki_page_contributions c
+		WHERE c.page_id=` + table + `.id AND c.revision_id IS NULL AND c.page_version=` + table + `.version)
+		AND NOT EXISTS(SELECT 1 FROM source_wiki_page_contributions c
+			WHERE c.page_id=` + table + `.id AND c.revision_id IS NULL AND c.page_version=` + table + `.version
+			AND (c.state<>'ready' OR c.target_snapshot_id<>c.applicable_snapshot_id OR
+				COALESCE(c.contribution->>'has_unattributed_body','true')<>'false' OR
+				c.contribution->'source_provenance'->>'source_id'<>c.source_id OR
+				c.contribution->'source_provenance'->>'topic_key'<>c.topic_key OR
+				c.contribution->'source_provenance'->>'state'<>'ready' OR
+				c.contribution->'source_provenance'->>'applicable_snapshot_id'<>c.applicable_snapshot_id OR
+				jsonb_typeof(c.contribution->'source_provenance'->'evidence')<>'array' OR
+				jsonb_array_length(` + contributionEvidence + `)=0 OR
+				NOT EXISTS(SELECT 1 FROM source_publications cp JOIN source_snapshots cs ON cs.id=cp.snapshot_id
+					AND cs.data_source_id=cp.data_source_id AND cs.tenant_id=cp.tenant_id AND cs.knowledge_base_id=cp.knowledge_base_id
+					WHERE cp.data_source_id=c.source_id AND cp.tenant_id=` + table + `.tenant_id
+					AND cp.knowledge_base_id=` + table + `.knowledge_base_id AND cp.snapshot_id=c.applicable_snapshot_id
+					AND cs.state='published' AND cs.manifest_complete=TRUE) OR
+				EXISTS(SELECT 1 FROM jsonb_array_elements(` + contributionEvidence + `) ce
+					WHERE ce->>'data_source_id'<>c.source_id OR ce->>'knowledge_id' IS NULL OR
+						NOT (` + permission + `) OR NOT (` + snapshot + `))))`
 }
 
 func pinSourceWikiEvidenceOwner(tx *gorm.DB, ctx context.Context, leaseID, pageID string, revisionID *string, version int) error {
@@ -249,9 +277,51 @@ func (r *wikiPageRepository) WikiSourceApplicable(ctx context.Context, page *typ
 	if err := source.ValidateReadScope(ctx); err != nil {
 		return false, err
 	}
+	provenance := page.SourceProvenance
+	if provenance.SourceID == "" || provenance.TopicKind == "" || provenance.TopicKey == "" ||
+		provenance.ApplicableSnapshotID == "" || page.ID == "" || page.Version <= 0 ||
+		!r.db.Migrator().HasTable("source_wiki_page_contributions") {
+		return false, nil
+	}
+	permission := source.SourcePermissionSQL(ctx, "c.source_id", "e->>'knowledge_id'")
+	snapshotPermission := source.SnapshotSQL(ctx, "c.applicable_snapshot_id", "c.source_id", "e->>'knowledge_id'")
+	allContributionsValid := `NOT EXISTS (
+		SELECT 1 FROM source_wiki_page_contributions x
+		WHERE x.page_id=? AND x.page_version=? AND (
+			x.state<>'ready' OR x.applicable_snapshot_id='' OR x.target_snapshot_id<>x.applicable_snapshot_id OR
+			COALESCE(x.contribution->>'has_unattributed_body','true')<>'false' OR
+			jsonb_typeof(x.contribution->'source_provenance'->'evidence')<>'array' OR
+			jsonb_array_length(CASE WHEN jsonb_typeof(x.contribution->'source_provenance'->'evidence')='array'
+				THEN x.contribution->'source_provenance'->'evidence' ELSE '[]'::jsonb END)=0 OR
+			NOT EXISTS(SELECT 1 FROM source_publications xp JOIN source_snapshots xs ON xs.id=xp.snapshot_id
+				AND xs.data_source_id=xp.data_source_id AND xs.tenant_id=xp.tenant_id AND xs.knowledge_base_id=xp.knowledge_base_id
+				WHERE xp.data_source_id=x.source_id AND xp.tenant_id=? AND xp.knowledge_base_id=?
+				AND xp.snapshot_id=x.applicable_snapshot_id AND xs.state='published' AND xs.manifest_complete=TRUE) OR
+			EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(x.contribution->'source_provenance'->'evidence')='array'
+				THEN x.contribution->'source_provenance'->'evidence' ELSE '[]'::jsonb END) xe
+				WHERE xe->>'data_source_id'<>x.source_id OR xe->>'knowledge_id' IS NULL OR
+				NOT (` + source.SourcePermissionSQL(ctx, "x.source_id", "xe->>'knowledge_id'") + `) OR
+				NOT (` + source.SnapshotSQL(ctx, "x.applicable_snapshot_id", "x.source_id", "xe->>'knowledge_id'") + `))
+		)
+	)`
 	var applicable bool
-	predicate := source.SnapshotSQL(ctx, "ss.id", "ss.data_source_id", "sm.source_file_id")
-	err := r.db.WithContext(ctx).Raw("SELECT EXISTS(SELECT 1 FROM source_snapshots ss JOIN source_snapshot_members sm ON sm.snapshot_id=ss.id WHERE ss.id=? AND ss.data_source_id=? AND sm.status='parsed' AND "+predicate+")", page.SourceProvenance.ApplicableSnapshotID, page.SourceProvenance.SourceID).Scan(&applicable).Error
+	err := r.db.WithContext(ctx).Raw(`SELECT EXISTS(
+		SELECT 1 FROM source_wiki_page_contributions c
+		WHERE c.page_id=? AND c.page_version=?
+		AND c.source_id=? AND c.topic_kind=? AND c.topic_key=?
+		AND c.state='ready' AND c.applicable_snapshot_id=? AND c.target_snapshot_id=?
+		AND c.contribution->>'has_unattributed_body'='false'
+		AND `+allContributionsValid+`
+		AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.contribution->'source_provenance'->'evidence')='array'
+			THEN c.contribution->'source_provenance'->'evidence' ELSE '[]'::jsonb END) e
+			WHERE e->>'data_source_id'<>c.source_id OR e->>'knowledge_id' IS NULL OR NOT (`+permission+`) OR NOT (`+snapshotPermission+`))
+		AND EXISTS(SELECT 1 FROM source_publications sp JOIN source_snapshots ss ON ss.id=sp.snapshot_id
+			AND ss.data_source_id=sp.data_source_id AND ss.tenant_id=sp.tenant_id AND ss.knowledge_base_id=sp.knowledge_base_id
+			WHERE sp.data_source_id=c.source_id AND sp.tenant_id=? AND sp.knowledge_base_id=?
+			AND sp.snapshot_id=c.applicable_snapshot_id AND ss.state='published' AND ss.manifest_complete=TRUE)
+	)`, page.ID, page.Version, provenance.SourceID, provenance.TopicKind, provenance.TopicKey,
+		provenance.ApplicableSnapshotID, provenance.ApplicableSnapshotID, page.ID, page.Version,
+		page.TenantID, page.KnowledgeBaseID, page.TenantID, page.KnowledgeBaseID).Scan(&applicable).Error
 	return applicable, err
 }
 

@@ -5,6 +5,9 @@ import "time"
 const (
 	SourceWikiSkeletonMaxFiles         = 50_000
 	SourceWikiSkeletonMaxRelations     = 200_000
+	SourceWikiImpactMaxFacts           = 200_000
+	SourceWikiImpactMaxFactBytes       = 64 << 20
+	SourceWikiImpactMaxContextBytes    = 32 << 20
 	SourceWikiBatchMaxCalls            = 240
 	SourceWikiBatchMaxTokens           = 4_000_000
 	SourceWikiBatchMaxElapsed          = time.Hour

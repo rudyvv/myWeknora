@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hibiken/asynq"
 	"gorm.io/gorm"
 )
 
@@ -42,6 +43,9 @@ func newSourceWikiFixture(t *testing.T, f *javaSourceFixture, response func(bool
 	attemptLedgerMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000113_source_wiki_attempt_ledger.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, f.db.Exec(string(attemptLedgerMigration)).Error)
+	batchMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, f.db.Exec(string(batchMigration)).Error)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, readErr := io.ReadAll(r.Body)
 		require.NoError(t, readErr)
@@ -102,6 +106,132 @@ func TestSourceWikiModuleGeneratesValidatedCardThroughExistingWikiTools(t *testi
 	require.NoError(t, err)
 	require.Equal(t, f.sha, evidence.CommitSHA)
 	require.Contains(t, evidence.Content, "getPushSchedule")
+}
+
+func TestSourceWikiUnaffectedModuleCarriesApplicabilityAcrossPublishedSnapshot(t *testing.T) {
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"lib/Unrelated.java": []byte("package lib; class Unrelated { int stableValue() { return 1; } }\n"),
+	})
+	config, err := f.ds.ParseConfig()
+	require.NoError(t, err)
+	projects, ok := config.Settings["projects"].([]any)
+	require.True(t, ok)
+	project, ok := projects[0].(map[string]any)
+	require.True(t, ok)
+	project["paths"] = []any{"src", "lib"}
+	updated := *f.ds
+	updated.Config, err = config.ToJSON()
+	require.NoError(t, err)
+	f.ds, err = f.service.UpdateDataSource(f.ctx, &updated)
+	require.NoError(t, err)
+	syncSourceFixture(t, f)
+	previous := latestIncrementalRun(t, f)
+	parseCalls := f.parseCount.Load()
+
+	wiki, generator := newSourceWikiFixture(t, f, func(qa bool) string {
+		if qa {
+			return `{"supported":true,"reason":"","sections":[0],"uncertain":false}`
+		}
+		return `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`
+	})
+	svc := generator.(*sourceWikiService)
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ready", attempt.Status)
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.NoError(t, err)
+	require.Equal(t, previous.Snapshot.ID, page.SourceProvenance.ApplicableSnapshotID)
+	require.Len(t, page.SourceProvenance.Evidence, 1)
+	var contribution types.SourceWikiPageContribution
+	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND revision_id IS NULL", page.ID, f.ds.ID).Take(&contribution).Error)
+	require.Equal(t, "ready", contribution.State)
+	require.Equal(t, "module/src", contribution.TopicKey)
+	require.NotEmpty(t, contribution.ModuleMemberFileIDs, "complete module membership is persisted separately from selected evidence")
+	oldContributionEvidenceSHA := contribution.EvidenceSHA256
+	oldBody := page.Content
+	oldEvidenceSHA := page.SourceProvenance.Evidence[0].SHA256
+
+	f.advanceFiles(map[string][]byte{
+		"lib/Unrelated.java": []byte("package lib; class Unrelated { int stableValue() { return 2; } }\n"),
+	})
+	syncSourceFixture(t, f)
+	next := latestIncrementalRun(t, f)
+	require.NotEqual(t, previous.Snapshot.ID, next.Snapshot.ID)
+	require.Equal(t, parseCalls+1, f.parseCount.Load(), "the source parser HTTP adapter must process the changed file once")
+	var updatePlan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("source_id=? AND snapshot_id=?", f.ds.ID, next.Snapshot.ID).Take(&updatePlan).Error)
+	require.Equal(t, previous.Snapshot.ID, updatePlan.PreviousSnapshotID)
+	require.Equal(t, next.Snapshot.ID, updatePlan.SnapshotID)
+	require.Greater(t, updatePlan.ConfigGeneration, int64(0))
+	stalePage, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.NoError(t, err, "ordinary Wiki browsing keeps the existing stale page visible for status/history")
+	require.Equal(t, "stale", stalePage.SourceProvenance.State)
+	scopes := agenttools.NewWikiScopesFromKBIDs([]string{f.kb.ID})
+	read := agenttools.NewWikiReadPageTool(wiki, f.knowledge, scopes, nil)
+	readArgs, _ := json.Marshal(map[string]any{"slugs": []string{attempt.Slug}})
+	staleRead, err := read.Execute(f.ctx, readArgs)
+	require.NoError(t, err)
+	require.NotContains(t, staleRead.Output, "getPushSchedule returns a schedule.",
+		"a stale card remains visible to Wiki browsing but not an authorized current-answer projection")
+	search := agenttools.NewWikiSearchTool(wiki, f.knowledge, scopes, nil)
+	staleSearch, err := search.Execute(f.ctx, json.RawMessage(`{"query":"getPushSchedule"}`))
+	require.NoError(t, err)
+	require.NotContains(t, staleSearch.Output, attempt.Slug)
+
+	accepted, err := f.service.sourceSnapshots.RelaySourcePublicationOutbox(f.ctx, 10)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, accepted, 1, "published source update events must enter the durable Wiki lane")
+	pendingOps := repository.NewTaskPendingOpsRepository(f.db)
+	updateTrigger, err := json.Marshal(types.SourceWikiUpdateTriggerPayload{TenantID: f.ds.TenantID, KnowledgeBaseID: f.kb.ID})
+	require.NoError(t, err)
+	worker := NewSourceWikiUpdateWorker(svc, pendingOps, nil)
+	for attempt := 0; attempt < 4; attempt++ {
+		pendingCount, pendingErr := pendingOps.PendingCount(f.ctx, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, f.kb.ID)
+		require.NoError(t, pendingErr)
+		if pendingCount == 0 {
+			break
+		}
+		require.NoError(t, worker.Handle(f.ctx, asynq.NewTask(types.TypeSourceWikiUpdate, updateTrigger)))
+	}
+	remaining, err := pendingOps.PendingCount(f.ctx, types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, f.kb.ID)
+	require.NoError(t, err)
+	require.Zero(t, remaining, "accepted update events must be acknowledged only after their durable plan is processed")
+	require.NoError(t, f.db.Where("source_id=? AND snapshot_id=?", f.ds.ID, next.Snapshot.ID).Take(&updatePlan).Error)
+	require.Equal(t, "completed", updatePlan.Status)
+	require.False(t, updatePlan.SourceWideStale)
+	var carriedItem types.SourceWikiUpdatePlanItem
+	require.NoError(t, f.db.Where("plan_id=? AND topic_key=?", updatePlan.ID, "module/src").Take(&carriedItem).Error)
+	require.Equal(t, "carry_forward", carriedItem.Action)
+	require.Equal(t, "completed", carriedItem.State)
+	var supersededPlan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("source_id=? AND snapshot_id=?", f.ds.ID, previous.Snapshot.ID).Take(&supersededPlan).Error)
+	require.Equal(t, "superseded", supersededPlan.Status, "older accepted work must not overwrite the newer publication")
+	carried, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.NoError(t, err)
+	require.Equal(t, "ready", carried.SourceProvenance.State)
+	require.Equal(t, next.Snapshot.ID, carried.SourceProvenance.ApplicableSnapshotID,
+		"a complete unchanged module must be re-attested to the new published snapshot")
+	require.Equal(t, oldBody, carried.Content, "carrying applicability forward must preserve the page body")
+	require.Equal(t, oldEvidenceSHA, carried.SourceProvenance.Evidence[0].SHA256,
+		"carrying applicability forward must preserve the exact evidence digest")
+	byID, err := wiki.GetPageByID(f.ctx, page.ID)
+	require.NoError(t, err)
+	require.Equal(t, "ready", byID.SourceProvenance.State, "the direct UI page read must use the same current applicability check")
+	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND revision_id IS NULL", page.ID, f.ds.ID).Take(&contribution).Error)
+	require.Equal(t, "ready", contribution.State)
+	require.Equal(t, next.Snapshot.ID, contribution.ApplicableSnapshotID)
+	require.Equal(t, oldContributionEvidenceSHA, contribution.EvidenceSHA256)
+
+	readResult, err := read.Execute(f.ctx, readArgs)
+	require.NoError(t, err)
+	require.Contains(t, readResult.Output, "getPushSchedule returns a schedule.",
+		"the authorized Agent read path must keep a fully revalidated unaffected page answerable")
+	searchResult, err := search.Execute(f.ctx, json.RawMessage(`{"query":"getPushSchedule"}`))
+	require.NoError(t, err)
+	require.Contains(t, searchResult.Output, attempt.Slug,
+		"the authorized Agent search path must keep a fully revalidated unaffected page discoverable")
 }
 
 func TestSourceWikiUnknownContextFailsBeforeProviderDispatch(t *testing.T) {
@@ -1474,6 +1604,12 @@ func TestSourceWikiMixedDocumentContributionsRequireWholeScopeAndOrdinaryWikiKee
 	page, err = wiki.UpdatePage(f.ctx, page)
 	require.NoError(t, err)
 	require.Equal(t, "unverified", page.SourceProvenance.State)
+	var currentContribution types.SourceWikiPageContribution
+	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND revision_id IS NULL", page.ID, f.ds.ID).Take(&currentContribution).Error)
+	require.Equal(t, "unverified", currentContribution.State)
+	var archivedContribution types.SourceWikiPageContribution
+	require.NoError(t, f.db.Where("page_id=? AND source_id=? AND revision_id IS NOT NULL", page.ID, f.ds.ID).Take(&archivedContribution).Error)
+	require.Equal(t, "ready", archivedContribution.State, "the exact pre-edit source contribution remains attached to its historical revision")
 	sourceTargets := types.SearchTargets{&types.SearchTarget{Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID, SourceIDs: []string{f.ds.ID}}}
 	ctx, release, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, sourceTargets)
 	require.NoError(t, err)

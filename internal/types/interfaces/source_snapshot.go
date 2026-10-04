@@ -11,6 +11,7 @@ type SourceSnapshotRepository interface {
 	CheckReady(context.Context) error
 	CollectRetiredSourceVersions(context.Context, int) (int, error)
 	RelaySourcePublicationOutbox(context.Context, int) (int, error)
+	PendingSourceWikiUpdateScopes(context.Context, int) ([]types.SourceWikiUpdateQueueScope, error)
 	GetPublished(context.Context, uint64, string) (*types.SourceRunResult, error)
 	GetParsedArtifact(context.Context, uint64, string, string) (*types.ParsedSourceFile, error)
 	SaveParsedArtifact(context.Context, uint64, string, string, *types.ParsedSourceFile) error
