@@ -20,29 +20,43 @@ import (
 // authenticate. The subresource therefore exposes only one logical field,
 // "credentials", with PUT replacing the whole map and DELETE wiping it.
 type DataSourceResponse struct {
-	ID                   string               `json:"id"`
-	TenantID             uint64               `json:"tenant_id"`
-	KnowledgeBaseID      string               `json:"knowledge_base_id"`
-	Name                 string               `json:"name"`
-	Type                 string               `json:"type"`
-	Config               *DataSourceConfigDTO `json:"config,omitempty"`
-	SyncSchedule         string               `json:"sync_schedule"`
-	SyncMode             string               `json:"sync_mode"`
-	Status               string               `json:"status"`
-	ConflictStrategy     string               `json:"conflict_strategy"`
-	SyncDeletions        bool                 `json:"sync_deletions"`
-	LastSyncAt           *time.Time           `json:"last_sync_at"`
-	LastSyncCursor       json.RawMessage      `json:"last_sync_cursor,omitempty"`
-	LastSyncResult       json.RawMessage      `json:"last_sync_result,omitempty"`
-	ErrorMessage         string               `json:"error_message,omitempty"`
-	SyncLogRetentionDays int                  `json:"sync_log_retention_days"`
-	CreatedAt            time.Time            `json:"created_at"`
-	UpdatedAt            time.Time            `json:"updated_at"`
-	TotalItemsSynced     int64                `json:"total_items_synced"`
-	LatestSyncLog        *types.SyncLog       `json:"latest_sync_log,omitempty"`
+	ID                   string                        `json:"id"`
+	TenantID             uint64                        `json:"tenant_id"`
+	KnowledgeBaseID      string                        `json:"knowledge_base_id"`
+	Name                 string                        `json:"name"`
+	Type                 string                        `json:"type"`
+	Config               *DataSourceConfigDTO          `json:"config,omitempty"`
+	SyncSchedule         string                        `json:"sync_schedule"`
+	SyncMode             string                        `json:"sync_mode"`
+	Status               string                        `json:"status"`
+	ConflictStrategy     string                        `json:"conflict_strategy"`
+	SyncDeletions        bool                          `json:"sync_deletions"`
+	LastSyncAt           *time.Time                    `json:"last_sync_at"`
+	LastSyncCursor       json.RawMessage               `json:"last_sync_cursor,omitempty"`
+	LastSyncResult       json.RawMessage               `json:"last_sync_result,omitempty"`
+	ErrorMessage         string                        `json:"error_message,omitempty"`
+	SyncLogRetentionDays int                           `json:"sync_log_retention_days"`
+	CreatedAt            time.Time                     `json:"created_at"`
+	UpdatedAt            time.Time                     `json:"updated_at"`
+	TotalItemsSynced     int64                         `json:"total_items_synced"`
+	LatestSyncLog        *types.SyncLog                `json:"latest_sync_log,omitempty"`
+	SourceLifecycle      *DataSourceSourceLifecycleDTO `json:"source_lifecycle,omitempty"`
 	// Single logical credential field — DataSource credentials are a
 	// per-connector atomic map, so "configured?" applies to the whole set.
 	Credentials map[string]CredentialFieldMetadata `json:"credentials,omitempty"`
+}
+
+type DataSourceSourceLifecycleDTO struct {
+	BindingState string                `json:"binding_state"`
+	QueryEnabled bool                  `json:"query_enabled"`
+	Cleanup      *DataSourceCleanupDTO `json:"cleanup,omitempty"`
+}
+
+type DataSourceCleanupDTO struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Retryable bool   `json:"retryable"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // DataSourceConfigDTO is types.DataSourceConfig with the Credentials map
@@ -95,12 +109,38 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
 			"credentials": {Configured: configured},
 		},
 	}
+	if configuredSourceMode(ds) {
+		bindingState := ds.SourceBindingState
+		if bindingState == "" {
+			bindingState = types.SourceBindingBound
+		}
+		queryEnabled := ds.SourceQueryEnabled
+		if ds.SourceBindingState == "" {
+			queryEnabled = true
+		}
+		lifecycle := &DataSourceSourceLifecycleDTO{BindingState: bindingState, QueryEnabled: queryEnabled}
+		if op := ds.SourceCleanup; op != nil {
+			lifecycle.Cleanup = &DataSourceCleanupDTO{ID: op.ID, Status: op.Status, Retryable: op.Retryable, ErrorCode: op.ErrorCode}
+		}
+		response.SourceLifecycle = lifecycle
+	}
 	if ds.Type == types.ConnectorTypeWeComDrive {
 		response.ErrorMessage = safeWeDriveError(ds.ErrorMessage)
 		response.LastSyncResult = safeWeDriveResult(ds.LastSyncResult)
 		response.LatestSyncLog = SafeWeDriveSyncLog(ds.LatestSyncLog)
 	}
 	return response
+}
+
+func configuredSourceMode(ds *types.DataSource) bool {
+	if ds == nil {
+		return false
+	}
+	config, err := ds.ParseConfig()
+	if err != nil || config == nil {
+		return false
+	}
+	return config.Settings["content_mode"] == "source"
 }
 
 // Historical WeDrive failures can contain share URLs or local paths. Extract

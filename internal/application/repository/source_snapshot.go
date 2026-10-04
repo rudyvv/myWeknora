@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pgrepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/postgres"
+	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -262,6 +263,9 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 		if string(ds.Config) != string(expected.Config) || ds.KnowledgeBaseID != kb.ID {
 			return fmt.Errorf("source configuration changed before publication")
 		}
+		if !datasource.SourceLifecycleAllowsConnection(&ds) {
+			return types.ErrSourceSyncLeaseLost
+		}
 		var currentKB types.KnowledgeBase
 		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where("id=? AND tenant_id=?", kb.ID, kb.TenantID).First(&currentKB).Error; err != nil {
 			return err
@@ -426,7 +430,7 @@ func (r *sourceSnapshotRepository) EnsurePublishedSourceWikiUpdate(ctx context.C
 			return fmt.Errorf("source is no longer available for Wiki notification: %w", err)
 		}
 		fingerprint := sourceConfigFingerprint(&current)
-		if sourceConfigFingerprint(expected) != fingerprint || state.ConfigFingerprint != fingerprint || !sourceModeEnabled(&current) {
+		if sourceConfigFingerprint(expected) != fingerprint || state.ConfigFingerprint != fingerprint || !sourceModeEnabled(&current) || !datasource.SourceLifecycleAllowsConnection(&current) {
 			return fmt.Errorf("source configuration changed before Wiki notification")
 		}
 
@@ -727,6 +731,10 @@ func (r *sourceSnapshotRepository) GetStagedChunkIDs(ctx context.Context, snapsh
 // release transactions never deadlock against a collector holding the queue
 // row while checking restrictive version foreign keys.
 func (r *sourceSnapshotRepository) CollectRetiredSourceVersions(ctx context.Context, limit int) (int, error) {
+	return r.collectRetiredSourceVersions(ctx, limit, "")
+}
+
+func (r *sourceSnapshotRepository) collectRetiredSourceVersions(ctx context.Context, limit int, dataSourceID string) (int, error) {
 	if r.db == nil || r.db.Dialector.Name() != "postgres" {
 		return 0, nil
 	}
@@ -750,11 +758,15 @@ func (r *sourceSnapshotRepository) CollectRetiredSourceVersions(ctx context.Cont
 				SnapshotID        string `gorm:"column:snapshot_id"`
 				EnqueueGeneration int64  `gorm:"column:enqueue_generation"`
 			}
-			err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			candidateQuery := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 				Table("source_snapshot_gc_candidates").
 				Select("snapshot_id, enqueue_generation").
-				Where("next_attempt_at<=now() AND (claimed_until IS NULL OR claimed_until<=now())").
-				Order("next_attempt_at ASC,enqueued_at ASC,snapshot_id ASC").Take(&candidate).Error
+				Where("next_attempt_at<=now() AND (claimed_until IS NULL OR claimed_until<=now())")
+			if dataSourceID != "" {
+				candidateQuery = candidateQuery.Where(`EXISTS(SELECT 1 FROM source_snapshots gc_snapshot
+					WHERE gc_snapshot.id=source_snapshot_gc_candidates.snapshot_id AND gc_snapshot.data_source_id=?)`, dataSourceID)
+			}
+			err := candidateQuery.Order("next_attempt_at ASC,enqueued_at ASC,snapshot_id ASC").Take(&candidate).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}

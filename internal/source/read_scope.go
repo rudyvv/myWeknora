@@ -153,10 +153,15 @@ func ValidateReadScope(ctx context.Context) error {
 func SnapshotSQL(ctx context.Context, snapshotColumn, sourceColumn, fileColumn string) string {
 	scope, ok := ctx.Value(readScopeKey{}).(*readScope)
 	if !ok {
-		return `EXISTS (SELECT 1 FROM source_publications sp WHERE sp.snapshot_id=` + snapshotColumn + ` AND sp.data_source_id=` + sourceColumn + `)`
+		return `EXISTS (SELECT 1 FROM source_publications sp
+		JOIN data_sources lifecycle_ds ON lifecycle_ds.id=sp.data_source_id
+		WHERE sp.snapshot_id=` + snapshotColumn + ` AND sp.data_source_id=` + sourceColumn + `
+		AND lifecycle_ds.source_query_enabled IS TRUE AND lifecycle_ds.deleted_at IS NULL)`
 	}
 	return `EXISTS (SELECT 1 FROM source_read_scopes rs JOIN source_read_leases rl ON rl.id=rs.lease_id
+		JOIN data_sources lifecycle_ds ON lifecycle_ds.id=rs.data_source_id
 		WHERE rl.id='` + scope.leaseID + `' AND rl.expires_at>now() AND rs.snapshot_id=` + snapshotColumn + ` AND rs.data_source_id=` + sourceColumn + `
+		AND lifecycle_ds.source_query_enabled IS TRUE AND lifecycle_ds.deleted_at IS NULL
 		AND (jsonb_array_length(rs.knowledge_ids)=0 OR jsonb_exists(rs.knowledge_ids, ` + fileColumn + `))
 		AND (jsonb_array_length(rs.tag_ids)=0 OR EXISTS (SELECT 1 FROM knowledge_tag_relations ktr
 		 WHERE ktr.knowledge_id=` + fileColumn + ` AND jsonb_exists(rs.tag_ids, ktr.tag_id))))`

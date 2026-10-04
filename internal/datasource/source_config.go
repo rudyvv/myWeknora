@@ -11,6 +11,19 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
+// SourceLifecycleAllowsConnection reports whether a source-mode datasource is
+// still permitted to contact its connector. Empty state is treated as the
+// pre-lifecycle default for legacy callers and document-only fixtures.
+func SourceLifecycleAllowsConnection(ds *types.DataSource) bool {
+	if ds == nil || ds.SourceBindingState == types.SourceBindingUnbound {
+		return false
+	}
+	if ds.SourceBindingState == "" {
+		return true
+	}
+	return ds.SourceQueryEnabled
+}
+
 const (
 	ContentModeDocument = "document"
 	ContentModeSource   = "source"
@@ -123,6 +136,7 @@ func ParseSourceSettings(config *types.DataSourceConfig) (*SourceSettings, strin
 // document sources are not.
 func GitLabSourceReconciliationEligible(ds *types.DataSource) bool {
 	if ds == nil || ds.Type != types.ConnectorTypeGitLab ||
+		!SourceLifecycleAllowsConnection(ds) ||
 		(ds.Status != types.DataSourceStatusActive && ds.Status != types.DataSourceStatusError) ||
 		strings.TrimSpace(ds.KnowledgeBaseID) == "" {
 		return false

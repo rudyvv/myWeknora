@@ -38,6 +38,9 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 	if err != nil {
 		return nil, err
 	}
+	if isSourceModeDataSource(ds) && !sourceLifecycleAllowsConnection(ds) {
+		return nil, fmt.Errorf("unbound or cleared source cannot be previewed")
+	}
 	if ds.Type != types.ConnectorTypeGitLab {
 		return nil, datasource.ErrInvalidConfig
 	}

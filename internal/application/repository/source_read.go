@@ -46,7 +46,7 @@ func (r *knowledgeRepository) AcquireSourceRead(ctx context.Context, targets typ
 			}
 			var snapshots []types.SourcePublication
 			q := tx.Table("source_publications sp").Select("sp.*").
-				Joins("JOIN data_sources ds ON ds.id=sp.data_source_id AND ds.tenant_id=sp.tenant_id AND ds.knowledge_base_id=sp.knowledge_base_id AND ds.deleted_at IS NULL AND ds.config->'settings'->>'content_mode'='source'").
+				Joins("JOIN data_sources ds ON ds.id=sp.data_source_id AND ds.tenant_id=sp.tenant_id AND ds.knowledge_base_id=sp.knowledge_base_id AND ds.deleted_at IS NULL AND ds.source_query_enabled IS TRUE AND ds.config->'settings'->>'content_mode'='source'").
 				Where("sp.knowledge_base_id=? AND sp.tenant_id=?", target.KnowledgeBaseID, target.TenantID)
 			if len(target.SourceIDs) > 0 {
 				q = q.Where("sp.data_source_id IN ?", target.SourceIDs)
