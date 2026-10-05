@@ -32,12 +32,18 @@ type concurrencyEmbedder struct {
 func (w *concurrencyEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	release := limiter.GateNamedN(ctx, w.inner.GetModelID(), w.inner.GetModelName(), w.limit)
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return w.inner.Embed(ctx, text)
 }
 
 func (w *concurrencyEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]float32, error) {
 	release := limiter.GateNamedN(ctx, w.inner.GetModelID(), w.inner.GetModelName(), w.limit)
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return w.inner.BatchEmbed(ctx, texts)
 }
 

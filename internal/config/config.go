@@ -33,6 +33,7 @@ type Config struct {
 	PromptTemplates *PromptTemplatesConfig `yaml:"prompt_templates" json:"prompt_templates"`
 	IM              *IMConfig              `yaml:"im"               json:"im"`
 	Agent           *AgentConfig           `yaml:"agent"            json:"agent"`
+	SourceResources *SourceResourceConfig  `yaml:"source_resources" json:"source_resources"`
 	// FrontendBaseURL is the externally-visible origin of the SPA, used
 	// to compose absolute share-link URLs. Empty falls back to a host-
 	// relative URL ("/register?token=…") which the SPA then resolves
@@ -84,6 +85,109 @@ type DocReaderConfig struct {
 	Addr string `yaml:"addr" json:"addr"`
 	// Transport: "grpc" (default) or "http"
 	Transport string `yaml:"transport" json:"transport"`
+}
+
+// SourceResourceConfig defines finite per-run and per-source payload budgets.
+// Zero fields use the deployment defaults; negative values are rejected.
+type SourceResourceConfig struct {
+	MaxSelectedFiles          int           `yaml:"max_selected_files" json:"max_selected_files"`
+	MaxSelectedBytes          int64         `yaml:"max_selected_bytes" json:"max_selected_bytes"`
+	MaxFileBytes              int64         `yaml:"max_file_bytes" json:"max_file_bytes"`
+	MaxConcurrentRuns         int           `yaml:"max_concurrent_runs" json:"max_concurrent_runs"`
+	RunTimeout                time.Duration `yaml:"run_timeout" json:"run_timeout"`
+	GitTransferBytes          int64         `yaml:"git_transfer_bytes" json:"git_transfer_bytes"`
+	GitObjectStageBytes       int64         `yaml:"git_object_stage_bytes" json:"git_object_stage_bytes"`
+	SelectedBlobStageBytes    int64         `yaml:"selected_blob_stage_bytes" json:"selected_blob_stage_bytes"`
+	MinFreeBytes              int64         `yaml:"min_free_bytes" json:"min_free_bytes"`
+	MinFreePercent            int           `yaml:"min_free_percent" json:"min_free_percent"`
+	OriginalBytesPerSource    int64         `yaml:"original_bytes_per_source" json:"original_bytes_per_source"`
+	ParsedCacheBytesPerSource int64         `yaml:"parsed_cache_bytes_per_source" json:"parsed_cache_bytes_per_source"`
+	VectorBytesPerSource      int64         `yaml:"vector_bytes_per_source" json:"vector_bytes_per_source"`
+}
+
+func DefaultSourceResourceConfig() SourceResourceConfig {
+	return SourceResourceConfig{
+		MaxSelectedFiles: 10000, MaxSelectedBytes: 512 << 20, MaxFileBytes: 16 << 20,
+		MaxConcurrentRuns: 1, RunTimeout: 30 * time.Minute,
+		GitTransferBytes: 1 << 30, GitObjectStageBytes: 1 << 30, SelectedBlobStageBytes: 512 << 20,
+		MinFreeBytes: 256 << 20, MinFreePercent: 20,
+		OriginalBytesPerSource: 2 << 30, ParsedCacheBytesPerSource: 512 << 20, VectorBytesPerSource: 4 << 30,
+	}
+}
+
+func EffectiveSourceResources(cfg *Config) SourceResourceConfig {
+	if cfg == nil || cfg.SourceResources == nil {
+		return DefaultSourceResourceConfig()
+	}
+	settings := *cfg.SourceResources
+	settings.ApplyDefaults()
+	return settings
+}
+
+func (c *SourceResourceConfig) ApplyDefaults() {
+	if c == nil {
+		return
+	}
+	defaults := DefaultSourceResourceConfig()
+	if c.MaxSelectedFiles == 0 {
+		c.MaxSelectedFiles = defaults.MaxSelectedFiles
+	}
+	if c.MaxSelectedBytes == 0 {
+		c.MaxSelectedBytes = defaults.MaxSelectedBytes
+	}
+	if c.MaxFileBytes == 0 {
+		c.MaxFileBytes = defaults.MaxFileBytes
+	}
+	if c.MaxConcurrentRuns == 0 {
+		c.MaxConcurrentRuns = defaults.MaxConcurrentRuns
+	}
+	if c.RunTimeout == 0 {
+		c.RunTimeout = defaults.RunTimeout
+	}
+	if c.GitTransferBytes == 0 {
+		c.GitTransferBytes = defaults.GitTransferBytes
+	}
+	if c.GitObjectStageBytes == 0 {
+		c.GitObjectStageBytes = defaults.GitObjectStageBytes
+	}
+	if c.SelectedBlobStageBytes == 0 {
+		c.SelectedBlobStageBytes = defaults.SelectedBlobStageBytes
+	}
+	if c.MinFreeBytes == 0 {
+		c.MinFreeBytes = defaults.MinFreeBytes
+	}
+	if c.MinFreePercent == 0 {
+		c.MinFreePercent = defaults.MinFreePercent
+	}
+	if c.OriginalBytesPerSource == 0 {
+		c.OriginalBytesPerSource = defaults.OriginalBytesPerSource
+	}
+	if c.ParsedCacheBytesPerSource == 0 {
+		c.ParsedCacheBytesPerSource = defaults.ParsedCacheBytesPerSource
+	}
+	if c.VectorBytesPerSource == 0 {
+		c.VectorBytesPerSource = defaults.VectorBytesPerSource
+	}
+}
+
+func (c SourceResourceConfig) Validate() error {
+	if c.MaxSelectedFiles <= 0 || c.MaxSelectedBytes <= 0 || c.MaxFileBytes <= 0 ||
+		c.MaxConcurrentRuns <= 0 || c.RunTimeout <= 0 || c.GitTransferBytes <= 0 ||
+		c.GitObjectStageBytes <= 0 || c.SelectedBlobStageBytes <= 0 || c.MinFreeBytes <= 0 ||
+		c.OriginalBytesPerSource <= 0 || c.ParsedCacheBytesPerSource <= 0 || c.VectorBytesPerSource <= 0 {
+		return fmt.Errorf("source_resources budgets must all be finite positive values")
+	}
+	if c.MinFreePercent < 1 || c.MinFreePercent > 80 {
+		return fmt.Errorf("source_resources.min_free_percent must be between 1 and 80")
+	}
+	if c.MaxSelectedFiles > 100000 || c.MaxFileBytes > 64<<20 || c.MaxSelectedBytes > 8<<30 ||
+		c.MaxConcurrentRuns > 32 || c.RunTimeout > 24*time.Hour ||
+		c.GitTransferBytes > 8<<30 || c.GitObjectStageBytes > 8<<30 || c.SelectedBlobStageBytes > 8<<30 ||
+		c.SelectedBlobStageBytes < c.MaxSelectedBytes || c.MinFreeBytes > 1<<50 ||
+		c.OriginalBytesPerSource > 1<<50 || c.ParsedCacheBytesPerSource > 1<<50 || c.VectorBytesPerSource > 1<<50 {
+		return fmt.Errorf("source_resources exceeds the hard safety ceiling or has inconsistent stage budgets")
+	}
+	return nil
 }
 
 type VectorDatabaseConfig struct {
@@ -582,6 +686,9 @@ func LoadConfig() (*Config, error) {
 	applyOIDCEnvOverrides(&cfg)
 	applyAgentEnvOverrides(&cfg)
 	applyKnowledgeBaseEnvOverrides(&cfg)
+	if cfg.SourceResources != nil {
+		cfg.SourceResources.ApplyDefaults()
+	}
 	applyAuthAndTenantDefaults(&cfg)
 	applyAuditDefaults(&cfg)
 
@@ -614,6 +721,16 @@ func LoadConfig() (*Config, error) {
 // It checks for obviously invalid or missing values that would cause runtime failures.
 func ValidateConfig(cfg *Config) error {
 	var errs []string
+	if cfg == nil {
+		return fmt.Errorf("config validation requires a config value")
+	}
+	if cfg.SourceResources != nil {
+		resources := *cfg.SourceResources
+		resources.ApplyDefaults()
+		if err := resources.Validate(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
 
 	if cfg.OIDCAuth != nil && cfg.OIDCAuth.Enable {
 		if strings.TrimSpace(cfg.OIDCAuth.ClientID) == "" {

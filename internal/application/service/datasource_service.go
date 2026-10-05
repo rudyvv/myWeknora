@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -43,6 +44,8 @@ type DataSourceService struct {
 	sourceModels       interfaces.ModelRepository
 	sourceSnapshots    interfaces.SourceSnapshotRepository
 	sourceModelService interfaces.ModelService
+	sourceResources    *source.ResourceController
+	sourceWikiCoverage interfaces.SourceWikiBatchReadService
 }
 
 // NewDataSourceService creates a new data source service
@@ -62,7 +65,12 @@ func NewDataSourceService(
 	sourceModels interfaces.ModelRepository,
 	sourceSnapshots interfaces.SourceSnapshotRepository,
 	sourceModelService interfaces.ModelService,
+	sourceResources *source.ResourceController,
+	sourceWikiCoverage interfaces.SourceWikiBatchReadService,
 ) interfaces.DataSourceService {
+	if sourceResources == nil {
+		sourceResources, _ = source.NewResourceController(source.DefaultResourcePolicy())
+	}
 	return &DataSourceService{
 		dsRepo:             dsRepo,
 		syncLogRepo:        syncLogRepo,
@@ -79,6 +87,8 @@ func NewDataSourceService(
 		sourceModels:       sourceModels,
 		sourceSnapshots:    sourceSnapshots,
 		sourceModelService: sourceModelService,
+		sourceResources:    sourceResources,
+		sourceWikiCoverage: sourceWikiCoverage,
 	}
 }
 
@@ -1104,6 +1114,15 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		}
 	}
 	if mode == datasource.ContentModeSource {
+		policy := s.sourceResources.Policy()
+		sourceCtx, cancelSource := context.WithTimeout(ctx, policy.RunTimeout)
+		defer cancelSource()
+		ctx = sourceCtx
+		releaseRun, admissionErr := s.sourceResources.AcquireRun(ctx)
+		if admissionErr != nil {
+			return admissionErr
+		}
+		defer releaseRun()
 		if payload.TenantID != ds.TenantID || syncLog.TenantID != ds.TenantID || syncLog.DataSourceID != ds.ID {
 			return fmt.Errorf("%w: source run identity mismatch", asynq.SkipRetry)
 		}

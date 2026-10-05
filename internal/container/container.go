@@ -88,6 +88,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/models/limiter"
 	"github.com/Tencent/WeKnora/internal/models/utils/ollama"
 	"github.com/Tencent/WeKnora/internal/router"
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/storageallowlist"
 	"github.com/Tencent/WeKnora/internal/stream"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -179,7 +180,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewUserResourceFavoriteRepository))
 	must(container.Provide(service.NewWebSearchStateService))
 	must(container.Provide(repository.NewDataSourceRepository))
-	must(container.Provide(repository.NewSourceSnapshotRepository))
+	must(container.Provide(newSourceSnapshotRepository))
 	must(container.Provide(repository.NewSyncLogRepository))
 	must(container.Provide(repository.NewWikiPageRepository))
 	must(container.Provide(repository.NewMemoryRepository))
@@ -251,6 +252,13 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewUserResourceFavoriteService))
 	must(container.Provide(service.NewWikiPageService))
 	must(container.Provide(service.NewSourceWikiService))
+	must(container.Provide(func(s interfaces.SourceWikiService) (interfaces.SourceWikiBatchReadService, error) {
+		reader, ok := s.(interfaces.SourceWikiBatchReadService)
+		if !ok {
+			return nil, fmt.Errorf("source Wiki service does not implement batch coverage reads")
+		}
+		return reader, nil
+	}))
 	must(container.Provide(func(s interfaces.SourceWikiService) (interfaces.SourceWikiUpdateProcessor, error) {
 		processor, ok := s.(interfaces.SourceWikiUpdateProcessor)
 		if !ok {
@@ -389,6 +397,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	logger.Debugf(ctx, "[Container] Registering data source sync framework...")
 	must(container.Provide(initConnectorRegistry))
 	must(container.Provide(datasource.NewScheduler))
+	must(container.Provide(newSourceResourceController))
 	must(container.Provide(service.NewDataSourceService))
 	must(container.Provide(service.NewWeDriveService))
 	must(container.Provide(weddhub.NewHub))
@@ -512,6 +521,33 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Invoke(startSourceWikiAttemptRecovery))
 	logger.Infof(ctx, "[Container] Container initialization completed successfully")
 	return container
+}
+
+func newSourceResourceController(cfg *config.Config) (*source.ResourceController, error) {
+	return source.NewResourceController(sourceResourcePolicy(cfg))
+}
+
+func sourceResourcePolicy(cfg *config.Config) source.ResourcePolicy {
+	resources := config.EffectiveSourceResources(cfg)
+	return source.ResourcePolicy{
+		MaxSelectedFiles:          resources.MaxSelectedFiles,
+		MaxSelectedBytes:          resources.MaxSelectedBytes,
+		MaxFileBytes:              resources.MaxFileBytes,
+		MaxConcurrentRuns:         resources.MaxConcurrentRuns,
+		RunTimeout:                resources.RunTimeout,
+		GitTransferBytes:          resources.GitTransferBytes,
+		GitObjectStageBytes:       resources.GitObjectStageBytes,
+		SelectedBlobStageBytes:    resources.SelectedBlobStageBytes,
+		MinFreeBytes:              resources.MinFreeBytes,
+		MinFreePercent:            resources.MinFreePercent,
+		OriginalBytesPerSource:    resources.OriginalBytesPerSource,
+		ParsedCacheBytesPerSource: resources.ParsedCacheBytesPerSource,
+		VectorBytesPerSource:      resources.VectorBytesPerSource,
+	}
+}
+
+func newSourceSnapshotRepository(db *gorm.DB, cfg *config.Config) interfaces.SourceSnapshotRepository {
+	return repository.NewSourceSnapshotRepositoryWithPolicy(db, sourceResourcePolicy(cfg))
 }
 
 // registerChatLocalImageResolver wires the chat package's LocalImageResolver

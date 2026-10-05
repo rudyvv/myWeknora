@@ -605,6 +605,11 @@ func (r *SyncResult) ToJSON() (JSON, error) {
 	if r == nil {
 		return nil, nil
 	}
+	if r.Source != nil && r.Source.Telemetry != nil {
+		if err := r.Source.Telemetry.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	bytes, err := json.Marshal(r)
 	if err != nil {
 		return nil, err

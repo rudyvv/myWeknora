@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,8 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -36,13 +39,66 @@ func PreviewGit(ctx context.Context, repository *types.SourceRepository, rules *
 // database is alive, and returns the complete inventory. The caller decides
 // whether the entire inventory can be committed; callbacks never imply publish.
 func ReadGit(ctx context.Context, repository *types.SourceRepository, rules *datasource.SourceSettings, consume func(types.SourcePreviewFile, []byte) error) ([]types.SourcePreviewFile, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	return ReadGitWithPolicy(ctx, repository, rules, DefaultResourcePolicy(), consume)
+}
+
+// ReadGitWithPolicy applies finite whole-run selection and transfer budgets
+// before reading any selected blobs. Manifest failures never return a partial
+// inventory that could be mistaken for a complete snapshot.
+func ReadGitWithPolicy(ctx context.Context, repository *types.SourceRepository, rules *datasource.SourceSettings, policy ResourcePolicy, consume func(types.SourcePreviewFile, []byte) error) ([]types.SourcePreviewFile, error) {
+	files, _, err := ReadGitWithPolicyMetrics(ctx, repository, rules, policy, consume)
+	return files, err
+}
+
+type GitReadMetrics struct {
+	TransferBytes         int64
+	ObjectStageBytes      int64
+	SelectedBytes         int64
+	TransferBytesMeasured bool
+	ObjectStageMeasured   bool
+	SelectedBytesMeasured bool
+	CleanupResidueCount   int64
+}
+
+func ReadGitWithPolicyMetrics(ctx context.Context, repository *types.SourceRepository, rules *datasource.SourceSettings, policy ResourcePolicy, consume func(types.SourcePreviewFile, []byte) error) ([]types.SourcePreviewFile, GitReadMetrics, error) {
+	metrics := GitReadMetrics{}
+	files, err := readGitWithPolicy(ctx, repository, rules, policy, consume, &metrics)
+	return files, metrics, err
+}
+
+func readGitWithPolicy(ctx context.Context, repository *types.SourceRepository, rules *datasource.SourceSettings, policy ResourcePolicy, consume func(types.SourcePreviewFile, []byte) error, metrics *GitReadMetrics) ([]types.SourcePreviewFile, error) {
+	if err := policy.Validate(); err != nil {
+		return nil, err
+	}
+	if err := CheckTemporaryStorageCapacity(policy); err != nil {
+		return nil, err
+	}
+	if repository == nil || rules == nil || len(rules.Projects) == 0 {
+		return nil, fmt.Errorf("invalid source repository settings")
+	}
+	rules = policy.ApplyFileLimit(rules)
+	ctx, cancel := context.WithTimeout(ctx, policy.RunTimeout)
 	defer cancel()
 	root, err := os.MkdirTemp("", "weknora-source-preview-")
 	if err != nil {
 		return nil, fmt.Errorf("source preview storage unavailable")
 	}
-	defer os.RemoveAll(root) // root is the absolute directory returned by MkdirTemp.
+	var transferCounter *atomic.Int64
+	defer func() {
+		if metrics != nil {
+			if transferCounter != nil {
+				metrics.TransferBytes = transferCounter.Load()
+				metrics.TransferBytesMeasured = true
+			}
+			if size, sizeErr := directorySize(root); sizeErr == nil {
+				metrics.ObjectStageBytes = size
+				metrics.ObjectStageMeasured = true
+			}
+		}
+		if cleanupErr := os.RemoveAll(root); cleanupErr != nil && metrics != nil {
+			metrics.CleanupResidueCount++
+		}
+	}() // root is the absolute directory returned by MkdirTemp.
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		return nil, fmt.Errorf("Git is not installed on the server")
@@ -58,12 +114,20 @@ func ReadGit(ctx context.Context, repository *types.SourceRepository, rules *dat
 	if err := command("init", "--bare", "--template=").Run(); err != nil {
 		return nil, fmt.Errorf("unable to initialize source preview object database")
 	}
-	remote, closeBridge, err := bridgeGit(ctx, repository)
+	remote, closeBridge, transferred, transferExceeded, err := bridgeGit(ctx, repository, policy.GitTransferBytes)
 	if err != nil {
 		return nil, err
 	}
+	transferCounter = transferred
 	defer closeBridge()
-	if err := command("fetch", "--no-tags", "--no-write-fetch-head", "--depth=1", remote, repository.CommitSHA).Run(); err != nil {
+	fetch := command("fetch", "--no-tags", "--no-write-fetch-head", "--depth=1", remote, repository.CommitSHA)
+	if err := runGitWithObjectStageLimit(ctx, fetch, root, policy.GitObjectStageBytes, policy); err != nil {
+		if transferExceeded.Load() {
+			return nil, ErrResourceLimitExceeded
+		}
+		if errors.Is(err, ErrStorageBudgetExceeded) || errors.Is(err, ErrResourceLimitExceeded) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("unable to fetch the fixed GitLab commit; check read_repository permission and branch availability")
 	}
 	var inventory bytes.Buffer
@@ -73,6 +137,8 @@ func ReadGit(ctx context.Context, repository *types.SourceRepository, rules *dat
 		return nil, fmt.Errorf("unable to read complete source manifest")
 	}
 	files := make([]types.SourcePreviewFile, 0)
+	selectedFiles := 0
+	var selectedBytes int64
 	for _, entry := range bytes.Split(inventory.Bytes(), []byte{0}) {
 		if len(entry) == 0 {
 			continue
@@ -99,6 +165,16 @@ func ReadGit(ctx context.Context, repository *types.SourceRepository, rules *dat
 			file.Status, file.Reason = "oversize", "exceeds configured max_file_bytes"
 		}
 		files = append(files, file)
+		if file.Status == "included" {
+			selectedFiles++
+			if file.Size > policy.MaxSelectedBytes-selectedBytes {
+				return nil, ErrResourceLimitExceeded
+			}
+			selectedBytes += file.Size
+			if selectedFiles > policy.MaxSelectedFiles {
+				return nil, ErrResourceLimitExceeded
+			}
+		}
 		if len(files) > 100000 {
 			return nil, fmt.Errorf("source manifest exceeds the preview file limit")
 		}
@@ -118,6 +194,7 @@ func ReadGit(ctx context.Context, repository *types.SourceRepository, rules *dat
 	}
 	defer func() { _ = input.Close(); _ = batch.Process.Kill(); _ = batch.Wait() }()
 	reader := bufio.NewReader(output)
+	var consumedBytes int64
 	for i := range files {
 		file := &files[i]
 		if file.Status != "included" {
@@ -139,11 +216,18 @@ func ReadGit(ctx context.Context, repository *types.SourceRepository, rules *dat
 			return nil, fmt.Errorf("source object framing failed")
 		}
 		classify(file, content)
+		if file.Status == "included" {
+			consumedBytes += file.Size
+		}
 		if consume != nil && file.Status == "included" {
 			if err := consume(*file, content); err != nil {
 				return nil, err
 			}
 		}
+	}
+	if metrics != nil {
+		metrics.SelectedBytes = consumedBytes
+		metrics.SelectedBytesMeasured = true
 	}
 	return files, nil
 }
@@ -199,20 +283,22 @@ func classify(file *types.SourcePreviewFile, content []byte) {
 	}
 }
 
-func bridgeGit(ctx context.Context, repository *types.SourceRepository) (string, func(), error) {
+func bridgeGit(ctx context.Context, repository *types.SourceRepository, transferLimit int64) (string, func(), *atomic.Int64, *atomic.Bool, error) {
 	upstream, err := url.Parse(repository.CloneURL)
 	if err != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.User != nil || upstream.RawQuery != "" || upstream.Fragment != "" {
-		return "", nil, fmt.Errorf("invalid GitLab clone URL")
+		return "", nil, nil, nil, fmt.Errorf("invalid GitLab clone URL")
 	}
 	if err := datasource.ValidateConnectorBaseURL(upstream.String()); err != nil {
-		return "", nil, fmt.Errorf("GitLab repository URL is blocked by SSRF policy")
+		return "", nil, nil, nil, fmt.Errorf("GitLab repository URL is blocked by SSRF policy")
 	}
 	client := datasource.NewConnectorHTTPClient(90 * time.Second)
+	var transferred atomic.Int64
+	var transferExceeded atomic.Bool
 	// Redirects cannot extend the authorized repository or leak its credentials.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "", nil, fmt.Errorf("source Git transport unavailable")
+		return "", nil, nil, nil, fmt.Errorf("source Git transport unavailable")
 	}
 	prefix := "/" + uuid.NewString() + "/repo.git"
 	server := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -243,15 +329,109 @@ func bridgeGit(ctx context.Context, repository *types.SourceRepository) (string,
 			return
 		}
 		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		_, _ = io.Copy(w, io.LimitReader(resp.Body, 512<<20))
+		if _, err := io.Copy(&gitTransferWriter{writer: w, transferred: &transferred, exceeded: &transferExceeded, limit: transferLimit}, resp.Body); err != nil {
+			return
+		}
 	})}
 	go func() { _ = server.Serve(listener) }()
-	return "http://" + listener.Addr().String() + prefix, func() { _ = server.Close(); client.CloseIdleConnections() }, nil
+	return "http://" + listener.Addr().String() + prefix, func() { _ = server.Close(); client.CloseIdleConnections() }, &transferred, &transferExceeded, nil
+}
+
+type gitTransferWriter struct {
+	writer      io.Writer
+	transferred *atomic.Int64
+	exceeded    *atomic.Bool
+	limit       int64
+}
+
+func (w *gitTransferWriter) Write(data []byte) (int, error) {
+	for {
+		current := w.transferred.Load()
+		if int64(len(data)) > w.limit-current {
+			if w.exceeded != nil {
+				w.exceeded.Store(true)
+			}
+			return 0, ErrResourceLimitExceeded
+		}
+		if w.transferred.CompareAndSwap(current, current+int64(len(data))) {
+			n, err := w.writer.Write(data)
+			if n < 0 || n > len(data) {
+				w.transferred.Add(-int64(len(data)))
+				return 0, fmt.Errorf("Git transfer writer returned an invalid byte count")
+			}
+			if n < len(data) {
+				w.transferred.Add(int64(n) - int64(len(data)))
+			}
+			return n, err
+		}
+	}
 }
 
 type limitedWriter struct {
 	writer    io.Writer
 	remaining int64
+}
+
+func runGitWithObjectStageLimit(ctx context.Context, command *exec.Cmd, root string, limit int64, policy ResourcePolicy) error {
+	if err := command.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				return err
+			}
+			used, err := directorySize(root)
+			if err != nil {
+				return ErrStorageBudgetExceeded
+			}
+			if used > limit {
+				return ErrStorageBudgetExceeded
+			}
+			if CheckFreeSpaceReserve(policy) != nil {
+				return ErrStorageBudgetExceeded
+			}
+			return nil
+		case <-ticker.C:
+			used, err := directorySize(root)
+			if err != nil || used > limit || CheckFreeSpaceReserve(policy) != nil {
+				_ = command.Process.Kill()
+				<-done
+				return ErrStorageBudgetExceeded
+			}
+		case <-ctx.Done():
+			_ = command.Process.Kill()
+			<-done
+			return ctx.Err()
+		}
+	}
+}
+
+func directorySize(root string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() < 0 || info.Size() > int64(^uint64(0)>>1)-size {
+			return ErrStorageBudgetExceeded
+		}
+		size += info.Size()
+		return nil
+	})
+	return size, err
 }
 
 func (w *limitedWriter) Write(data []byte) (int, error) {

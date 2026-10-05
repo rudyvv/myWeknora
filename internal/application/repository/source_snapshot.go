@@ -19,7 +19,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-type sourceSnapshotRepository struct{ db *gorm.DB }
+type sourceSnapshotRepository struct {
+	db             *gorm.DB
+	resourcePolicy source.ResourcePolicy
+}
 
 type sourcePublicationOutboxRow struct {
 	ID               string `gorm:"column:id"`
@@ -34,7 +37,14 @@ type sourcePublicationOutboxRow struct {
 }
 
 func NewSourceSnapshotRepository(db *gorm.DB) interfaces.SourceSnapshotRepository {
-	return &sourceSnapshotRepository{db: db}
+	return NewSourceSnapshotRepositoryWithPolicy(db, source.DefaultResourcePolicy())
+}
+
+func NewSourceSnapshotRepositoryWithPolicy(db *gorm.DB, policy source.ResourcePolicy) interfaces.SourceSnapshotRepository {
+	if err := policy.Validate(); err != nil {
+		policy = source.DefaultResourcePolicy()
+	}
+	return &sourceSnapshotRepository{db: db, resourcePolicy: policy}
 }
 
 func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
@@ -144,7 +154,7 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 				}
 			}
 		}
-		return nil
+		return r.assertSourceResourceQuotaTx(tx, file.TenantID, file.DataSourceID)
 	})
 }
 
@@ -247,7 +257,20 @@ func (r *sourceSnapshotRepository) StageIndexes(ctx context.Context, indexes []*
 		for i, index := range indexes {
 			ids[i] = index.ChunkID
 		}
-		return tx.Table("embeddings").Where("chunk_id IN ?", ids).Update("is_enabled", false).Error
+		if err := tx.Table("embeddings").Where("chunk_id IN ?", ids).Update("is_enabled", false).Error; err != nil {
+			return err
+		}
+		if len(indexes) == 0 {
+			return nil
+		}
+		var tenantID uint64
+		var sourceID string
+		if err := tx.Table("source_files sf").Select("sf.tenant_id, sf.data_source_id").
+			Joins("JOIN source_chunk_references cr ON cr.source_file_id=sf.id").
+			Where("cr.chunk_id=?", indexes[0].ChunkID).Row().Scan(&tenantID, &sourceID); err != nil {
+			return err
+		}
+		return r.assertSourceResourceQuotaTx(tx, tenantID, sourceID)
 	})
 }
 

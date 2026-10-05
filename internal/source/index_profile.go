@@ -35,6 +35,20 @@ type IndexProfile struct {
 	Identity  string
 }
 
+// CountTokens applies the same configured tokenizer used to bound source
+// embedding inputs. The result is a local estimate, not provider telemetry.
+func (p IndexProfile) CountTokens(text string) (int, error) {
+	codec, err := tokenizer.Get(p.Tokenizer)
+	if err != nil {
+		return 0, err
+	}
+	ids, _, err := codec.Encode(text)
+	if err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
 // NewIndexProfile requires a model-specific tokenizer and hard input limit.
 // It also stays below the source pipeline's current ceiling and the embedding
 // adapters' configured/default truncation point, so the provider cannot

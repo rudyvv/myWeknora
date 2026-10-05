@@ -3,6 +3,27 @@ server:
   port: 8080
   host: "0.0.0.0"
 
+# Finite resource budgets for GitLab source-mode synchronization.
+# Values can be lowered or raised within the hard safety ceilings in config validation.
+# storage.staging telemetry sums private Git object-directory file lengths and verified
+# selected-blob spool bytes (logical payload; not allocated blocks/free disk). The
+# original/cache/vector buckets are likewise logical retained payload, with vectors
+# measured as dimension*4 for cached vector artifacts plus referenced embedding rows.
+source_resources:
+  max_selected_files: 10000
+  max_selected_bytes: 536870912          # 512 MiB
+  max_file_bytes: 16777216               # 16 MiB
+  max_concurrent_runs: 1
+  run_timeout: 30m
+  git_transfer_bytes: 1073741824         # 1 GiB cumulative response bytes
+  git_object_stage_bytes: 1073741824     # 1 GiB physical temporary Git object database
+  selected_blob_stage_bytes: 536870912   # 512 MiB private selected-blob spool
+  min_free_bytes: 268435456              # at least 256 MiB, or min_free_percent
+  min_free_percent: 20
+  original_bytes_per_source: 2147483648  # 2 GiB logical retained source content
+  parsed_cache_bytes_per_source: 536870912 # 512 MiB canonical parsed-artifact JSON
+  vector_bytes_per_source: 4294967296    # 4 GiB float32 payload bytes
+
 # Conversation service configuration
 # NOTE: Prompt content is resolved from prompt_templates/ YAML files via xxx_id fields.
 # Set the _id to the template ID you want; the system will load its content at startup.

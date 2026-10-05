@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
@@ -63,10 +64,21 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			return nil
 		}
 	}
-	result := &types.SyncResult{Source: &types.SourceRunResult{Snapshot: &types.SourceSnapshot{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, SyncLogID: log.ID, State: "fetching"}, Members: []types.SourceSnapshotMember{}}}
+	telemetry := types.NewSourceRunTelemetry()
+	if prior, err := log.ParseResult(); err == nil && prior != nil && prior.Source != nil && prior.Source.Telemetry != nil {
+		if prior.Source.Telemetry.Validate() == nil {
+			telemetry = prior.Source.Telemetry
+		}
+	}
+	result := &types.SyncResult{Source: &types.SourceRunResult{Snapshot: &types.SourceSnapshot{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, SyncLogID: log.ID, State: "fetching"}, Members: []types.SourceSnapshotMember{}, Telemetry: telemetry}}
 	snapshot := result.Source.Snapshot
 	created := false
+	var fetchingStarted, parsingStarted, indexingStarted, publishingStarted time.Time
 	defer func() {
+		finishSourceTelemetryPhase(telemetry, "fetching", &fetchingStarted)
+		finishSourceTelemetryPhase(telemetry, "parsing", &parsingStarted)
+		finishSourceTelemetryPhase(telemetry, "indexing", &indexingStarted)
+		finishSourceTelemetryPhase(telemetry, "publishing", &publishingStarted)
 		if failure != nil {
 			snapshot.State, snapshot.Error = "failed", failure.Error()
 			if created {
@@ -94,7 +106,10 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	}
 	if existingRun != nil && existingRun.Snapshot != nil && existingRun.Snapshot.State == "published" {
 		result.Source = existingRun
+		result.Source.Telemetry = telemetry
 		snapshot = existingRun.Snapshot
+		telemetry.PublishedCommitSHA = snapshot.CommitSHA
+		s.recordSourceWikiCoverage(ctx, telemetry, kb.ID, ds.ID, snapshot.ID)
 		result.Total = snapshot.FileCount
 		result.Created = snapshot.AddedCount
 		result.Updated = snapshot.ChangedCount + snapshot.RenamedCount
@@ -118,6 +133,8 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err != nil {
 		return err
 	}
+	resourcePolicy := s.sourceResources.Policy()
+	rules = resourcePolicy.ApplyFileLimit(rules)
 	resolver, ok := connector.(datasource.SourceRepositoryResolver)
 	if !ok {
 		return datasource.ErrSourcePipelineUnavailable
@@ -170,10 +187,23 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		return err
 	}
 	snapshot.ProcessingVersion = source.ArtifactKey(source.ProcessingVersion, parserVersion, indexProfile.Identity)
-	content := map[string][]byte{}
+	blobStage, err := source.NewBlobStage(resourcePolicy.SelectedBlobStageBytes)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := blobStage.Close(); err != nil {
+			incrementSourceTelemetryCounter(&telemetry.CleanupResidueCount)
+			if failure == nil {
+				failure = err
+			}
+		}
+	}()
 	checkedLanguages := map[string]bool{}
-	var totalBytes int
-	manifest, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, raw []byte) error {
+	selectedCount := 0
+	var totalBytes int64
+	fetchingStarted = time.Now()
+	manifest, gitMetrics, err := source.ReadGitWithPolicyMetrics(ctx, repository, rules, resourcePolicy, func(file types.SourcePreviewFile, raw []byte) error {
 		language := source.LanguageForPath(file.Path)
 		if language == "" {
 			return fmt.Errorf("source sync supports selected source, template, and text configuration files only; narrow the included paths")
@@ -184,22 +214,45 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			}
 			checkedLanguages[language] = true
 		}
-		totalBytes += len(raw)
-		if len(content) >= 100 || totalBytes > 16<<20 {
-			return fmt.Errorf("initial source sync is limited to 100 supported source files and 16 MiB; narrow the included paths")
+		selectedCount++
+		totalBytes += int64(len(raw))
+		if selectedCount > resourcePolicy.MaxSelectedFiles || totalBytes > resourcePolicy.MaxSelectedBytes || int64(len(raw)) > resourcePolicy.MaxFileBytes {
+			return source.ErrResourceLimitExceeded
 		}
-		content[file.Path] = raw
-		return nil
+		if err := blobStage.Put(file.Path, raw); err != nil {
+			return err
+		}
+		return source.CheckFreeSpaceReserve(resourcePolicy)
 	})
+	finishSourceTelemetryPhase(telemetry, "fetching", &fetchingStarted)
+	if gitMetrics.TransferBytesMeasured {
+		transferred := gitMetrics.TransferBytes
+		telemetry.GitTransferBytes = &transferred
+	}
+	if gitMetrics.ObjectStageMeasured {
+		residues := gitMetrics.CleanupResidueCount
+		telemetry.CleanupResidueCount = &residues
+	}
 	if err != nil {
 		return err
 	}
-	if len(content) == 0 && previous == nil {
+	selectedBytes := int64(totalBytes)
+	telemetry.SelectedBytes = &selectedBytes
+	telemetry.Storage = ensureSourceStorage(telemetry.Storage)
+	if gitMetrics.ObjectStageMeasured {
+		// staging is a logical payload metric: private Git object-directory file
+		// lengths plus verified selected-blob spool content. It is not allocated
+		// filesystem blocks or free disk space; each stage has a separate limit.
+		stagingUsed := gitMetrics.ObjectStageBytes + blobStage.UsedBytes()
+		stagingLimit := resourcePolicy.GitObjectStageBytes + resourcePolicy.SelectedBlobStageBytes
+		telemetry.Storage["staging"] = sourceStorageMetric(stagingUsed, stagingLimit, types.SourceStorageMeasurementLogicalPayload)
+	}
+	if selectedCount == 0 && previous == nil {
 		return fmt.Errorf("initial source sync requires at least one selected supported source file")
 	}
 	snapshot.ManifestComplete = true
 	snapshot.MemberCount = len(manifest)
-	snapshot.FileCount = len(content)
+	snapshot.FileCount = selectedCount
 	manifestBytes, _ := json.Marshal(manifest)
 	manifestHash := sha256.Sum256(manifestBytes)
 	snapshot.ManifestDigest = hex.EncodeToString(manifestHash[:])
@@ -235,6 +288,9 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			published.DetectedCommitSHA, published.TargetCommitSHA = repository.CommitSHA, repository.CommitSHA
 			published.PublicationChecked = true
 			result.Source = previous
+			result.Source.Telemetry = telemetry
+			telemetry.PublishedCommitSHA = published.CommitSHA
+			s.recordSourceWikiCoverage(ctx, telemetry, kb.ID, ds.ID, published.ID)
 			result.Total = published.FileCount
 			data, err := result.ToJSON()
 			if err != nil {
@@ -276,14 +332,22 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	if err := progress("parsing"); err != nil {
 		return err
 	}
+	parsingStarted = time.Now()
+	telemetry.QualityCounts = make(map[string]int64)
 	var indexes []*types.IndexInfo
+	var indexTextBytes int64
 	relationMembers := make([]source.SourceRelationMember, 0, snapshot.FileCount)
+	var totalFacts int
+	var factBytes int64
 	for i := range result.Source.Members {
 		member := &result.Source.Members[i]
-		raw, selected := content[member.Path]
-		if !selected {
+		if member.Status != "included" && member.Status != "parsed" {
 			result.Skipped++
 			continue
+		}
+		raw, err := blobStage.Read(member.Path, resourcePolicy.MaxFileBytes)
+		if err != nil {
+			return err
 		}
 		artifactKey := sourceParseArtifactKey(member.Path, raw, parserVersion, version, indexProfile.Identity)
 		parsed, err := s.sourceSnapshots.GetParsedArtifact(ctx, ds.TenantID, ds.ID, artifactKey)
@@ -307,6 +371,16 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		if err != nil {
 			return err
 		}
+		telemetry.CountQuality(parsed.Quality)
+		factData, err := json.Marshal(parsed.Facts)
+		if err != nil {
+			return fmt.Errorf("source parser facts could not be bounded")
+		}
+		totalFacts += len(parsed.Facts)
+		factBytes += int64(len(factData))
+		if totalFacts > types.SourceWikiImpactMaxFacts || factBytes > types.SourceWikiImpactMaxFactBytes {
+			return source.ErrResourceLimitExceeded
+		}
 		if member.Status == "parsed" {
 			reader, ok := s.sourceSnapshots.(interface {
 				GetStagedChunkIDs(context.Context, string, string) ([]string, error)
@@ -322,6 +396,10 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 				return fmt.Errorf("persisted source stage has incomplete chunks for %s", member.Path)
 			}
 			for index, part := range parsed.Chunks {
+				indexTextBytes += int64(len(source.SourceIndexText(member.Path, part)))
+				if len(indexes) >= types.SourceWikiSkeletonMaxRelations || indexTextBytes > types.SourceWikiImpactMaxFactBytes {
+					return source.ErrResourceLimitExceeded
+				}
 				indexes = append(indexes, &types.IndexInfo{SourceID: chunkIDs[index], ChunkID: chunkIDs[index], SourceType: types.ChunkSourceType,
 					KnowledgeID: member.SourceFileID, KnowledgeBaseID: kb.ID, KnowledgeType: types.KnowledgeTypeSource,
 					Content: source.SourceIndexText(member.Path, part), IsEnabled: false})
@@ -337,11 +415,16 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		fileVersion := &types.SourceFileVersion{ID: uuid.NewString(), SourceFileID: fileID, SnapshotID: snapshot.ID, BlobSHA: member.BlobSHA, SHA256: parsed.SHA256, Content: raw, Encoding: parsed.Encoding, ParserVersion: parsed.ParserVersion, Quality: parsed.Quality, Symbols: types.JSON(symbols), Facts: types.JSON(facts), Diagnostics: types.JSON(diagnostics)}
 		chunks := make([]*types.Chunk, len(parsed.Chunks))
 		for index, part := range parsed.Chunks {
+			indexText := source.SourceIndexText(member.Path, part)
+			indexTextBytes += int64(len(indexText))
+			if len(indexes) >= types.SourceWikiSkeletonMaxRelations || indexTextBytes > types.SourceWikiImpactMaxFactBytes {
+				return source.ErrResourceLimitExceeded
+			}
 			evidence := types.SourceEvidence{DataSourceID: ds.ID, SnapshotID: snapshot.ID, FileVersionID: fileVersion.ID, ProjectID: snapshot.ProjectID, CommitSHA: snapshot.CommitSHA, Path: member.Path, Range: part.Range, Symbols: part.Symbols, Quality: part.Quality, Context: part.Context, Region: part.Region, Diagnostics: part.Diagnostics, GitLabURL: source.GitLabBlobURL(snapshot.RepositoryURL, snapshot.CommitSHA, member.Path, part.Range)}
 			metadata, _ := json.Marshal(map[string]any{"source": evidence})
 			chunk := &types.Chunk{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, KnowledgeID: fileID, Content: part.Content, SourceContent: part.Content, ChunkIndex: index, ChunkType: types.ChunkTypeText, IsEnabled: false, IndexStatus: "pending", StartAt: utf8.RuneCount(raw[:part.Range.StartByte]), EndAt: utf8.RuneCount(raw[:part.Range.EndByte]), Metadata: types.JSON(metadata)}
 			chunks[index] = chunk
-			indexes = append(indexes, &types.IndexInfo{SourceID: chunk.ID, ChunkID: chunk.ID, SourceType: types.ChunkSourceType, KnowledgeID: fileID, KnowledgeBaseID: kb.ID, KnowledgeType: types.KnowledgeTypeSource, Content: source.SourceIndexText(member.Path, part), IsEnabled: false})
+			indexes = append(indexes, &types.IndexInfo{SourceID: chunk.ID, ChunkID: chunk.ID, SourceType: types.ChunkSourceType, KnowledgeID: fileID, KnowledgeBaseID: kb.ID, KnowledgeType: types.KnowledgeTypeSource, Content: indexText, IsEnabled: false})
 		}
 		if err := s.sourceSnapshots.StageFile(ctx, file, fileVersion, chunks); err != nil {
 			return err
@@ -350,24 +433,47 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		member.SourceFileID, member.FileVersionID, member.Status = fileID, fileVersion.ID, "parsed"
 	}
 	relations := source.CorrelateSourceFacts(ds.TenantID, ds.ID, snapshot.ID, relationMembers)
+	if len(relations) > types.SourceWikiSkeletonMaxRelations {
+		return source.ErrResourceLimitExceeded
+	}
 	if err := s.sourceSnapshots.StageRelations(ctx, ds.TenantID, ds.ID, snapshot.ID, relations); err != nil {
 		return err
 	}
+	if err := blobStage.Close(); err != nil {
+		incrementSourceTelemetryCounter(&telemetry.CleanupResidueCount)
+		return err
+	}
+	finishSourceTelemetryPhase(telemetry, "parsing", &parsingStarted)
 	snapshot.RelationCount, snapshot.RelationsStaged = len(relations), true
 	snapshot.ChunkCount = len(indexes)
 	if err := progress("indexing"); err != nil {
 		return err
 	}
-	dimension, err := s.stageSourceIndexes(ctx, ds, kb, snapshot, indexes, indexProfile)
+	indexingStarted = time.Now()
+	embeddingUsage := sourceEmbeddingUsage{}
+	dimension, err := s.stageSourceIndexes(ctx, ds, kb, snapshot, indexes, indexProfile, &embeddingUsage)
+	recordSourceEmbeddingUsage(telemetry, &embeddingUsage)
+	finishSourceTelemetryPhase(telemetry, "indexing", &indexingStarted)
 	if err != nil {
 		return err
+	}
+	if usage, usageErr := s.sourceSnapshots.GetSourceResourceUsage(ctx, ds.TenantID, ds.ID); usageErr == nil {
+		telemetry.Storage = ensureSourceStorage(telemetry.Storage)
+		telemetry.Storage["original"] = sourceStorageMetric(usage.OriginalBytes, resourcePolicy.OriginalBytesPerSource, types.SourceStorageMeasurementLogicalPayload)
+		telemetry.Storage["cache"] = sourceStorageMetric(usage.ParsedCacheBytes, resourcePolicy.ParsedCacheBytesPerSource, types.SourceStorageMeasurementLogicalPayload)
+		telemetry.Storage["vectors"] = sourceStorageMetric(usage.VectorBytes, resourcePolicy.VectorBytesPerSource, types.SourceStorageMeasurementLogicalPayload)
 	}
 	if err := progress("ready"); err != nil {
 		return err
 	}
+	publishingStarted = time.Now()
 	if err := s.sourceSnapshots.Publish(ctx, snapshot, ds, kb, dimension); err != nil {
+		finishSourceTelemetryPhase(telemetry, "publishing", &publishingStarted)
 		return err
 	}
+	finishSourceTelemetryPhase(telemetry, "publishing", &publishingStarted)
+	telemetry.PublishedCommitSHA = snapshot.CommitSHA
+	s.recordSourceWikiCoverage(ctx, telemetry, kb.ID, ds.ID, snapshot.ID)
 	snapshot.LastSuccessfulPublishedAt = snapshot.PublishedAt
 	result.Total = snapshot.FileCount
 	result.Created = snapshot.AddedCount
@@ -376,4 +482,14 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	data, _ := result.ToJSON()
 	s.updateSyncRunResult(ctx, ds, log, result, data, types.SyncLogStatusSuccess, "", wasPaused)
 	return nil
+}
+
+func (s *DataSourceService) recordSourceWikiCoverage(ctx context.Context, telemetry *types.SourceRunTelemetry, knowledgeBaseID, sourceID, snapshotID string) {
+	if s == nil || s.sourceWikiCoverage == nil || telemetry == nil {
+		return
+	}
+	coverage, err := s.sourceWikiCoverage.GetSourceWikiCoverageSummary(ctx, knowledgeBaseID, sourceID, snapshotID)
+	if err == nil && coverage != nil {
+		telemetry.WikiCoverage = coverage
+	}
 }

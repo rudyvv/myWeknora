@@ -92,3 +92,17 @@ func TestIndexProfileIdentityChangesWithTokenizerOrModelLimit(t *testing.T) {
 		t.Fatal("changing the tokenizer or model limit must invalidate source parse artifacts")
 	}
 }
+
+func TestIndexProfileCountTokensUsesConfiguredTokenizer(t *testing.T) {
+	profile, err := NewIndexProfile(types.EmbeddingParameters{Tokenizer: "cl100k_base", MaxInputTokens: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := profile.CountTokens("hello source index")
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if got == 0 {
+		t.Fatal("CountTokens() returned no tokens for non-empty input")
+	}
+}

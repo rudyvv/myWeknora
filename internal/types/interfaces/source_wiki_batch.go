@@ -12,4 +12,5 @@ type SourceWikiBatchReadService interface {
 	ListSourceWikiBatches(context.Context, string, string) ([]types.SourceWikiBatch, error)
 	GetSourceWikiBatch(context.Context, string, string, string) (*types.SourceWikiBatch, error)
 	ListSourceWikiCoverage(context.Context, string, string) ([]types.SourceWikiCoverageTopic, error)
+	GetSourceWikiCoverageSummary(context.Context, string, string, string) (*types.SourceWikiCoverageTelemetry, error)
 }
