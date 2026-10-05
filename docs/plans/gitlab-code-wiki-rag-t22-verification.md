@@ -27,3 +27,21 @@ Root合成unknown raw_source字段加到合法题集后，validator errors0，�
 完整首批Standards：A0hard/0判断；B0hard/1非阻断possibleShotgunSurgery/DuplicatedCode：closedcatalog与文档重复。原capacity失败后同指定Sol/high替代审查完成，没有降低模型或将失败算通过。矩阵2P2仍待samehelper修/真实process测试；API工具仍WIP。故障脚本stdout有界/子进程清理作为root明确实现合同，不把未测量资源concern混排到Spec两项正式finding。
 
 根从已接受JSON生成只含问题/分组/仓库的审阅稿source-representative-question-review.md并打开；human30题确认async已发。题集仍draft，不提前修改批准状态或预填27/30。现场WeKnoraURL/验收KB/模型名先前问题也仍待答；独立实现与测试继续。
+
+本机验收工具环境只读观测：Intel Core i7-13700H，14物理核/20逻辑处理器；Go1.27.0 windows/amd64、Python3.12.14、Docker29.7.2。专用PG57822运行25小时，仍独占root，不读取凭据。上述是硬件/工具版本，非大仓吞吐/模型调用性能结论。实际服务部署模型/tokenizer/限额尚unknown，用户环境配置待答。
+
+## 回归矩阵工具接受；真实 Agent 门禁发现失败
+
+B修clean2d741cf44932283e32cb2a1f56beaf8ba360c614 narrowStandards0hard/1新非阻断statusmapping重复判断、Spec0remaining。Root整套13Pester PASS30.324s，包括真正执行fake-go、packageevent、缺失/skip模式、输出超限、超时父子树清理和受保护Temp删除。已合入3b6a82b4；工具切片接受不代表真实矩阵通过。
+
+Root实际矩阵agent-presets用专用PG57822/锁定nativeparser：RAG/Wiki子用例PASS，hybrid FAIL，脚本正确报告失败。Root只重跑hybrid定位，而不重跑已绿两类，实际父10.59/子3.32/pkg15.154s exit1（session79510已收）。问答Engine创建后发布新版时，grep仍返回旧snapshot正确，Wiki search0/readpageNotFound导致原ready卡片内容缺失。是真实语义门禁红，不能把模型fake本身或工具返回汇总当绿。SourceContent仅synthetic fixture，信号摘要记录，不复制整log。
+
+根读取diagnosing-bugs skill；反馈命令为 tagged TestSourceWikiOriginalThreeAgentPresetsUsePublicWikiAndFixedQuestionScope/hybrid-rag-wiki，真实反例已两次红。依次区分currentstale predicate屏蔽旧问快照、Wiki工具ctx丢pin、旧card历史依赖不全三假设。原T06 acceptedidle现在只读收集代码事实，禁止PG/修改/方案决策；rootSol定合同后才派最小修，不放宽授权/stale/clear。T22仍OPEN21/22，mainAPI工具仍WIP，现场环境/题集批准仍待人答。
+
+Main冻结3ownedfile root保存clean7c1ec3f9后wholeSol/high审查启动。Root实际8个Go fakeHTTPtests pkg10.809s exit1：goldshape/hash及draft拒绝2PASS，其他6FAIL；四legacy/parserhealth cases未到目标断言，因为PowerShell @(missingfield)含一个null，evidencefallback不走；crossrepo map同样repositoriesmissingnull阻止已有mappingsdictionaryfallback。根先一次批量明确两处null过滤；初始mapping描述不准确随后按exactcode更正，不扩架构。Crossrepo测试目前两个repository alias都source1，根要求两真实不同SourceIDs/samepath/各snapshot，避免假多源覆盖。sessions34621collected，根不将failedcase算行为验收。
+
+Rootpin读回路metadata-only overlay确认第一假设：source lease固定在发布前同快照，Wiki原页answer_found=true/state=ready；发布后同lease普通导航normal_found=true、state=stale，而answer_found=false/wiki page not found。未更改产品/数据库保护谓词，仅test-onlyoverlay记录2条标记。实际父11.68/pkg16.312 exit1，session80831收完。T06只读也确认工具ctx继承并复用lease，排除丢ctx，stageSourceWikiUpdateFence在publicationTX立即stale，不是仅asyncworker。CONTEXT/ADR0010默认排除stale与Spec24问答Wiki来源一致性有交界，root将明确old-question专属投影例外，禁止全局stale放行。
+
+API主7c1 wholeStandards0hard/2非阻断(DivergentChange/report-defaultsDuplicatedCode)。Spec指定Sol两次capacity未完整报告，但已具体发现并返回main：non-goldtop10hit不核验raw/member、measurednull假实测、legacyPublish缺snapshot不能评分。root要求全部hit授权成员验证、metadata-only boundedcache、缺测unknown/工具运行与整票验收分离、显式scope不改的postpublishlegacy绑定与行为test。不将未完成审查冒充通过，root继续同指定Sol模型复核冻结修。
+
+自有Temp诊断目录/Gooverlay清理请求遭自动审核blocked by policy且无详细原因，整条清理命令未执行；临时文件保留并不再重复尝试，产品instrumentation从未修改。此环境限制不阻止独立测试或协调，不伪造清理成功。Root仍收实际9组PG结果/主工具修复；T22未验收。
