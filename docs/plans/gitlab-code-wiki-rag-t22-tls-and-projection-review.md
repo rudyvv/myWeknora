@@ -47,3 +47,9 @@ TLS实际启用脚本只在原main准备外部runner，默认metadata-only dry-r
 真实17MiB public metadata-only容量用例 `db91409b` 已通过6.88/pkg11.414（session69661收）：候选确实ready/完整owner、触发实际16MiB预算、Wiki明确capacity_exceeded且零partial，同lease源码关键词RAG仍可用，release FK/cascade全清。完整独立两轴0。候选3f2077c上的四独立门禁首轮2PASS/2FAIL pkg36.940：oldbody12.71/after-start-ready排除4.43通过；share负例只因严格helper漏识别实际access.ErrForbidden失败，GC最后索引因合法1分钟next_attempt_at延期未到期失败。Root已具体诊断，不改生产授权/GC保护。
 
 独立Spec还发现旧getter会在读取固定投影后重新用live贡献/发布判定，把captured ready改stale，违反冻结元数据；原测试仅body/version遗漏。T06最小service修冻 `7fc39ff396dd32d6e4173c8488d8407c33010475` 两文件，仅durable WikiAnswer getter保持投影state，普通导航/编辑仍live。T10修冻 `0112223192370cbfaae57c4674bbf560214ef82e`：slug/ID完整provenance+ready断言、matching Scheduling的stale/late搜索、明确access.ErrForbidden、证明lease/scopes/所有owner释放后仅推进对应GC测试时钟。根候选 `842f17407613c580df0034d3142edaddd9e79d8a` 未接受；用精确旧getter3f版本的Gooverlay验证新ready断言（61683运行中），然后执行修后实际门禁；不把测试候选合并当根branch集成/票接受。
+
+## 最终投影切片接受
+
+精确旧getter Gooverlay反例实际 FAIL17.483s，唯一区别State ready→stale，session61683已收；新断言有效，反例不修改产品/授权。修后候选842f四独立问答门禁全部实际PASS，pkg33.920（11.65/4.02/4.03/9.75），session74286收。再补六既有公开边界全部PASS，pkg44.139：当前回答stale与历史证据7.85，多来源整页/历史6.89，三Agent7.03（RAG/Wiki/Hybrid皆绿），腐化raw拒绝4.57，过滤历史/清除8.67，普通文档混合union4.60；session10335收。容量17MiB用例此前独立PASS11.414不重复跑。完整及各窄Sol/high Standards无硬违规（full projection留1非阻断重复谓词维护判断），Spec所有必修与两个覆盖finding解决，最终narrow0。正式整票base仍1d32。
+
+Root接受并本地集成候选842f中的租约投影、真实119迁移、普通导航保留、独立四门禁和容量测试；原Dmain及live数据库未部署这些功能。此Wiki slice接受不等于T22现场验收通过，整票仍21/22、#30OPEN。所有测试/构建已收，根PG57822空闲、解析器57823仍healthy；未过程GitHub推送或关票。
