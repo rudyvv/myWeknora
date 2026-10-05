@@ -1,0 +1,356 @@
+{
+  "schema_version": 1,
+  "status": "draft_for_human_confirmation",
+  "hash_mode": "sha256_utf8_lf",
+  "description": "First-release source-evidence question set. Evidence records locate pinned source spans; this file contains no retrieved hits, expected answers, recall results, or performance measurements.",
+  "repositories": [
+    {
+      "id": "nsb",
+      "kind": "representative_repo",
+      "commit": "3cf44a4e983ce6c3df4867eac179cd6e241528f8",
+      "path_prefixes": ["src/main/java/com/nsb/zy"]
+    },
+    {
+      "id": "evip_mobile",
+      "kind": "representative_repo",
+      "commit": "15d9575ebea6d82d9bb1b69dfe2b9950c6eb4cd5",
+      "path_prefixes": ["src/pages", "package.json"]
+    },
+    {
+      "id": "evip_dashboard",
+      "kind": "representative_repo",
+      "commit": "c9c4e3579cad9c04b342be3513ed697fc422c834",
+      "path_prefixes": ["src", "package.json"]
+    },
+    {
+      "id": "weknora_approved_test_supplement",
+      "kind": "approved_supplement",
+      "commit": "1d32c08e36d255400c21e8863f5249d23a91afd3",
+      "verify_current_revision": false,
+      "path_prefixes": ["sourceparser/tests/fixtures", "sourceparser/tests"]
+    }
+  ],
+  "questions": [
+    {
+      "id": "SYM-01",
+      "category": "symbol_path",
+      "question": "在确认课表首页组件中，定位按路由日程 ID 加载推送课表并更新确认状态的方法。",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/index.vue", "start_line": 98, "end_line": 115, "symbol": "getData()", "sha256": "692945a8c83e3711ac0dac8031a7a6c3789bf3f0c07f64e7a86fecbadecce14f", "rationale": "该跨度包含请求参数来源、响应处理及确认状态赋值。"}
+      ]
+    },
+    {
+      "id": "SYM-02",
+      "category": "symbol_path",
+      "question": "定位微信推送课表接口对缺少 pushScheduleId 和查无记录的处理分支。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/controller/api/WxApiController.java", "start_line": 1212, "end_line": 1237, "symbol": "getPushSchedule", "sha256": "65dcf6fcc1bca477af0ad66f0d2f123457c1d55e1e353ab937829467923c77d0", "rationale": "处理器声明及参数、空结果和异常分支均在该跨度内。"}
+      ]
+    },
+    {
+      "id": "SYM-03",
+      "category": "symbol_path",
+      "question": "定位 AttendanceServiceImpl 组装推送课表主记录和明细列表返回值的方法。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/service/provost/AttendanceServiceImpl.java", "start_line": 4839, "end_line": 4856, "symbol": "getPushSchedule", "sha256": "34b7378a03166c272b9b262af46cbfdeef2e241cf8ad84a9f3ce725c1d963ed2", "rationale": "该方法调用主表与明细 Mapper，并构造组合返回 Map。"}
+      ]
+    },
+    {
+      "id": "SYM-04",
+      "category": "symbol_path",
+      "question": "在免费辅导补排控制器中定位预校验请求的映射与服务委托。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/controller/freeTutor/FreeTutorPreController.java", "start_line": 294, "end_line": 301, "symbol": "checkCourseSchedulePre", "sha256": "50f14e20f07a1d543609ff9af11ac2a94ad623af943f12504aeb33009a556311", "rationale": "该范围标明请求映射、参数接收及预校验服务调用。"}
+      ]
+    },
+    {
+      "id": "SYM-05",
+      "category": "symbol_path",
+      "question": "定位 FreeTutor 排课申请列表的分页查询服务方法及其 Mapper 调用。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 920, "end_line": 925, "symbol": "queryFreeTutorScheduleList", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "跨度涵盖分页启动、Mapper 查询及分页包装。"}
+      ]
+    },
+    {
+      "id": "SYM-06",
+      "category": "symbol_path",
+      "question": "在大型 SignupServiceImpl 中定位 createOrder 的主订单输入校验和协议号重复检查。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/service/signup/SignupServiceImpl.java", "start_line": 983, "end_line": 1005, "symbol": "createOrder", "sha256": "3880503addeada8becb9bc6ca933dac690e7b153afec8257cf5cff1a2d7a4e06", "rationale": "跨度包含方法声明、空订单检查及协议号重复校验。"}
+      ]
+    },
+    {
+      "id": "SYM-07",
+      "category": "symbol_path",
+      "question": "在大型 BusinessOrderDetailMapper XML 中定位订单明细分页查询及动态筛选块。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessOrderDetailMapper.xml", "start_line": 1323, "end_line": 1358, "symbol": "selectOrderDetailPageList", "sha256": "a24f2159b56f5102277fddbed05bae721e65b92e6ffb194277e9bc4c1d149445", "rationale": "跨度覆盖大型 Mapper 中该查询的投影、联接和可选条件。"}
+      ]
+    },
+    {
+      "id": "SYM-08",
+      "category": "symbol_path",
+      "question": "定位移动端 FreeTutor Mapper 中生成问卷评分字段的查询投影。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 1139, "end_line": 1156, "symbol": "surveyScore", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "该 SELECT 直接投影调查状态和按题位选择的评分字段。"}
+      ]
+    },
+    {
+      "id": "SYM-09",
+      "category": "symbol_path",
+      "question": "在标注为已批准补充语料的 TypeScript fixture 中，定位 Scheduler.reserve 的声明与返回表达式。",
+      "repository": "weknora_approved_test_supplement",
+      "source_kind": "approved_supplement",
+      "evidence": [
+        {"path": "sourceparser/tests/fixtures/reservations.ts", "start_line": 4, "end_line": 12, "symbol": "async reserve", "sha256": "a53d6a4ecce551ad06276e23cd24ea2559560246238117088833b2844d570d48", "rationale": "已批准 fixture 包含泛型类、异步方法及其返回表达式。"}
+      ]
+    },
+    {
+      "id": "SYM-10",
+      "category": "symbol_path",
+      "question": "在标注为已批准补充语料的 Python contract tests 中，定位覆盖装饰器、异步方法、Unicode 和 CRLF 的测试。",
+      "repository": "weknora_approved_test_supplement",
+      "source_kind": "approved_supplement",
+      "evidence": [
+        {"path": "sourceparser/tests/test_python_http_contract.py", "start_line": 76, "end_line": 99, "symbol": "test_module_class_methods_decorators_async_unicode_and_crlf_keep_parent_ranges", "sha256": "f47b372410c47bd617adce3f2d4702243eb0a05279bf5dcba3070b69b1cf5f81", "rationale": "测试名和断言明确覆盖所列 Python 解析边界。"}
+      ]
+    },
+    {
+      "id": "BC-01",
+      "category": "business_chain",
+      "question": "从移动端确认首页出发，追踪推送课表请求如何经过接口和服务层形成页面所用的主记录。",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/index.vue", "start_line": 98, "end_line": 115, "symbol": "getData()", "sha256": "692945a8c83e3711ac0dac8031a7a6c3789bf3f0c07f64e7a86fecbadecce14f", "rationale": "前端跨度展示请求发起及其响应被用于更新组件状态。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/controller/api/WxApiController.java", "start_line": 1210, "end_line": 1230, "symbol": "getPushSchedule", "sha256": "65dcf6fcc1bca477af0ad66f0d2f123457c1d55e1e353ab937829467923c77d0", "rationale": "接口跨度展示 HTTP 映射及服务调用和返回赋值。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/service/provost/AttendanceServiceImpl.java", "start_line": 4839, "end_line": 4856, "symbol": "getPushSchedule", "sha256": "34b7378a03166c272b9b262af46cbfdeef2e241cf8ad84a9f3ce725c1d963ed2", "rationale": "服务跨度展示主记录与明细记录的组合过程。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/dao/mapper/BusinessPushScheduleMapper.xml", "start_line": 293, "end_line": 312, "symbol": "getPushSchedule", "sha256": "b8c486968ee733930b37b403d3513a97c546d4d0198cbfe3fd492504f55e569b", "rationale": "SQL 映射给出主记录投影、关联及记录筛选条件。"}
+      ]
+    },
+    {
+      "id": "BC-02",
+      "category": "business_chain",
+      "question": "追踪移动端确认按钮的重复提交保护、确认接口以及服务层更新主记录和明细记录的路径。",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/list.vue", "start_line": 123, "end_line": 137, "symbol": "onClickBtn()", "sha256": "e47e7c60d9ffac874b8b1bffa46ec32c52875abbe996968d6ca4eca6596210df", "rationale": "按钮处理包含已提交分支和请求成功、失败反馈。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/controller/api/WxApiController.java", "start_line": 1251, "end_line": 1279, "symbol": "updatePushSchedule", "sha256": "65dcf6fcc1bca477af0ad66f0d2f123457c1d55e1e353ab937829467923c77d0", "rationale": "控制器映射并将确认请求委托给考勤服务。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/service/provost/AttendanceServiceImpl.java", "start_line": 4862, "end_line": 4879, "symbol": "updateBySelectivePushSchedule", "sha256": "34b7378a03166c272b9b262af46cbfdeef2e241cf8ad84a9f3ce725c1d963ed2", "rationale": "服务跨度显示对推送主记录和明细确认字段的写入。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/dao/mapper/BusinessPushScheduleDetailedMapper.xml", "start_line": 417, "end_line": 430, "symbol": "updateByPrimaryKeySelectiveStates", "sha256": "c845c310a15a6d0ff2bf1b4492d2ef85e6ca1dc1178cda263e5a3aa467b23ca3", "rationale": "更新 SQL 映射列出明细确认状态及确认时间字段。"}
+      ]
+    },
+    {
+      "id": "BC-03",
+      "category": "business_chain",
+      "question": "从确认详情页追踪日程明细列表的请求结果如何被格式化，以及其 SQL 如何筛选并排序日程。",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/list.vue", "start_line": 139, "end_line": 163, "symbol": "getData()", "sha256": "e47e7c60d9ffac874b8b1bffa46ec32c52875abbe996968d6ca4eca6596210df", "rationale": "前端跨度展示明细列表赋值和日期、星期及时间格式化。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/service/provost/AttendanceServiceImpl.java", "start_line": 4839, "end_line": 4856, "symbol": "getPushScheduleDetailedList", "sha256": "34b7378a03166c272b9b262af46cbfdeef2e241cf8ad84a9f3ce725c1d963ed2", "rationale": "服务跨度展示明细 Mapper 调用和组合结果。"},
+        {"repository": "nsb", "path": "src/main/java/com/nsb/zy/dao/mapper/BusinessPushScheduleDetailedMapper.xml", "start_line": 406, "end_line": 415, "symbol": "getPushScheduleDetailedList", "sha256": "c845c310a15a6d0ff2bf1b4492d2ef85e6ca1dc1178cda263e5a3aa467b23ca3", "rationale": "SQL 跨度列出明细投影、有效状态约束及时间排序。"}
+      ]
+    },
+    {
+      "id": "BC-04",
+      "category": "business_chain",
+      "question": "追踪 FreeTutor 明细查询从控制器到服务和 Mapper：维度、导出标志及组织筛选如何影响查询分支？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/controller/freeTutor/FreeTutorController.java", "start_line": 809, "end_line": 812, "symbol": "queryFreeTutorScheduleDetailList", "sha256": "e644bd4b01a2eecefd90c572d539d56cfaa5ba0a1192d888c21263a3306330bd", "rationale": "控制器入口直接委托给 FreeTutor 服务。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 1924, "end_line": 1955, "symbol": "queryFreeTutorScheduleDetailList", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "服务跨度归一化中心、城市和区域参数。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 2033, "end_line": 2052, "symbol": "queryFreeTutorScheduleDetailList", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "服务跨度展示维度分支下的 Mapper 选择和分页包装。"},
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 661, "end_line": 696, "symbol": "queryFreeTutorScheduleDetailList", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "SQL 跨度标出明细查询投影、关联及已审核记录条件。"}
+      ]
+    },
+    {
+      "id": "BC-05",
+      "category": "business_chain",
+      "question": "追踪 FreeTutor 审核通过操作如何校验申请及日期、生成服务安排并更新申请状态。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/controller/freeTutor/FreeTutorController.java", "start_line": 679, "end_line": 685, "symbol": "approveFreeTutorSchedule", "sha256": "e644bd4b01a2eecefd90c572d539d56cfaa5ba0a1192d888c21263a3306330bd", "rationale": "审核控制器入口调用服务并返回业务结果。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 995, "end_line": 1025, "symbol": "approveFreeTutorSchedule", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "跨度检查申请关联排课及日期有效性。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 1048, "end_line": 1075, "symbol": "courseScheduleService.addSchedule", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "跨度展示审核流程内创建服务安排的调用。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 1100, "end_line": 1121, "symbol": "setStatus((byte) 2)", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "跨度展示审核时间、操作人和申请状态的更新。"}
+      ]
+    },
+    {
+      "id": "BC-06",
+      "category": "business_chain",
+      "question": "从补排预校验控制器追踪到服务：请求字段如何进入学生查询与后续校验流程？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/controller/freeTutor/FreeTutorPreController.java", "start_line": 294, "end_line": 301, "symbol": "freeTutorPreService.checkCourseSchedulePre", "sha256": "50f14e20f07a1d543609ff9af11ac2a94ad623af943f12504aeb33009a556311", "rationale": "控制器跨度显示请求参数向预校验服务的委托。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorPreServiceImpl.java", "start_line": 94, "end_line": 120, "symbol": "checkCourseSchedulePre", "sha256": "39eb8a329c3c5bb9a3219bd8949d59d3d1376517779e9cfbbb39ed85008f74de", "rationale": "服务跨度读取教师、中心、学生和项目等预校验字段。"}
+      ]
+    },
+    {
+      "id": "BC-07",
+      "category": "business_chain",
+      "question": "追踪补排申请提交入口到服务前置校验：提交服务读取哪些必填对象并在哪里拒绝缺失值？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/controller/freeTutor/FreeTutorPreController.java", "start_line": 313, "end_line": 319, "symbol": "addFreeTutorSchedulePreApply", "sha256": "50f14e20f07a1d543609ff9af11ac2a94ad623af943f12504aeb33009a556311", "rationale": "提交入口将请求交给补排服务并设置成功响应。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorPreServiceImpl.java", "start_line": 204, "end_line": 252, "symbol": "addFreeTutorScheduleApply", "sha256": "39eb8a329c3c5bb9a3219bd8949d59d3d1376517779e9cfbbb39ed85008f74de", "rationale": "服务跨度读取申请字段并开始检查教师、中心和学生必填项。"}
+      ]
+    },
+    {
+      "id": "BC-08",
+      "category": "business_chain",
+      "question": "FreeTutor 学生候选查询当前如何准备中心范围并最终选择 Mapper 查询？请核对注释分支与实际调用。",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 223, "end_line": 242, "symbol": "queryStudentForFreeTutorSchedule", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "跨度包含项目类型检查及中心 ID 的显式或权限范围处理。"},
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 260, "end_line": 286, "symbol": "businessFreeTutorMapper.queryStudentForFreeTutorSchedule", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "跨度可区分注释中的分支与最终执行的 Mapper 调用。"},
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 385, "end_line": 413, "symbol": "queryStudentForFreeTutorSchedule", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "SQL 映射展示候选学生字段、中心过滤和可选搜索条件。"}
+      ]
+    },
+    {
+      "id": "BC-09",
+      "category": "business_chain",
+      "question": "追踪非一对三 FreeTutor 重复申请检查：服务何时查询，Mapper 用哪些关联和状态过滤判断既有申请？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/service/freeTotur/FreeTutorServiceImpl.java", "start_line": 541, "end_line": 558, "symbol": "selectStudentFreeTutor", "sha256": "cefa8000d0c4eca619df73152ebc5693adfb9c6b85ef76bf8164bec0f062e9b0", "rationale": "服务跨度包含按项目类型分支、逐学生查询及重复时的拒绝逻辑。"},
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 605, "end_line": 619, "symbol": "selectStudentFreeTutor", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "Mapper 跨度展示关联表及排除已拒绝、已取消记录的条件。"}
+      ]
+    },
+    {
+      "id": "BC-10",
+      "category": "business_chain",
+      "question": "追踪大型 SignupServiceImpl 的暑期历史查询到超大订单明细 Mapper：服务如何转发参数，SQL 如何约束订单明细？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/service/signup/SignupServiceImpl.java", "start_line": 3218, "end_line": 3222, "symbol": "querySummerHistory", "sha256": "3880503addeada8becb9bc6ca933dac690e7b153afec8257cf5cff1a2d7a4e06", "rationale": "服务方法将参数直接转发给对应订单明细 Mapper。"},
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessOrderDetailMapper.xml", "start_line": 1606, "end_line": 1637, "symbol": "querySummerHistory", "sha256": "a24f2159b56f5102277fddbed05bae721e65b92e6ffb194277e9bc4c1d149445", "rationale": "SQL 映射包含历史投影、联接、状态及动态学生条件。"}
+      ]
+    },
+    {
+      "id": "FSQL-01",
+      "category": "frontend_sql",
+      "question": "确认课表首页向推送课表 GET 接口发送了哪个路由查询字段？",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/index.vue", "start_line": 98, "end_line": 101, "symbol": "pushScheduleId", "sha256": "692945a8c83e3711ac0dac8031a7a6c3789bf3f0c07f64e7a86fecbadecce14f", "rationale": "请求调用与路由参数映射在该相邻代码范围内。"}
+      ]
+    },
+    {
+      "id": "FSQL-02",
+      "category": "frontend_sql",
+      "question": "确认课表首页如何从接口响应构造日期展示值并设置是否已提交状态？",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/index.vue", "start_line": 103, "end_line": 115, "symbol": "isSubmit", "sha256": "692945a8c83e3711ac0dac8031a7a6c3789bf3f0c07f64e7a86fecbadecce14f", "rationale": "跨度包含日期字段格式化、响应写入和提交状态赋值。"}
+      ]
+    },
+    {
+      "id": "FSQL-03",
+      "category": "frontend_sql",
+      "question": "确认详情页点击处理如何避免重复确认，并调用哪个更新接口？",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/list.vue", "start_line": 123, "end_line": 137, "symbol": "updatePushSchedule.do", "sha256": "e47e7c60d9ffac874b8b1bffa46ec32c52875abbe996968d6ca4eca6596210df", "rationale": "跨度展示已确认判定、更新请求和两种用户反馈。"}
+      ]
+    },
+    {
+      "id": "FSQL-04",
+      "category": "frontend_sql",
+      "question": "确认详情页如何使用返回的明细数组并格式化日期、星期和起止时间？",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/pages/User/ConfirmTimetable/list.vue", "start_line": 140, "end_line": 163, "symbol": "pushScheduleDetailedList", "sha256": "e47e7c60d9ffac874b8b1bffa46ec32c52875abbe996968d6ca4eca6596210df", "rationale": "跨度展示明细赋值及日期、星期和时间的前端转换。"}
+      ]
+    },
+    {
+      "id": "FSQL-05",
+      "category": "frontend_sql",
+      "question": "推送课表主记录 SQL 返回哪些汇总字段，并用哪些课表状态条件限制明细？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessPushScheduleMapper.xml", "start_line": 293, "end_line": 312, "symbol": "getPushSchedule", "sha256": "b8c486968ee733930b37b403d3513a97c546d4d0198cbfe3fd492504f55e569b", "rationale": "该 SQL 明确列出聚合投影、表关联和状态筛选表达式。"}
+      ]
+    },
+    {
+      "id": "FSQL-06",
+      "category": "frontend_sql",
+      "question": "FreeTutor 明细查询 SQL 的主要输出字段及基础审核、删除条件是什么？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 661, "end_line": 696, "symbol": "queryFreeTutorScheduleDetailList", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "跨度列出明细投影、关键关联以及记录状态限制。"}
+      ]
+    },
+    {
+      "id": "FSQL-07",
+      "category": "frontend_sql",
+      "question": "FreeTutor 申请列表 SQL 如何投影审核状态并按请求参数追加筛选？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 537, "end_line": 603, "symbol": "queryFreeTutorScheduleList", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "跨度涵盖状态投影、表关联和多个条件化过滤块。"}
+      ]
+    },
+    {
+      "id": "FSQL-08",
+      "category": "frontend_sql",
+      "question": "移动端 FreeTutor 课表 SQL 如何关联问卷答案，并将答案题位转换为 surveyScore？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 1139, "end_line": 1173, "symbol": "surveyScore", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "跨度同时包含评分 CASE 表达式、问卷关联和基础过滤条件。"}
+      ]
+    },
+    {
+      "id": "FSQL-09",
+      "category": "frontend_sql",
+      "question": "问卷详情 SQL 如何把存储答案和问卷题目映射为编号字段，并按日程 ID 过滤？",
+      "repository": "nsb",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "src/main/java/com/nsb/zy/dao/mapper/BusinessFreeTutorMapper.xml", "start_line": 1226, "end_line": 1271, "symbol": "queryFreeTutorScheduleSurveyDetailForMobile", "sha256": "60df5f1d9cc1bcea55cfbdced280b5254554914366568885c13eda795f6d3079", "rationale": "跨度展示答案/题目投影、关联关系和可选 scheduleId 条件。"}
+      ]
+    },
+    {
+      "id": "FSQL-10",
+      "category": "frontend_sql",
+      "question": "evip_mobile 与 evip-dashboard 各自声明了什么 Vue 依赖版本范围？",
+      "repository": "evip_mobile",
+      "source_kind": "representative_repo",
+      "evidence": [
+        {"path": "package.json", "start_line": 22, "end_line": 22, "symbol": "\"vue\"", "sha256": "ee3a0eecbbf5422494ee326ea972be180fa9c29629749ba581eb6e0f419f8075", "rationale": "移动端清单在此处声明 Vue 版本范围。"},
+        {"repository": "evip_dashboard", "path": "package.json", "start_line": 14, "end_line": 14, "symbol": "\"vue\"", "sha256": "b4860941e80b82f92f1074d19502b8548247f281f7e9393784175a0a378d2a30", "rationale": "Dashboard 清单在此处声明 Vue 版本范围。"}
+      ]
+    }
+  ]
+}
