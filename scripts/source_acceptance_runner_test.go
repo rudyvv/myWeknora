@@ -430,6 +430,96 @@ func TestSourceAcceptanceRunnerDowngradesEmptyMeasuredRecordsToUnknown(t *testin
 	}
 }
 
+func TestSourceAcceptanceRunnerKeepsPartialMetricsAndMarksEachMissingMetricUnknown(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	measurement := map[string]any{
+		"schema_version": 1,
+		"incremental_runs": []any{map[string]any{
+			"changed_file_count": 1, "status": "measured", "model_identifier": "model-1", "tokenizer": "cl100k_base", "context_limit_tokens": 8192,
+			"selected_files": 1, "selected_bytes": nil, "chunk_count": nil, "elapsed_ms": nil, "peak_memory_bytes": nil,
+			"phase_duration_ms":      map[string]any{"fetching": 12, "parsing": nil},
+			"estimated_input_tokens": 120, "actual_input_tokens": nil, "embedding_calls": nil, "generation_calls": nil,
+		}},
+		"text_baseline": map[string]any{
+			"status": "measured", "model_identifier": "model-1", "tokenizer": "cl100k_base", "budget_tokens": 8192,
+			"selected_files": 1, "selected_bytes": 24, "chunk_count": nil, "elapsed_ms": 55, "peak_memory_bytes": nil,
+			"phase_duration_ms":      map[string]any{"fetching": 8},
+			"estimated_input_tokens": 300, "actual_input_tokens": nil, "embedding_calls": nil, "generation_calls": nil,
+		},
+	}
+	measurementPath := writeAcceptanceJSON(t, "partial-measurements.json", measurement)
+	result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-MeasurementsFile", measurementPath)
+	if result.ExitCode != 0 {
+		t.Fatalf("partial optional measurements should preserve known values without failing retrieval: exit=%d report=%s", result.ExitCode, report)
+	}
+	var document struct {
+		IncrementalRuns []struct {
+			ChangedFileCount int    `json:"changed_file_count"`
+			Status           string `json:"status"`
+			Completeness     string `json:"completeness"`
+			MetricStatus     struct {
+				SelectedFiles   string            `json:"selected_files"`
+				ElapsedMS       string            `json:"elapsed_ms"`
+				EstimatedTokens string            `json:"estimated_input_tokens"`
+				ActualTokens    string            `json:"actual_input_tokens"`
+				PhaseDuration   map[string]string `json:"phase_duration_ms"`
+			} `json:"metric_status"`
+			Output struct {
+				SelectedFiles        *int              `json:"selected_files"`
+				ElapsedMS            *int              `json:"elapsed_ms"`
+				EstimatedInputTokens *int              `json:"estimated_input_tokens"`
+				ActualInputTokens    *int              `json:"actual_input_tokens"`
+				PhaseDurationMS      map[string]*int64 `json:"phase_duration_ms"`
+			} `json:"output"`
+		} `json:"incremental_runs"`
+		TextBaseline struct {
+			Status       string `json:"status"`
+			Completeness string `json:"completeness"`
+			MetricStatus struct {
+				ElapsedMS        string `json:"elapsed_ms"`
+				PeakMemoryBytes  string `json:"peak_memory_bytes"`
+				ActualInputToken string `json:"actual_input_tokens"`
+			} `json:"metric_status"`
+			Outputs struct {
+				SelectedFiles        *int `json:"selected_files"`
+				ElapsedMS            *int `json:"elapsed_ms"`
+				EstimatedInputTokens *int `json:"estimated_input_tokens"`
+				ActualInputTokens    *int `json:"actual_input_tokens"`
+			} `json:"outputs"`
+		} `json:"text_baseline"`
+	}
+	if err := json.Unmarshal([]byte(report), &document); err != nil {
+		t.Fatalf("could not decode partial measurement report: %v", err)
+	}
+	if len(document.IncrementalRuns) != 3 {
+		t.Fatalf("expected all 1/10/100-file scenarios in the report: %+v", document.IncrementalRuns)
+	}
+	partialIndex := -1
+	for index, run := range document.IncrementalRuns {
+		if run.ChangedFileCount == 1 {
+			partialIndex = index
+			break
+		}
+	}
+	if partialIndex < 0 {
+		t.Fatalf("expected the partial 1-file measurement in the report: %+v", document.IncrementalRuns)
+	}
+	partial := document.IncrementalRuns[partialIndex]
+	if partial.Status != "partial" || partial.Completeness != "partial" || partial.Output.SelectedFiles == nil || *partial.Output.SelectedFiles != 1 || partial.Output.ElapsedMS != nil || partial.Output.EstimatedInputTokens == nil || *partial.Output.EstimatedInputTokens != 120 || partial.Output.ActualInputTokens != nil || partial.MetricStatus.SelectedFiles != "observed" || partial.MetricStatus.ElapsedMS != "unknown" || partial.MetricStatus.EstimatedTokens != "observed" || partial.MetricStatus.ActualTokens != "unknown" || partial.MetricStatus.PhaseDuration["fetching"] != "observed" || partial.MetricStatus.PhaseDuration["parsing"] != "unknown" || partial.Output.PhaseDurationMS["fetching"] == nil || partial.Output.PhaseDurationMS["parsing"] != nil {
+		t.Fatalf("incremental partial metrics were lost or misclassified: %+v", partial)
+	}
+	if document.TextBaseline.Status != "partial" || document.TextBaseline.Completeness != "partial" || document.TextBaseline.Outputs.ElapsedMS == nil || *document.TextBaseline.Outputs.ElapsedMS != 55 || document.TextBaseline.Outputs.ActualInputTokens != nil || document.TextBaseline.MetricStatus.ElapsedMS != "observed" || document.TextBaseline.MetricStatus.PeakMemoryBytes != "unknown" || document.TextBaseline.MetricStatus.ActualInputToken != "unknown" {
+		t.Fatalf("baseline partial metrics were lost or misclassified: %+v", document.TextBaseline)
+	}
+	for _, run := range document.IncrementalRuns {
+		if run.ChangedFileCount != 1 && (run.Status != "unknown" || run.Completeness != "unknown") {
+			t.Fatalf("missing %d-file measurement should remain unknown: %+v", run.ChangedFileCount, run)
+		}
+	}
+}
+
 func TestSourceAcceptanceRunnerBoundsPublishPolling(t *testing.T) {
 	fixture := &acceptanceFixture{syncTimeout: true}
 	server := httptest.NewServer(fixture)
@@ -552,7 +642,7 @@ func TestSourceAcceptanceRunnerFailsClosedWhenParserHTTPHealthIsNotReady(t *test
 	fixture := &acceptanceFixture{parserNotReady: true}
 	server := httptest.NewServer(fixture)
 	defer server.Close()
-	manifest := goldShapedQuestionManifest(false)
+	manifest := legacyQuestionManifest("snapshot-1")
 	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, nil)
 	if result.ExitCode == 0 || !strings.Contains(report, "parser_not_ready") || fixture.searchCalls != 0 {
 		t.Fatalf("runner searched with an unhealthy parser readiness result: exit=%d searches=%d report=%s", result.ExitCode, fixture.searchCalls, report)

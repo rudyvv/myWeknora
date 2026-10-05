@@ -38,6 +38,19 @@ $script:runStopwatch = $null
 $script:validatedSourceMetadataCache = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
 $script:validatedSourceMetadataCacheBytes = 0
 $script:authorizedSourceReadCount = 0
+$script:measurementScalarFields = @('selected_files', 'selected_bytes', 'chunk_count', 'elapsed_ms', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens', 'embedding_calls', 'generation_calls')
+$script:unknownMetricStatus = [ordered]@{
+    selected_files = 'unknown'
+    selected_bytes = 'unknown'
+    chunk_count = 'unknown'
+    elapsed_ms = 'unknown'
+    peak_memory_bytes = 'unknown'
+    estimated_input_tokens = 'unknown'
+    actual_input_tokens = 'unknown'
+    embedding_calls = 'unknown'
+    generation_calls = 'unknown'
+    phase_duration_ms = [ordered]@{ fetching = 'unknown'; parsing = 'unknown'; indexing = 'unknown'; publishing = 'unknown' }
+}
 $script:report = [ordered]@{
     schema_version = 1
     status = 'running'
@@ -66,11 +79,11 @@ $script:report = [ordered]@{
     source_read_validation = [ordered]@{ authorized_read_count = 0; metadata_cache_entries = 0; metadata_cache_bytes = 0; max_cache_entries = 300; max_cache_bytes = 524288 }
     question_results = @()
     incremental_runs = @(
-        [ordered]@{ changed_file_count = 1; status = 'unknown'; input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; phase_duration_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null } },
-        [ordered]@{ changed_file_count = 10; status = 'unknown'; input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; phase_duration_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null } },
-        [ordered]@{ changed_file_count = 100; status = 'unknown'; input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; phase_duration_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null } }
+        [ordered]@{ changed_file_count = 1; status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } },
+        [ordered]@{ changed_file_count = 10; status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } },
+        [ordered]@{ changed_file_count = 100; status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
     )
-    text_baseline = [ordered]@{ status = 'unknown'; inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; outputs = [ordered]@{ selected_files = $null; selected_bytes = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null } }
+    text_baseline = [ordered]@{ status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; outputs = [ordered]@{ selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
     agent_ui_smoke = [ordered]@{ status = 'not_requested'; event_count = 0; event_types = @(); query_sha256 = $null; answer_text_recorded = $false }
     errors = @()
 }
@@ -175,6 +188,34 @@ function Assert-OptionalNonNegativeInteger($Value, [string] $Label) {
     if (-not [long]::TryParse([string]$Value, [ref]$number) -or $number -lt 0) {
         Stop-Acceptance 'measurement_value_invalid' "Measurement '$Label' must be a non-negative integer or null."
     }
+}
+
+function Get-MeasurementSummary($Record) {
+    $metricStatus = [ordered]@{}
+    $observedCount = 0
+    $requiredCount = $script:measurementScalarFields.Count + 4
+    foreach ($field in $script:measurementScalarFields) {
+        if ($null -ne (Get-Field $Record $field)) {
+            $metricStatus[$field] = 'observed'
+            $observedCount++
+        } else {
+            $metricStatus[$field] = 'unknown'
+        }
+    }
+    $phaseStatus = [ordered]@{}
+    $phases = Get-Field $Record 'phase_duration_ms'
+    foreach ($phase in @('fetching', 'parsing', 'indexing', 'publishing')) {
+        if ($null -ne (Get-Field $phases $phase)) {
+            $phaseStatus[$phase] = 'observed'
+            $observedCount++
+        } else {
+            $phaseStatus[$phase] = 'unknown'
+        }
+    }
+    $metricStatus.phase_duration_ms = $phaseStatus
+    $completeness = if ($observedCount -eq 0) { 'unknown' } elseif ($observedCount -eq $requiredCount) { 'complete' } else { 'partial' }
+    $status = if ($completeness -eq 'complete') { 'measured' } else { $completeness }
+    return [pscustomobject]@{ status = $status; completeness = $completeness; metric_status = $metricStatus }
 }
 
 function Write-Report {
@@ -838,7 +879,7 @@ try {
                 }
                 $runStatus = [string](Get-Field $run 'status')
                 if ($runStatus -notin @('measured', 'unknown')) { Stop-Acceptance 'incremental_metrics_invalid' "The $expectedCount-file scenario status must be measured or unknown." }
-                foreach ($field in @('selected_files', 'selected_bytes', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens')) {
+                foreach ($field in $script:measurementScalarFields) {
                     Assert-OptionalNonNegativeInteger (Get-Field $run $field) "incremental.$expectedCount.$field"
                 }
                 $phases = Get-Field $run 'phase_duration_ms'
@@ -848,17 +889,10 @@ try {
                         Assert-OptionalNonNegativeInteger $phase.Value "incremental.$expectedCount.phase_duration_ms.$($phase.Name)"
                     }
                 }
-                $hasRunMeasurement = $false
-                foreach ($field in @('selected_files', 'selected_bytes', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens')) {
-                    if ($null -ne (Get-Field $run $field)) { $hasRunMeasurement = $true }
-                }
-                if ($null -ne $phases) {
-                    foreach ($phase in $phases.PSObject.Properties) { if ($null -ne $phase.Value) { $hasRunMeasurement = $true } }
-                }
-                if ($runStatus -eq 'measured' -and -not $hasRunMeasurement) { $runStatus = 'unknown' }
+                $measurementSummary = Get-MeasurementSummary $run
                 $incrementalInput = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }
-                $incrementalOutput = [ordered]@{ source_id = Get-Field $run 'source_id'; snapshot_id = Get-Field $run 'snapshot_id'; commit_sha = Get-Field $run 'commit_sha'; selected_files = Get-Field $run 'selected_files'; selected_bytes = Get-Field $run 'selected_bytes'; phase_duration_ms = $phases; peak_memory_bytes = Get-Field $run 'peak_memory_bytes'; estimated_input_tokens = Get-Field $run 'estimated_input_tokens'; actual_input_tokens = Get-Field $run 'actual_input_tokens' }
-                $script:report.incremental_runs = @($script:report.incremental_runs | Where-Object { $_.changed_file_count -ne $expectedCount }) + @([ordered]@{ changed_file_count = $expectedCount; status = $runStatus; input = $incrementalInput; output = $incrementalOutput })
+                $incrementalOutput = [ordered]@{ source_id = Get-Field $run 'source_id'; snapshot_id = Get-Field $run 'snapshot_id'; commit_sha = Get-Field $run 'commit_sha'; selected_files = Get-Field $run 'selected_files'; selected_bytes = Get-Field $run 'selected_bytes'; chunk_count = Get-Field $run 'chunk_count'; phase_duration_ms = $phases; elapsed_ms = Get-Field $run 'elapsed_ms'; peak_memory_bytes = Get-Field $run 'peak_memory_bytes'; estimated_input_tokens = Get-Field $run 'estimated_input_tokens'; actual_input_tokens = Get-Field $run 'actual_input_tokens'; embedding_calls = Get-Field $run 'embedding_calls'; generation_calls = Get-Field $run 'generation_calls' }
+                $script:report.incremental_runs = @($script:report.incremental_runs | Where-Object { $_.changed_file_count -ne $expectedCount }) + @([ordered]@{ changed_file_count = $expectedCount; status = $measurementSummary.status; completeness = $measurementSummary.completeness; provided_status = $runStatus; metric_status = $measurementSummary.metric_status; input = $incrementalInput; output = $incrementalOutput })
             }
         }
         $baseline = Get-Field $measurements 'text_baseline'
@@ -868,18 +902,24 @@ try {
             }
             $baselineStatus = [string](Get-Field $baseline 'status')
             if ($baselineStatus -notin @('measured', 'unknown')) { Stop-Acceptance 'baseline_metrics_invalid' 'Text baseline status must be measured or unknown.' }
-            foreach ($field in @('selected_files', 'selected_bytes', 'elapsed_ms', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens')) {
+            foreach ($field in $script:measurementScalarFields) {
                 Assert-OptionalNonNegativeInteger (Get-Field $baseline $field) "text_baseline.$field"
             }
-            $hasBaselineMeasurement = $false
-            foreach ($field in @('selected_files', 'selected_bytes', 'elapsed_ms', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens')) {
-                if ($null -ne (Get-Field $baseline $field)) { $hasBaselineMeasurement = $true }
+            $baselinePhases = Get-Field $baseline 'phase_duration_ms'
+            if ($null -ne $baselinePhases) {
+                foreach ($phase in $baselinePhases.PSObject.Properties) {
+                    if ($phase.Name -notin @('fetching', 'parsing', 'indexing', 'publishing')) { Stop-Acceptance 'baseline_metrics_invalid' "The text baseline contains an unknown phase." }
+                    Assert-OptionalNonNegativeInteger $phase.Value "text_baseline.phase_duration_ms.$($phase.Name)"
+                }
             }
-            if ($baselineStatus -eq 'measured' -and -not $hasBaselineMeasurement) { $baselineStatus = 'unknown' }
+            $baselineSummary = Get-MeasurementSummary $baseline
             $script:report.text_baseline = [ordered]@{
-                status = $baselineStatus
+                status = $baselineSummary.status
+                completeness = $baselineSummary.completeness
+                provided_status = $baselineStatus
+                metric_status = $baselineSummary.metric_status
                 inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }
-                outputs = [ordered]@{ selected_files = Get-Field $baseline 'selected_files'; selected_bytes = Get-Field $baseline 'selected_bytes'; elapsed_ms = Get-Field $baseline 'elapsed_ms'; peak_memory_bytes = Get-Field $baseline 'peak_memory_bytes'; estimated_input_tokens = Get-Field $baseline 'estimated_input_tokens'; actual_input_tokens = Get-Field $baseline 'actual_input_tokens' }
+                outputs = [ordered]@{ selected_files = Get-Field $baseline 'selected_files'; selected_bytes = Get-Field $baseline 'selected_bytes'; chunk_count = Get-Field $baseline 'chunk_count'; phase_duration_ms = $baselinePhases; elapsed_ms = Get-Field $baseline 'elapsed_ms'; peak_memory_bytes = Get-Field $baseline 'peak_memory_bytes'; estimated_input_tokens = Get-Field $baseline 'estimated_input_tokens'; actual_input_tokens = Get-Field $baseline 'actual_input_tokens'; embedding_calls = Get-Field $baseline 'embedding_calls'; generation_calls = Get-Field $baseline 'generation_calls' }
             }
         }
     }
@@ -921,8 +961,8 @@ try {
             $selectedBytes += [int64]$size
         }
         $safeFiles = @($files | ForEach-Object { [ordered]@{ path = Get-Field $_ 'path'; blob_sha = Get-Field $_ 'blob_sha'; size = Get-Field $_ 'size'; status = Get-Field $_ 'status' } })
-        if ((Get-Field $preview 'can_sync') -ne $true) { Stop-Acceptance 'preview_not_ready' 'A mapped source preview is not publishable; no sync was started.' }
         if (-not $parserReady) { Stop-Acceptance 'parser_not_ready' 'A source preview did not report a ready parser for the selected source.' }
+        if ((Get-Field $preview 'can_sync') -ne $true) { Stop-Acceptance 'preview_not_ready' 'A mapped source preview is not publishable; no sync was started.' }
         foreach ($mapping in $script:repositoryMappings.Values) {
             if ((Get-Field $mapping 'source_id') -eq $sourceId -and (Get-Field $mapping 'commit_sha') -cne (Get-Field $preview 'commit_sha')) {
                 Stop-Acceptance 'preview_commit_mismatch' 'A source preview differs from the commit approved in its repository mapping.'
