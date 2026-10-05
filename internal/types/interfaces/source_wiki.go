@@ -13,6 +13,12 @@ type SourceWikiService interface {
 	ReadEvidence(context.Context, string, string, int, string) (*types.SourceFileView, error)
 }
 
+// SourceWikiReadProjectionRepository checks the immutable source-backed Wiki
+// projection captured for an in-flight answer lease.
+type SourceWikiReadProjectionRepository interface {
+	CheckSourceWikiReadProjection(context.Context, string) error
+}
+
 // SourceWikiBatchExecutionService is an internal extension used only by the
 // durable batch worker; HTTP clients cannot provide its trusted topic fields.
 type SourceWikiBatchExecutionService interface {
