@@ -39,17 +39,19 @@ $script:validatedSourceMetadataCache = [System.Collections.Generic.Dictionary[st
 $script:validatedSourceMetadataCacheBytes = 0
 $script:authorizedSourceReadCount = 0
 $script:measurementScalarFields = @('selected_files', 'selected_bytes', 'chunk_count', 'elapsed_ms', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens', 'embedding_calls', 'generation_calls')
-$script:unknownMetricStatus = [ordered]@{
-    selected_files = 'unknown'
-    selected_bytes = 'unknown'
-    chunk_count = 'unknown'
-    elapsed_ms = 'unknown'
-    peak_memory_bytes = 'unknown'
-    estimated_input_tokens = 'unknown'
-    actual_input_tokens = 'unknown'
-    embedding_calls = 'unknown'
-    generation_calls = 'unknown'
-    phase_duration_ms = [ordered]@{ fetching = 'unknown'; parsing = 'unknown'; indexing = 'unknown'; publishing = 'unknown' }
+function New-UnknownMetricStatus {
+    return [ordered]@{
+        selected_files = 'unknown'
+        selected_bytes = 'unknown'
+        chunk_count = 'unknown'
+        elapsed_ms = 'unknown'
+        peak_memory_bytes = 'unknown'
+        estimated_input_tokens = 'unknown'
+        actual_input_tokens = 'unknown'
+        embedding_calls = 'unknown'
+        generation_calls = 'unknown'
+        phase_duration_ms = [ordered]@{ fetching = 'unknown'; parsing = 'unknown'; indexing = 'unknown'; publishing = 'unknown' }
+    }
 }
 $script:report = [ordered]@{
     schema_version = 1
@@ -79,11 +81,11 @@ $script:report = [ordered]@{
     source_read_validation = [ordered]@{ authorized_read_count = 0; metadata_cache_entries = 0; metadata_cache_bytes = 0; max_cache_entries = 300; max_cache_bytes = 524288 }
     question_results = @()
     incremental_runs = @(
-        [ordered]@{ changed_file_count = 1; status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } },
-        [ordered]@{ changed_file_count = 10; status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } },
-        [ordered]@{ changed_file_count = 100; status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
+        [ordered]@{ changed_file_count = 1; status = 'unknown'; completeness = 'unknown'; metric_status = (New-UnknownMetricStatus); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } },
+        [ordered]@{ changed_file_count = 10; status = 'unknown'; completeness = 'unknown'; metric_status = (New-UnknownMetricStatus); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } },
+        [ordered]@{ changed_file_count = 100; status = 'unknown'; completeness = 'unknown'; metric_status = (New-UnknownMetricStatus); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
     )
-    text_baseline = [ordered]@{ status = 'unknown'; completeness = 'unknown'; metric_status = $script:unknownMetricStatus.Clone(); inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; outputs = [ordered]@{ selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
+    text_baseline = [ordered]@{ status = 'unknown'; completeness = 'unknown'; metric_status = (New-UnknownMetricStatus); inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; outputs = [ordered]@{ selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
     agent_ui_smoke = [ordered]@{ status = 'not_requested'; event_count = 0; event_types = @(); query_sha256 = $null; answer_text_recorded = $false }
     errors = @()
 }
