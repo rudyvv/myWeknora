@@ -188,20 +188,12 @@ function Stop-Acceptance([string] $Code, [string] $Message) {
 
 function Convert-OptionalNonNegativeInteger($Value, [string] $Label, [string] $ErrorCode = 'measurement_value_invalid') {
     if ($null -eq $Value) { return $null }
-    if ($Value -is [bool] -or $Value -is [string] -or $Value -is [char]) {
-        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
-    }
     $typeName = $Value.GetType().FullName
     $integerTypes = @('System.Byte', 'System.SByte', 'System.Int16', 'System.UInt16', 'System.Int32', 'System.UInt32', 'System.Int64', 'System.UInt64')
-    if ($typeName -notin $integerTypes -and $Value -isnot [decimal] -and $Value -isnot [double] -and $Value -isnot [single]) {
+    if ($typeName -notin $integerTypes) {
         Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
     }
-    if (($Value -is [double] -or $Value -is [single]) -and ([double]::IsNaN([double]$Value) -or [double]::IsInfinity([double]$Value) -or [math]::Truncate([double]$Value) -ne [double]$Value)) {
-        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
-    }
-    try { $number = [decimal]$Value } catch {
-        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
-    }
+    $number = [decimal]$Value
     if ($number -lt 0 -or $number -gt [decimal][long]::MaxValue -or $number -ne [decimal]::Truncate($number)) {
         Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
     }

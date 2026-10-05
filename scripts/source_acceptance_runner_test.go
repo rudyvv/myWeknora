@@ -162,6 +162,10 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					hits[i].(map[string]any)["match_type"] = "match-type-marker"
 				case "match_type_unknown":
 					hits[i].(map[string]any)["match_type"] = 99
+				case "match_type_decimal":
+					hits[i].(map[string]any)["match_type"] = json.Number("55.0")
+				case "match_type_exponent":
+					hits[i].(map[string]any)["match_type"] = json.Number("5.5e1")
 				}
 			}
 		}
@@ -456,6 +460,8 @@ func TestSourceAcceptanceRunnerValidatesSearchHitScoreAndMatchType(t *testing.T)
 		{name: "score must be numeric", badHitMetric: "score_string", wantErrorCode: "search_hit_score_invalid", wantMarker: "score-type-marker"},
 		{name: "match type must be numeric", badHitMetric: "match_type_string", wantErrorCode: "search_hit_match_type_invalid", wantMarker: "match-type-marker"},
 		{name: "match type must be a known enum", badHitMetric: "match_type_unknown", wantErrorCode: "search_hit_match_type_invalid"},
+		{name: "match type rejects decimal token", badHitMetric: "match_type_decimal", wantErrorCode: "search_hit_match_type_invalid"},
+		{name: "match type rejects exponent token", badHitMetric: "match_type_exponent", wantErrorCode: "search_hit_match_type_invalid"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -743,6 +749,31 @@ func TestSourceAcceptanceRunnerRejectsNonIntegerMeasurementJSONValues(t *testing
 			}
 			if strings.Contains(report, `"selected_files": "55"`) || fixture.searchCalls != 0 {
 				t.Fatal("runner copied an invalid measurement string into the report or continued into retrieval")
+			}
+		})
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsIntegralFloatAndExponentMetricTokens(t *testing.T) {
+	tests := []struct {
+		name   string
+		metric string
+	}{
+		{name: "scalar decimal token", metric: `"selected_files":55.0`},
+		{name: "scalar exponent token", metric: `"selected_files":5.5e1`},
+		{name: "phase decimal token", metric: `"phase_duration_ms":{"fetching":55.0}`},
+		{name: "phase exponent token", metric: `"phase_duration_ms":{"fetching":5.5e1}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &acceptanceFixture{}
+			server := httptest.NewServer(fixture)
+			defer server.Close()
+			raw := `{"schema_version":1,"incremental_runs":[{"changed_file_count":1,"status":"measured","model_identifier":"model-1","tokenizer":"cl100k_base","context_limit_tokens":8192,` + test.metric + `}]}`
+			measurementPath := writeAcceptanceRawJSON(t, "float-token-measurement.json", raw)
+			result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-MeasurementsFile", measurementPath)
+			if result.ExitCode == 0 || !strings.Contains(report, "incremental_metrics_invalid") || fixture.searchCalls != 0 {
+				t.Fatalf("runner accepted an integral decimal/exponent JSON token: exit=%d searches=%d report=%s", result.ExitCode, fixture.searchCalls, report)
 			}
 		})
 	}
@@ -1113,10 +1144,8 @@ func runSourceAcceptanceWithQuestions(t *testing.T, baseURL, token string, quest
 	if readErr != nil {
 		t.Fatalf("runner did not write a report (exit=%d stdout=%s stderr=%s): %v", result.ExitCode, result.Stdout, result.Stderr, readErr)
 	}
-	var pretty any
-	if json.Unmarshal(reportBytes, &pretty) != nil {
+	if !json.Valid(reportBytes) {
 		t.Fatalf("runner report is not JSON: %s", reportBytes)
 	}
-	prettyBytes, _ := json.MarshalIndent(pretty, "", "  ")
-	return result, string(prettyBytes)
+	return result, string(reportBytes)
 }
