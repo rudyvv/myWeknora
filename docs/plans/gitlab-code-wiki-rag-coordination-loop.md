@@ -394,3 +394,13 @@ WorkerT10 direct-root报告被授权校验拒绝（无具体reason），root已�
 Main六finding修hostfreeze9fd54ef188bcb4a22099bbe338af927a3289aa53，root完整fakeHTTPsession16871进行中、两现有Sol/high窄轴进行中；main不修改。原T06与T10树hostcleanFF至bae，T06实施指定product/119/sharedfixture；T10独占NEW source_wiki_read_projection_review_integration_test.go，同T22辅助不新票。两者Luna/xhigh，root57822唯一PGslot，无让用户找runner/DSN；问题直接root或compact收NEEDS_ROOT，不ACK循环。最新已处理main2e338483-8967-4344-a3df-1e275491384c:4，T06 1bd61794-e8b7-46ec-879d-b07b4db1953a:4，T10 f3cb49ee-47de-4780-bcad-adf8da4107cc:3。正式reviewbase1d32不变，本轮产品窄basebae；21/22、#30 OPEN、不过程GitHub流水。容量错误不假PASS，原Temp清理拒绝保留。
 
 随后9fd root23topHTTP22PASS1FAIL/pkg155.864全收16871，独立SolStandards0hard1newjudgment、Spec1P2 numericintegralfloat。唯一Int64FAIL是Go测试helper往返float64非product，root定位并一次交同main最小修；两个纯合成55.0/5.5e1 AST函数counter实际接受确认SpecP2。main已active修testUseNumber+strictintegralCLR，未accepted。用户现场GitLab测试失败root已UI更正projectURL→basehttps://gitlab.p.it，实际仍TLSunknownauthority、hostcurl exit60同样未信任；token尚未校验，不能归咎token。待用户/管理员CA公共cert路径；不绕TLS/改系统trust/sharedrestart。三个原执行chat最新processedmain:6、T06:6、T10:5（同上述cursorprefix），产品单MVCC projection与NEW独立PGtests继续active。Root无activePG/testprocess；formalbase1d32，21/22/#30OPEN。
+
+## API 工具接受；TLS 与旧卡片修复继续（2026-10-05）
+
+主 API 工具94e1de44严格整数及原始report bytes修通过Sol/high窄双轴0新必修、根5定向20.399s及4scalar/phase子例6.834s；已merge24ea2183。原23top22green与最后修按实际证据累计，首轮错pattern no-tests明确不计。整票仍21/22、#30OPEN，不写GitHub过程流水。
+
+用户问临时关闭证书验证并要求继续；根先固定临时TLS合同51c008cc，实际启用仍待具体部署确认。原main/a8ea只拥有GitLab专用policy/new tests/API及loopbackbridge最小调用/operations文档；不修改共享HTTP安全策略/系统trust/用户应用，不读取凭据。精确HTTPS origin+最多24h deadline，默认verify、逐请求到期独立verify连接池、redirect阻断及token隔离。Root静态发现合法到期配置constructor报错与自动恢复合同有差异，已交回最小修和constructor regression；非法/缺失/超24h仍failclosed。已接受UI不为此slice重复Node userInfo shim试错。
+
+原T06产品单MVCC projection已写出但未冻结。Root发现raw证据snapshot被强制等于applicability，违反ADR0010 carry-forward允许旧raw证据；已交同Luna最小修，租约匹配applicability、raw owner/hash独立验证，并补公开read regression。原T10先前stream断开且无文件不算完成，root恢复同一个Luna/xhigh对话，转交真实T06 seam，限定新增review test文件，先完成可行的旧body/新问排stale/撤权清除/prune保留四类，不为尚缺capacity合法fixture停住。不向用户询问内部runner。
+
+最新processed main2e338483-8967-4344-a3df-1e275491384c:8，T06 1bd61794-e8b7-46ec-879d-b07b4db1953a:8，T10 f3cb49ee-47de-4780-bcad-adf8da4107cc:7。三个active实施同票，root尚无新PG/test进程；57822仍root唯一，Dockerparser57823仍保留。接到干净freeze再Sol/high双轴及必要根真实复验；不把结束/环境失败/部分通过算验收，不新建聊天，不ACK循环。

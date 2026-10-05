@@ -15,3 +15,9 @@
 `go test ./scripts -run '^TestSourceAcceptanceRunner' -count=1 -v`：23顶层22PASS/1FAIL，pkg155.864s；session16871完整收取，日志 `%TEMP%/weknora-root-t22-runner-final.txt`。唯一 FullRun Int64 上界红来自 **Go测试辅助函数** json.Unmarshal(report,&any)→float64→MarshalIndent 的精度损失，不能据此归咎生产serializer；原输入及 pwsh ConvertFrom/To-Json 的 Int64 上界保持，测试须 UseNumber 或原始 JSON bytes。
 
 根另外实际 AST 提取 frozen Stop-Acceptance/Convert-OptionalNonNegativeInteger 运行纯合成 token55.0、5.5e1，两个都 accepted=true/output55，确认真正 Spec P2。未读取真实源码/凭据、不改产品 instrumentation。两个问题一次交同原Luna只修三ownedfiles；原Int64上界、0、nullable和其它已绿断言保留，增加decimal/exponent的metric/phase/match_type负例。后续仅定向回归与窄双轴，避免重跑155s整套。无PG/GitHub操作。
+
+## 94e1de44 最终修复与接受
+
+冻结 `94e1de44c849b1c7af344926c8bb175ec88dc2cf` 保留严格整数 CLR 类型、非负及 Int64 范围检查；report test helper 校验 JSON 后返回原始 bytes，避免 float64 往返。独立 Sol/high 窄 Standards 0 新硬违规/0 新判断，Spec 0 未解决问题。
+
+根五个定向 HTTP tests 全 PASS，pkg20.399s，session50283 全收；其中严格整数五子例、match_type decimal/exponent、nullable、非有限测量和 full_run Int64 上界均真实执行。另一个 phase decimal/exponent 用例首轮 pattern 拼错导致 no tests，只算编译；改为 `TestSourceAcceptanceRunnerRejectsIntegralFloatAndExponentMetricTokens` 后四 scalar/phase 子例实际 PASS，pkg6.834s。无重复整跑155s；已绿行为和最后修复按实际证据合并。Root merge `24ea2183073765dd34fe24302e2460f19d6498af` 接受 API 工具 slice，整票 T22 仍未接受。
