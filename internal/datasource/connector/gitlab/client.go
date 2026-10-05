@@ -72,7 +72,11 @@ func newClient(baseURL, token string) (*client, error) {
 	if !strings.HasSuffix(baseURL, "/api/v4") {
 		baseURL += "/api/v4"
 	}
-	return &client{baseURL: baseURL, token: token, http: datasource.NewConnectorHTTPClient(30 * time.Second)}, nil
+	httpClient, err := datasource.NewGitLabTLSHTTPClient(30 * time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return &client{baseURL: baseURL, token: token, http: httpClient}, nil
 }
 func (c *client) get(ctx context.Context, endpoint string, out interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+endpoint, nil)

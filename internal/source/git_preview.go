@@ -107,8 +107,7 @@ func readGitWithPolicy(ctx context.Context, repository *types.SourceRepository, 
 		base := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "http.followRedirects=false", "-c", "http.proxy=", "-c", "protocol.allow=never", "-c", "protocol.http.allow=always", "-c", "submodule.recurse=false"}
 		cmd := exec.CommandContext(ctx, gitPath, append(base, args...)...)
 		cmd.Dir = root
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "SYSTEMROOT=" + os.Getenv("SYSTEMROOT"), "TEMP=" + root, "TMP=" + root, "HOME=" + root,
-			"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_COUNT=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_LFS_SKIP_SMUDGE=1"}
+		cmd.Env = sourceGitCommandEnvironment(root)
 		return cmd
 	}
 	if err := command("init", "--bare", "--template=").Run(); err != nil {
@@ -291,7 +290,10 @@ func bridgeGit(ctx context.Context, repository *types.SourceRepository, transfer
 	if err := datasource.ValidateConnectorBaseURL(upstream.String()); err != nil {
 		return "", nil, nil, nil, fmt.Errorf("GitLab repository URL is blocked by SSRF policy")
 	}
-	client := datasource.NewConnectorHTTPClient(90 * time.Second)
+	client, err := datasource.NewGitLabTLSHTTPClient(90 * time.Second)
+	if err != nil {
+		return "", nil, nil, nil, fmt.Errorf("source Git transport configuration is invalid")
+	}
 	var transferred atomic.Int64
 	var transferExceeded atomic.Bool
 	// Redirects cannot extend the authorized repository or leak its credentials.
@@ -335,6 +337,11 @@ func bridgeGit(ctx context.Context, repository *types.SourceRepository, transfer
 	})}
 	go func() { _ = server.Serve(listener) }()
 	return "http://" + listener.Addr().String() + prefix, func() { _ = server.Close(); client.CloseIdleConnections() }, &transferred, &transferExceeded, nil
+}
+
+func sourceGitCommandEnvironment(root string) []string {
+	return []string{"PATH=" + os.Getenv("PATH"), "SYSTEMROOT=" + os.Getenv("SYSTEMROOT"), "TEMP=" + root, "TMP=" + root, "HOME=" + root,
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_COUNT=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_LFS_SKIP_SMUDGE=1"}
 }
 
 type gitTransferWriter struct {
