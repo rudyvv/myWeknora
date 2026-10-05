@@ -102,6 +102,14 @@ func newSourceWikiRunnerPostgres(t *testing.T) (*gorm.DB, *repository.SourceWiki
 	if err := db.Exec(string(migration)).Error; err != nil {
 		t.Fatalf("apply attempt-ledger migration 113: %v", err)
 	}
+	batchMigrationPath := filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql")
+	batchMigration, err := os.ReadFile(batchMigrationPath)
+	if err != nil {
+		t.Fatalf("read source Wiki batch migration 114: %v", err)
+	}
+	if err := db.Exec(string(batchMigration)).Error; err != nil {
+		t.Fatalf("apply source Wiki batch migration 114: %v", err)
+	}
 	return db, repository.NewSourceWikiAttemptLedger(db)
 }
 
@@ -214,13 +222,39 @@ func TestSourceWikiRunnerRateLimitRetriesConsumeSharedAttemptBudget(t *testing.T
 }
 
 func TestSourceWikiRunnerDiscardsLateResultAfterLeaseIsLost(t *testing.T) {
-	_, ledger := newSourceWikiRunnerPostgres(t)
+	db, ledger := newSourceWikiRunnerPostgres(t)
 	ctx := context.Background()
 	base := time.Date(2026, 10, 1, 17, 0, 0, 0, time.UTC)
 	attempt := newSourceWikiRunnerAttempt(base)
 	attempt.MaxCompletionTokens = 40
 	if err := ledger.Create(ctx, attempt); err != nil {
 		t.Fatalf("create attempt: %v", err)
+	}
+	var manualBatchIDIsNull bool
+	if err := db.Raw("SELECT batch_id IS NULL FROM source_wiki_attempts WHERE id = ?", attempt.ID).Scan(&manualBatchIDIsNull).Error; err != nil {
+		t.Fatalf("read manual attempt batch binding: %v", err)
+	}
+	if !manualBatchIDIsNull {
+		t.Fatal("manual attempts must persist a SQL NULL batch_id")
+	}
+	var batchForeignKeyPresent bool
+	if err := db.Raw(`SELECT EXISTS (
+		SELECT 1 FROM pg_constraint fk
+		WHERE fk.contype='f'
+		  AND fk.conrelid=to_regclass('source_wiki_attempts')
+		  AND fk.confrelid=to_regclass('source_wiki_batches')
+		  AND cardinality(fk.conkey)=1 AND cardinality(fk.confkey)=1
+		  AND EXISTS (SELECT 1 FROM pg_attribute source_column
+			WHERE source_column.attrelid=fk.conrelid AND source_column.attnum=fk.conkey[1]
+			  AND source_column.attname='batch_id')
+		  AND EXISTS (SELECT 1 FROM pg_attribute batch_id_column
+			WHERE batch_id_column.attrelid=fk.confrelid AND batch_id_column.attnum=fk.confkey[1]
+			  AND batch_id_column.attname='id')
+	)`).Scan(&batchForeignKeyPresent).Error; err != nil {
+		t.Fatalf("verify manual attempt batch foreign key: %v", err)
+	}
+	if !batchForeignKeyPresent {
+		t.Fatal("the source Wiki attempt batch_id foreign key must remain installed")
 	}
 	const leaseFor = 300 * time.Millisecond
 	lease, err := ledger.Claim(ctx, types.SourceWikiAttemptClaimRequest{AttemptID: attempt.ID, Owner: "old-worker", Now: base, LeaseFor: leaseFor})

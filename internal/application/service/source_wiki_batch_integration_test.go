@@ -31,9 +31,6 @@ import (
 func newSourceWikiBatchLedgerFixture(t *testing.T, f *javaSourceFixture) *repository.SourceWikiBatchLedger {
 	t.Helper()
 	_, _ = newSourceWikiFixture(t, f, func(bool) string { return `{}` })
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 	return repository.NewSourceWikiBatchLedger(f.db)
 }
 
@@ -761,9 +758,6 @@ func TestSourceWikiBatchPageConflictRebasesWithinOriginalAttemptAndRevalidates(t
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"prompt_tokens":20,"completion_tokens":20,"total_tokens":40}}`, reply)
 	})
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 	startService, ok := generator.(interface {
 		StartSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatch, error)
 	})
