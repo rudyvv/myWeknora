@@ -25,6 +25,9 @@ type acceptanceFixture struct {
 	parserNotReady    bool
 	chainEvidence     bool
 	badExtraHit       string
+	badHitPath        string
+	badHitMetric      string
+	agentStream       string
 	publishSuccess    bool
 	publishSnapshotID string
 	sourceContent     string
@@ -137,14 +140,29 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				case "range":
 					startLine, endLine = 99, 100
 				}
+				if f.badHitPath != "" {
+					path = f.badHitPath
+				}
 			}
 			if sourceID == "source-2" {
 				version, knowledgeID = "version-2", "file-2"
 			}
 			hits[i] = map[string]any{
+				"score":          0.75,
+				"match_type":     0,
 				"knowledge_id":   knowledgeID,
 				"metadata":       map[string]string{"datasource_id": sourceID, "source_snapshot_id": snapshotID, "commit_sha": commit, "source_path": path, "source_file_version_id": version},
 				"chunk_metadata": map[string]any{"source": map[string]any{"range": map[string]any{"start_line": startLine, "end_line": endLine}}},
+			}
+			if i == 1 {
+				switch f.badHitMetric {
+				case "score_string":
+					hits[i].(map[string]any)["score"] = "score-type-marker"
+				case "match_type_string":
+					hits[i].(map[string]any)["match_type"] = "match-type-marker"
+				case "match_type_unknown":
+					hits[i].(map[string]any)["match_type"] = 99
+				}
 			}
 		}
 		writeFixtureJSON(w, map[string]any{"success": true, "data": hits})
@@ -190,7 +208,11 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"answer\"}\n\ndata: {\"type\":\"done\"}\n\n"))
+		stream := f.agentStream
+		if stream == "" {
+			stream = "data: {\"response_type\":\"answer\"}\n\ndata: {\"response_type\":\"complete\",\"done\":true}\n\n"
+		}
+		_, _ = w.Write([]byte(stream))
 	default:
 		http.NotFound(w, r)
 	}
@@ -281,6 +303,11 @@ func TestSourceAcceptanceRunnerChecksParserPublicationScopeAndAuthorizedEvidence
 			MaxCacheEntries      int `json:"max_cache_entries"`
 			MaxCacheBytes        int `json:"max_cache_bytes"`
 		} `json:"source_read_validation"`
+		AgentUISmoke struct {
+			Status             string   `json:"status"`
+			EventTypes         []string `json:"event_types"`
+			AnswerTextRecorded bool     `json:"answer_text_recorded"`
+		} `json:"agent_ui_smoke"`
 	}
 	if err := json.Unmarshal([]byte(report), &reportEnvelope); err != nil {
 		t.Fatalf("could not decode source-read cache bounds: %v", err)
@@ -289,11 +316,74 @@ func TestSourceAcceptanceRunnerChecksParserPublicationScopeAndAuthorizedEvidence
 	if readValidation.AuthorizedReadCount != 300 || readValidation.MetadataCacheEntries > 300 || readValidation.MetadataCacheBytes > 524288 || readValidation.MaxCacheEntries != 300 || readValidation.MaxCacheBytes != 524288 {
 		t.Fatalf("source validation cache exceeded or misreported its metadata-only bounds: %+v", readValidation)
 	}
+	if reportEnvelope.AgentUISmoke.Status != "completed" || len(reportEnvelope.AgentUISmoke.EventTypes) != 2 || reportEnvelope.AgentUISmoke.EventTypes[0] != "answer" || reportEnvelope.AgentUISmoke.EventTypes[1] != "complete" || reportEnvelope.AgentUISmoke.AnswerTextRecorded {
+		t.Fatalf("agent smoke did not require and report the allowlisted terminal stream event safely: %+v", reportEnvelope.AgentUISmoke)
+	}
 	if !strings.Contains(report, `"t22_acceptance_status": "unknown"`) {
 		t.Fatal("a completed retrieval run incorrectly decided the whole T22 gate")
 	}
 	if len(fixture.logOffsets) != 2 || fixture.logOffsets[0] != 0 || fixture.logOffsets[1] != 100 {
 		t.Fatalf("published-run lookup did not paginate logs: offsets=%v", fixture.logOffsets)
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsInvalidOrIncompleteAgentStreams(t *testing.T) {
+	tests := []struct {
+		name          string
+		stream        string
+		wantErrorCode string
+		wantMarker    string
+	}{
+		{
+			name:          "unknown response type",
+			stream:        "data: {\"response_type\":\"response-type-marker\",\"content\":\"answer-marker\"}\n\n",
+			wantErrorCode: "agent_ui_event_invalid",
+			wantMarker:    "response-type-marker",
+		},
+		{
+			name:          "unknown event type",
+			stream:        "data: {\"response_type\":\"answer\",\"type\":\"event-type-marker\"}\n\n",
+			wantErrorCode: "agent_ui_event_invalid",
+			wantMarker:    "event-type-marker",
+		},
+		{
+			name:          "stream error",
+			stream:        "data: {\"response_type\":\"error\",\"content\":\"agent-error-marker\"}\n\n",
+			wantErrorCode: "agent_ui_stream_error",
+			wantMarker:    "agent-error-marker",
+		},
+		{
+			name:          "empty stream",
+			stream:        "\n\n",
+			wantErrorCode: "agent_ui_empty_stream",
+		},
+		{
+			name:          "partial answer without terminal event",
+			stream:        "data: {\"response_type\":\"thinking\"}\n\ndata: {\"response_type\":\"answer\",\"content\":\"partial-answer-marker\"}\n\n",
+			wantErrorCode: "agent_ui_incomplete_stream",
+			wantMarker:    "partial-answer-marker",
+		},
+		{
+			name:          "truncated event",
+			stream:        "data: {\"response_type\":\"answer\"",
+			wantErrorCode: "agent_ui_invalid_event",
+			wantMarker:    "response_type",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &acceptanceFixture{agentStream: test.stream}
+			server := httptest.NewServer(fixture)
+			defer server.Close()
+
+			result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-AgentSessionId", "session-1", "-AgentId", "agent-1", "-AgentQuestion", "Where is getPushSchedule implemented?")
+			if result.ExitCode == 0 || !strings.Contains(report, test.wantErrorCode) {
+				t.Fatalf("runner accepted an invalid or incomplete Agent stream: exit=%d want=%s report=%s", result.ExitCode, test.wantErrorCode, report)
+			}
+			if test.wantMarker != "" && strings.Contains(result.Stdout+result.Stderr+report, test.wantMarker) {
+				t.Fatalf("runner echoed untrusted Agent stream content %q", test.wantMarker)
+			}
+		})
 	}
 }
 
@@ -356,6 +446,105 @@ func TestSourceAcceptanceRunnerFailsClosedOnAnyInvalidNonGoldTop10Hit(t *testing
 	}
 }
 
+func TestSourceAcceptanceRunnerValidatesSearchHitScoreAndMatchType(t *testing.T) {
+	tests := []struct {
+		name          string
+		badHitMetric  string
+		wantErrorCode string
+		wantMarker    string
+	}{
+		{name: "score must be numeric", badHitMetric: "score_string", wantErrorCode: "search_hit_score_invalid", wantMarker: "score-type-marker"},
+		{name: "match type must be numeric", badHitMetric: "match_type_string", wantErrorCode: "search_hit_match_type_invalid", wantMarker: "match-type-marker"},
+		{name: "match type must be a known enum", badHitMetric: "match_type_unknown", wantErrorCode: "search_hit_match_type_invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &acceptanceFixture{badHitMetric: test.badHitMetric}
+			server := httptest.NewServer(fixture)
+			defer server.Close()
+
+			result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken)
+			if result.ExitCode == 0 || !strings.Contains(report, test.wantErrorCode) {
+				t.Fatalf("runner accepted an invalid search metric: exit=%d want=%s report=%s", result.ExitCode, test.wantErrorCode, report)
+			}
+			if test.wantMarker != "" && strings.Contains(result.Stdout+result.Stderr+report, test.wantMarker) {
+				t.Fatalf("runner echoed untrusted search metric data %q", test.wantMarker)
+			}
+			if fixture.sourceReadCalls != 1 {
+				t.Fatalf("invalid second-hit metrics should fail before its authorized read: got %d reads", fixture.sourceReadCalls)
+			}
+		})
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsNonCanonicalSearchHitPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "empty segment", path: "path-marker//Foo.java"},
+		{name: "dot segment", path: "path-marker/./Foo.java"},
+		{name: "parent segment", path: "path-marker/../Foo.java"},
+		{name: "posix absolute", path: "/path-marker/Foo.java"},
+		{name: "windows drive absolute", path: "C:/path-marker/Foo.java"},
+		{name: "backslash", path: `path-marker\Foo.java`},
+		{name: "control character", path: "path-marker/\x01Foo.java"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &acceptanceFixture{badHitPath: test.path}
+			server := httptest.NewServer(fixture)
+			defer server.Close()
+
+			result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken)
+			if result.ExitCode == 0 || !strings.Contains(report, "search_hit_identity_invalid") {
+				t.Fatalf("runner accepted a non-canonical Git path: exit=%d report=%s", result.ExitCode, report)
+			}
+			if strings.Contains(result.Stdout+result.Stderr+report, "path-marker") || fixture.sourceReadCalls != 1 {
+				t.Fatalf("runner echoed an invalid path or read it before validation: reads=%d", fixture.sourceReadCalls)
+			}
+		})
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsNonCanonicalExpectedEvidencePath(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	manifest := legacyQuestionManifest("snapshot-1")
+	firstQuestion := manifest["questions"].([]any)[0].(map[string]any)
+	firstEvidence := firstQuestion["expected"].(map[string]any)
+	firstEvidence["path"] = "path-marker/../Foo.java"
+
+	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, nil)
+	if result.ExitCode == 0 || !strings.Contains(report, "question_evidence_invalid") || fixture.searchCalls != 0 {
+		t.Fatalf("runner accepted or searched a non-canonical expected evidence path: exit=%d searches=%d report=%s", result.ExitCode, fixture.searchCalls, report)
+	}
+	if strings.Contains(result.Stdout+result.Stderr+report, "path-marker") {
+		t.Fatal("runner echoed the untrusted question evidence path")
+	}
+}
+
+func TestSourceAcceptanceRunnerRequiresDistinctSourcesForCrossRepositoryQuestion(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	manifest := goldShapedQuestionManifest(true)
+	repositories := manifest["repositories"].([]any)
+	repositories[1].(map[string]any)["commit"] = "commit-1"
+	sourceMap := map[string]any{
+		"schema_version": 1, "status": "approved", "knowledge_base_id": "kb-1",
+		"mappings": map[string]any{
+			"evip_mobile": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+			"nsb":         map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+		},
+	}
+	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap)
+	if result.ExitCode == 0 || !strings.Contains(report, "question_cross_repository_mapping_invalid") || fixture.searchCalls != 0 {
+		t.Fatalf("runner accepted aliases of one source as a cross-repository chain: exit=%d searches=%d report=%s", result.ExitCode, fixture.searchCalls, report)
+	}
+}
+
 func TestSourceAcceptanceRunnerKeepsWholeT22StatusUnknown(t *testing.T) {
 	fixture := &acceptanceFixture{}
 	server := httptest.NewServer(fixture)
@@ -373,11 +562,15 @@ func TestSourceAcceptanceRunnerKeepsWholeT22StatusUnknown(t *testing.T) {
 		TextBaseline struct {
 			Status string `json:"status"`
 		} `json:"text_baseline"`
+		FullRun struct {
+			Status       string `json:"status"`
+			Completeness string `json:"completeness"`
+		} `json:"full_run"`
 	}
 	if err := json.Unmarshal([]byte(report), &document); err != nil {
 		t.Fatalf("could not decode runner report: %v", err)
 	}
-	if document.Status != "completed" || document.T22AcceptanceStatus != "unknown" || len(document.IncrementalRuns) != 3 || document.TextBaseline.Status != "unknown" {
+	if document.Status != "completed" || document.T22AcceptanceStatus != "unknown" || len(document.IncrementalRuns) != 3 || document.TextBaseline.Status != "unknown" || document.FullRun.Status != "unknown" || document.FullRun.Completeness != "unknown" {
 		t.Fatalf("retrieval completion was conflated with the whole T22 gate or missing measurements: %+v", document)
 	}
 	for _, run := range document.IncrementalRuns {
@@ -517,6 +710,128 @@ func TestSourceAcceptanceRunnerKeepsPartialMetricsAndMarksEachMissingMetricUnkno
 		if run.ChangedFileCount != 1 && (run.Status != "unknown" || run.Completeness != "unknown") {
 			t.Fatalf("missing %d-file measurement should remain unknown: %+v", run.ChangedFileCount, run)
 		}
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsNonIntegerMeasurementJSONValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "numeric string", value: "55"},
+		{name: "boolean", value: true},
+		{name: "fraction", value: 55.5},
+		{name: "negative", value: -1},
+		{name: "int64 overflow", value: uint64(1) << 63},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &acceptanceFixture{}
+			server := httptest.NewServer(fixture)
+			defer server.Close()
+			measurement := map[string]any{
+				"schema_version": 1,
+				"incremental_runs": []any{map[string]any{
+					"changed_file_count": 1, "status": "measured", "model_identifier": "model-1", "tokenizer": "cl100k_base", "context_limit_tokens": 8192,
+					"selected_files": test.value,
+				}},
+			}
+			measurementPath := writeAcceptanceJSON(t, "invalid-measurement.json", measurement)
+			result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-MeasurementsFile", measurementPath)
+			if result.ExitCode == 0 || !strings.Contains(report, "incremental_metrics_invalid") {
+				t.Fatalf("runner accepted a non-integer JSON measurement: exit=%d report=%s", result.ExitCode, report)
+			}
+			if strings.Contains(report, `"selected_files": "55"`) || fixture.searchCalls != 0 {
+				t.Fatal("runner copied an invalid measurement string into the report or continued into retrieval")
+			}
+		})
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsNonFiniteMeasurementJSON(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	raw := `{"schema_version":1,"incremental_runs":[{"changed_file_count":1,"status":"measured","model_identifier":"model-1","tokenizer":"cl100k_base","context_limit_tokens":8192,"elapsed_ms":NaN}]}`
+	measurementPath := writeAcceptanceRawJSON(t, "non-finite-measurement.json", raw)
+	result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-MeasurementsFile", measurementPath)
+	if result.ExitCode == 0 || strings.Contains(result.Stdout+result.Stderr+report, "NaN") || fixture.searchCalls != 0 {
+		t.Fatalf("runner accepted or echoed non-JSON non-finite measurement input: exit=%d searches=%d report=%s", result.ExitCode, fixture.searchCalls, report)
+	}
+}
+
+func TestSourceAcceptanceRunnerReportsPartialFullRunAgainstExactPublishedSnapshot(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	measurement := map[string]any{
+		"schema_version":   1,
+		"incremental_runs": []any{},
+		"full_run": map[string]any{
+			"status": "measured", "model_identifier": "model-1", "tokenizer": "cl100k_base", "context_limit_tokens": 8192,
+			"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1",
+			"selected_files": 0, "selected_bytes": uint64(1<<63 - 1), "elapsed_ms": 55,
+			"phase_duration_ms": map[string]any{"fetching": 7},
+		},
+	}
+	measurementPath := writeAcceptanceJSON(t, "full-run-measurement.json", measurement)
+	result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-MeasurementsFile", measurementPath)
+	if result.ExitCode != 0 {
+		t.Fatalf("valid partial full-run measurement failed: exit=%d report=%s", result.ExitCode, report)
+	}
+	var document struct {
+		T22AcceptanceStatus string `json:"t22_acceptance_status"`
+		FullRun             struct {
+			Status       string `json:"status"`
+			Completeness string `json:"completeness"`
+			MetricStatus struct {
+				SelectedFiles string            `json:"selected_files"`
+				ChunkCount    string            `json:"chunk_count"`
+				ActualTokens  string            `json:"actual_input_tokens"`
+				Phases        map[string]string `json:"phase_duration_ms"`
+			} `json:"metric_status"`
+			Output struct {
+				SourceID      string            `json:"source_id"`
+				SnapshotID    string            `json:"snapshot_id"`
+				CommitSHA     string            `json:"commit_sha"`
+				SelectedFiles *int64            `json:"selected_files"`
+				SelectedBytes *int64            `json:"selected_bytes"`
+				ElapsedMS     *int64            `json:"elapsed_ms"`
+				Phases        map[string]*int64 `json:"phase_duration_ms"`
+			} `json:"output"`
+		} `json:"full_run"`
+	}
+	if err := json.Unmarshal([]byte(report), &document); err != nil {
+		t.Fatalf("could not decode full-run report: %v", err)
+	}
+	fullRun := document.FullRun
+	if document.T22AcceptanceStatus != "unknown" || fullRun.Status != "partial" || fullRun.Completeness != "partial" || fullRun.Output.SourceID != "source-1" || fullRun.Output.SnapshotID != "snapshot-1" || fullRun.Output.CommitSHA != "commit-1" {
+		t.Fatalf("full-run scope or partial status was not preserved: %+v", document)
+	}
+	if fullRun.Output.SelectedFiles == nil || *fullRun.Output.SelectedFiles != 0 || fullRun.Output.SelectedBytes == nil || *fullRun.Output.SelectedBytes != int64(1<<63-1) || fullRun.Output.ElapsedMS == nil || *fullRun.Output.ElapsedMS != 55 || fullRun.Output.Phases["fetching"] == nil || *fullRun.Output.Phases["fetching"] != 7 || fullRun.Output.Phases["parsing"] != nil {
+		t.Fatalf("full-run numeric metrics were not preserved as nullable JSON integers: %+v", fullRun.Output)
+	}
+	if fullRun.MetricStatus.SelectedFiles != "observed" || fullRun.MetricStatus.ChunkCount != "unknown" || fullRun.MetricStatus.ActualTokens != "unknown" || fullRun.MetricStatus.Phases["parsing"] != "unknown" {
+		t.Fatalf("full-run missing values were not individually marked unknown: %+v", fullRun.MetricStatus)
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsFullRunFromDifferentCommit(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	measurement := map[string]any{
+		"schema_version":   1,
+		"incremental_runs": []any{},
+		"full_run": map[string]any{
+			"status": "measured", "model_identifier": "model-1", "tokenizer": "cl100k_base", "context_limit_tokens": 8192,
+			"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "other-commit", "selected_files": 1,
+		},
+	}
+	measurementPath := writeAcceptanceJSON(t, "wrong-full-run-measurement.json", measurement)
+	result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-MeasurementsFile", measurementPath)
+	if result.ExitCode == 0 || !strings.Contains(report, "full_run_scope_mismatch") || fixture.searchCalls != 0 {
+		t.Fatalf("runner accepted full-run metrics from another commit: exit=%d searches=%d report=%s", result.ExitCode, fixture.searchCalls, report)
 	}
 }
 
@@ -727,6 +1042,15 @@ func writeAcceptanceJSON(t *testing.T, filename string, value any) string {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeAcceptanceRawJSON(t *testing.T, filename, value string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), filename)
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path

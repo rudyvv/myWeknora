@@ -39,6 +39,7 @@ $script:validatedSourceMetadataCache = [System.Collections.Generic.Dictionary[st
 $script:validatedSourceMetadataCacheBytes = 0
 $script:authorizedSourceReadCount = 0
 $script:measurementScalarFields = @('selected_files', 'selected_bytes', 'chunk_count', 'elapsed_ms', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens', 'embedding_calls', 'generation_calls')
+$script:fullRunMeasurement = $null
 function New-UnknownMetricStatus {
     return [ordered]@{
         selected_files = 'unknown'
@@ -86,6 +87,7 @@ $script:report = [ordered]@{
         [ordered]@{ changed_file_count = 100; status = 'unknown'; completeness = 'unknown'; metric_status = (New-UnknownMetricStatus); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
     )
     text_baseline = [ordered]@{ status = 'unknown'; completeness = 'unknown'; metric_status = (New-UnknownMetricStatus); inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; outputs = [ordered]@{ selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
+    full_run = [ordered]@{ status = 'unknown'; completeness = 'unknown'; provided_status = 'unknown'; metric_status = (New-UnknownMetricStatus); input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; chunk_count = $null; phase_duration_ms = $null; elapsed_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null; embedding_calls = $null; generation_calls = $null } }
     agent_ui_smoke = [ordered]@{ status = 'not_requested'; event_count = 0; event_types = @(); query_sha256 = $null; answer_text_recorded = $false }
     errors = @()
 }
@@ -184,11 +186,147 @@ function Stop-Acceptance([string] $Code, [string] $Message) {
     throw "ACCEPTANCE_FAILURE|$Code|$Message"
 }
 
-function Assert-OptionalNonNegativeInteger($Value, [string] $Label) {
-    if ($null -eq $Value) { return }
-    $number = 0L
-    if (-not [long]::TryParse([string]$Value, [ref]$number) -or $number -lt 0) {
-        Stop-Acceptance 'measurement_value_invalid' "Measurement '$Label' must be a non-negative integer or null."
+function Convert-OptionalNonNegativeInteger($Value, [string] $Label, [string] $ErrorCode = 'measurement_value_invalid') {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool] -or $Value -is [string] -or $Value -is [char]) {
+        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
+    }
+    $typeName = $Value.GetType().FullName
+    $integerTypes = @('System.Byte', 'System.SByte', 'System.Int16', 'System.UInt16', 'System.Int32', 'System.UInt32', 'System.Int64', 'System.UInt64')
+    if ($typeName -notin $integerTypes -and $Value -isnot [decimal] -and $Value -isnot [double] -and $Value -isnot [single]) {
+        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
+    }
+    if (($Value -is [double] -or $Value -is [single]) -and ([double]::IsNaN([double]$Value) -or [double]::IsInfinity([double]$Value) -or [math]::Truncate([double]$Value) -ne [double]$Value)) {
+        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
+    }
+    try { $number = [decimal]$Value } catch {
+        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
+    }
+    if ($number -lt 0 -or $number -gt [decimal][long]::MaxValue -or $number -ne [decimal]::Truncate($number)) {
+        Stop-Acceptance $ErrorCode "Measurement '$Label' must be a non-negative JSON integer or null."
+    }
+    return [long]$number
+}
+
+function Get-ValidatedMeasurementMetrics($Record, [string] $Label, [string] $ErrorCode = 'measurement_value_invalid') {
+    $scalars = [ordered]@{}
+    foreach ($field in $script:measurementScalarFields) {
+        $scalars[$field] = Convert-OptionalNonNegativeInteger (Get-Field $Record $field) "$Label.$field" $ErrorCode
+    }
+    $phaseInput = Get-Field $Record 'phase_duration_ms'
+    $phaseOutput = $null
+    if ($null -ne $phaseInput) {
+        if ($phaseInput -isnot [System.Management.Automation.PSCustomObject] -and $phaseInput -isnot [System.Collections.IDictionary]) {
+            Stop-Acceptance $ErrorCode "Measurement '$Label.phase_duration_ms' must be an object or null."
+        }
+        $phaseOutput = [ordered]@{ fetching = $null; parsing = $null; indexing = $null; publishing = $null }
+        if ($phaseInput -is [System.Collections.IDictionary]) { $phaseNames = @($phaseInput.Keys) } else { $phaseNames = @($phaseInput.PSObject.Properties | ForEach-Object { $_.Name }) }
+        foreach ($phaseName in $phaseNames) {
+            if ($phaseName -notin @('fetching', 'parsing', 'indexing', 'publishing')) {
+                Stop-Acceptance $ErrorCode "Measurement '$Label.phase_duration_ms' contains an unsupported phase."
+            }
+            $phaseOutput[$phaseName] = Convert-OptionalNonNegativeInteger (Get-Field $phaseInput $phaseName) "$Label.phase_duration_ms.$phaseName" $ErrorCode
+        }
+    }
+    return [pscustomobject]@{ scalar = $scalars; phase_duration_ms = $phaseOutput }
+}
+
+function Test-CanonicalGitRelativePath($Path) {
+    if ($Path -isnot [string] -or [string]::IsNullOrEmpty($Path) -or $Path.Length -gt 1024 -or $Path.StartsWith('/') -or $Path.StartsWith('\') -or $Path.Contains('\') -or $Path -match '^[A-Za-z]:') { return $false }
+    foreach ($character in $Path.ToCharArray()) {
+        if ([char]::IsControl($character)) { return $false }
+    }
+    foreach ($segment in $Path.Split([char]'/')) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -eq '.' -or $segment -eq '..') { return $false }
+    }
+    return $true
+}
+
+function Convert-OptionalFiniteJsonNumber($Value, [string] $Label) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool] -or $Value -is [string] -or $Value -is [char]) {
+        Stop-Acceptance 'search_hit_score_invalid' "Search hit '$Label' must be a finite JSON number or null."
+    }
+    $typeName = $Value.GetType().FullName
+    $integerTypes = @('System.Byte', 'System.SByte', 'System.Int16', 'System.UInt16', 'System.Int32', 'System.UInt32', 'System.Int64', 'System.UInt64')
+    if ($typeName -notin $integerTypes -and $Value -isnot [decimal] -and $Value -isnot [double] -and $Value -isnot [single]) {
+        Stop-Acceptance 'search_hit_score_invalid' "Search hit '$Label' must be a finite JSON number or null."
+    }
+    try { $number = [double]$Value } catch {
+        Stop-Acceptance 'search_hit_score_invalid' "Search hit '$Label' must be a finite JSON number or null."
+    }
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) {
+        Stop-Acceptance 'search_hit_score_invalid' "Search hit '$Label' must be a finite JSON number or null."
+    }
+    return $number
+}
+
+function Convert-SearchMatchType($Value) {
+    if ($null -eq $Value) { Stop-Acceptance 'search_hit_match_type_invalid' 'Search hit match type is not a recognized numeric match enum.' }
+    $matchType = Convert-OptionalNonNegativeInteger $Value 'search_hit.match_type' 'search_hit_match_type_invalid'
+    if ($matchType -gt 9) { Stop-Acceptance 'search_hit_match_type_invalid' 'Search hit match type is not a recognized numeric match enum.' }
+    return $matchType
+}
+
+function Assert-AgentResponseType([string] $Value) {
+    $knownTypes = @('answer', 'references', 'thinking', 'tool_call', 'tool_result', 'install_output', 'command_output', 'error', 'reflection', 'session_title', 'agent_query', 'complete', 'artifacts_pending', 'tool_approval_required', 'tool_approval_resolved', 'mcp_oauth_required', 'mcp_oauth_resolved', 'memory_recalled', 'steer', 'user_message_injected', 'context_compacted', 'install_prompt')
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -cnotin $knownTypes) {
+        Stop-Acceptance 'agent_ui_event_invalid' 'The UI agent stream contained an unknown response type; event content was suppressed.'
+    }
+}
+
+function Set-FullRunMeasurement($Record) {
+    if ($null -eq $Record) { return }
+    if ((Get-Field $Record 'model_identifier') -cne $ModelIdentifier -or (Get-Field $Record 'tokenizer') -cne $Tokenizer -or (Get-Field $Record 'context_limit_tokens') -ne $ConfiguredInputTokenLimit) {
+        Stop-Acceptance 'full_run_budget_mismatch' 'Full-run measurement must use the declared model, tokenizer, and input-token budget.'
+    }
+    $providedStatus = [string](Get-Field $Record 'status')
+    if ($providedStatus -notin @('measured', 'unknown')) { Stop-Acceptance 'full_run_metrics_invalid' 'Full-run measurement status must be measured or unknown.' }
+    $metrics = Get-ValidatedMeasurementMetrics $Record 'full_run' 'full_run_metrics_invalid'
+    $summary = Get-MeasurementSummary $Record
+    $sourceIdValue = Get-Field $Record 'source_id'
+    $snapshotIdValue = Get-Field $Record 'snapshot_id'
+    $commitShaValue = Get-Field $Record 'commit_sha'
+    foreach ($identityValue in @($sourceIdValue, $snapshotIdValue, $commitShaValue)) {
+        if ($null -ne $identityValue -and $identityValue -isnot [string]) {
+            Stop-Acceptance 'full_run_scope_mismatch' 'Full-run source identity fields must be strings or null.'
+        }
+    }
+    $sourceId = if ($null -ne $sourceIdValue) { $sourceIdValue } else { '' }
+    $snapshotId = if ($null -ne $snapshotIdValue) { $snapshotIdValue } else { '' }
+    $commitSha = if ($null -ne $commitShaValue) { $commitShaValue } else { '' }
+    $hasIdentity = -not [string]::IsNullOrWhiteSpace($sourceId) -or -not [string]::IsNullOrWhiteSpace($snapshotId) -or -not [string]::IsNullOrWhiteSpace($commitSha)
+    if ($hasIdentity -or $summary.completeness -ne 'unknown' -or $providedStatus -eq 'measured') {
+        if ([string]::IsNullOrWhiteSpace($sourceId) -or [string]::IsNullOrWhiteSpace($snapshotId) -or [string]::IsNullOrWhiteSpace($commitSha) -or
+            $script:dataSourceIds -cnotcontains $sourceId -or -not $script:publishedBySource.ContainsKey($sourceId)) {
+            Stop-Acceptance 'full_run_scope_mismatch' 'Full-run measurement does not identify one selected published source snapshot.'
+        }
+        $publishedSnapshot = $script:publishedBySource[$sourceId].snapshot
+        if ($snapshotId -cne [string](Get-Field $publishedSnapshot 'id') -or $commitSha -cne [string](Get-Field $publishedSnapshot 'commit_sha')) {
+            Stop-Acceptance 'full_run_scope_mismatch' 'Full-run measurement does not match the selected published source snapshot and commit.'
+        }
+    }
+    $script:report.full_run = [ordered]@{
+        status = $summary.status
+        completeness = $summary.completeness
+        provided_status = $providedStatus
+        metric_status = $summary.metric_status
+        input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }
+        output = [ordered]@{
+            source_id = if ($hasIdentity) { $sourceId } else { $null }
+            snapshot_id = if ($hasIdentity) { $snapshotId } else { $null }
+            commit_sha = if ($hasIdentity) { $commitSha } else { $null }
+            selected_files = $metrics.scalar.selected_files
+            selected_bytes = $metrics.scalar.selected_bytes
+            chunk_count = $metrics.scalar.chunk_count
+            phase_duration_ms = $metrics.phase_duration_ms
+            elapsed_ms = $metrics.scalar.elapsed_ms
+            peak_memory_bytes = $metrics.scalar.peak_memory_bytes
+            estimated_input_tokens = $metrics.scalar.estimated_input_tokens
+            actual_input_tokens = $metrics.scalar.actual_input_tokens
+            embedding_calls = $metrics.scalar.embedding_calls
+            generation_calls = $metrics.scalar.generation_calls
+        }
     }
 }
 
@@ -502,7 +640,8 @@ function Invoke-QuestionSearch($Question) {
         $sourceId = [string](Get-Field $metadata 'datasource_id')
         $snapshotId = [string](Get-Field $metadata 'source_snapshot_id')
         $commit = [string](Get-Field $metadata 'commit_sha')
-        $path = [string](Get-Field $metadata 'source_path')
+        $pathValue = Get-Field $metadata 'source_path'
+        $path = if ($pathValue -is [string]) { $pathValue } else { $null }
         $versionId = [string](Get-Field $metadata 'source_file_version_id')
         $knowledgeId = [string](Get-Field $hit 'knowledge_id')
         if ($sourceId -notin $sourceIds -or -not $script:publishedBySource.ContainsKey($sourceId)) {
@@ -513,8 +652,7 @@ function Invoke-QuestionSearch($Question) {
             Stop-Acceptance 'search_scope_violation' "Question '$questionId' returned evidence outside the selected published source snapshot."
         }
         if (-not $knowledgeId -or $knowledgeId.Length -gt 128 -or -not $versionId -or $versionId.Length -gt 128 -or
-            -not $path -or $path.Length -gt 1024 -or $path.StartsWith('/') -or $path.Contains('\') -or
-            $path.Split('/') -contains '..' -or $path -match '[\r\n\x00]') {
+            -not (Test-CanonicalGitRelativePath $path)) {
             Stop-Acceptance 'search_hit_identity_invalid' "Question '$questionId' returned an incomplete or unsafe fixed-version source identity."
         }
         $range = Get-ChunkSourceRange $hit
@@ -536,8 +674,8 @@ function Invoke-QuestionSearch($Question) {
             file_version_id = $versionId
             start_line = $start
             end_line = $end
-            score = Get-Field $hit 'score'
-            match_type = Get-Field $hit 'match_type'
+            score = (Convert-OptionalFiniteJsonNumber (Get-Field $hit 'score') 'score')
+            match_type = (Convert-SearchMatchType (Get-Field $hit 'match_type'))
             verified_source_sha256 = $null
             source_line_count = $null
             matched_normalized_sha256 = $null
@@ -656,19 +794,43 @@ function Invoke-AgentUiSmoke {
         Stop-Acceptance 'agent_ui_http_failure' "The UI agent endpoint returned HTTP $([int]$response.StatusCode); response content was suppressed."
     }
     $eventTypes = [System.Collections.Generic.List[string]]::new()
+    $sawComplete = $false
     foreach ($line in ($response.Content -split "`r?`n")) {
         if (-not $line.StartsWith('data: ')) { continue }
         try { $event = $line.Substring(6) | ConvertFrom-Json -Depth 20 -NoEnumerate } catch {
             Stop-Acceptance 'agent_ui_invalid_event' 'The UI agent endpoint returned an invalid JSON event; event content was suppressed.'
         }
-        if ((Get-Field $event 'type') -eq 'error' -or (Get-Field $event 'response_type') -eq 'error') {
+        if ($sawComplete) { Stop-Acceptance 'agent_ui_event_after_complete' 'The UI agent stream contained events after its terminal success event.' }
+        $kindValue = Get-Field $event 'response_type'
+        if ($kindValue -isnot [string]) {
+            Stop-Acceptance 'agent_ui_event_invalid' 'The UI agent stream omitted its typed response event; event content was suppressed.'
+        }
+        $kind = [string]$kindValue
+        Assert-AgentResponseType $kind
+        $eventTypeValue = Get-Field $event 'type'
+        $hasEventType = $false
+        if ($event -is [System.Collections.IDictionary]) {
+            $hasEventType = $event.Contains('type')
+        } elseif ($null -ne $event) {
+            $hasEventType = $null -ne $event.PSObject.Properties['type']
+        }
+        if ($hasEventType) {
+            if ($eventTypeValue -isnot [string]) { Stop-Acceptance 'agent_ui_event_invalid' 'The UI agent stream contained an invalid event type; event content was suppressed.' }
+            Assert-AgentResponseType ([string]$eventTypeValue)
+            if ([string]$eventTypeValue -cne $kind) { Stop-Acceptance 'agent_ui_event_invalid' 'The UI agent stream contained inconsistent event types; event content was suppressed.' }
+        }
+        if ($kind -eq 'error') {
             Stop-Acceptance 'agent_ui_stream_error' 'The UI agent stream reported an error; event content was suppressed.'
         }
-        $kind = [string](Get-Field $event 'response_type')
-        if (-not $kind) { $kind = [string](Get-Field $event 'type') }
-        if ($kind) { $eventTypes.Add($kind) }
+        $eventTypes.Add($kind)
+        if ($kind -eq 'complete') {
+            $doneValue = Get-Field $event 'done'
+            if ($doneValue -isnot [bool] -or $doneValue -ne $true) { Stop-Acceptance 'agent_ui_incomplete_stream' 'The UI agent stream omitted the terminal completion marker.' }
+            $sawComplete = $true
+        }
     }
     if ($eventTypes.Count -eq 0) { Stop-Acceptance 'agent_ui_empty_stream' 'The UI agent endpoint completed without a verifiable response event.' }
+    if (-not $sawComplete) { Stop-Acceptance 'agent_ui_incomplete_stream' 'The UI agent stream ended without a terminal completion event.' }
     $script:report.agent_ui_smoke.status = 'completed'
     $script:report.agent_ui_smoke.event_count = $eventTypes.Count
     $script:report.agent_ui_smoke.event_types = @($eventTypes.ToArray() | Select-Object -Unique)
@@ -810,13 +972,14 @@ try {
         $evidenceOrdinal = 0
         foreach ($evidence in $evidenceItems) {
             $evidenceOrdinal++
-            $path = [string](Get-Field $evidence 'path')
+            $pathValue = Get-Field $evidence 'path'
+            $path = if ($pathValue -is [string]) { $pathValue } else { $null }
             $sha = [string](Get-Field $evidence 'sha256')
             $start = Get-Field $evidence 'start_line'
             $end = Get-Field $evidence 'end_line'
             $repositoryId = [string](Get-Field $evidence 'repository')
             if (-not $repositoryId) { $repositoryId = [string](Get-Field $question 'repository') }
-            if (-not $path -or $path.StartsWith('/') -or $path.Contains('\') -or $path.Split('/') -contains '..' -or $sha -notmatch '^[0-9a-fA-F]{64}$' -or [int]$start -lt 1 -or [int]$end -lt [int]$start) {
+            if (-not (Test-CanonicalGitRelativePath $path) -or $sha -notmatch '^[0-9a-fA-F]{64}$' -or [int]$start -lt 1 -or [int]$end -lt [int]$start) {
                 Stop-Acceptance 'question_evidence_invalid' "Question '$id' evidence must identify a relative path, valid one-based line range, and SHA-256."
             }
             $mapping = if ($repositoryId) { Get-RepositoryMapping $repositoryId } else { $null }
@@ -852,6 +1015,13 @@ try {
             $evidenceId = '{0}-{1:D2}' -f $id, $evidenceOrdinal
             $normalizedEvidence.Add([ordered]@{ evidence_id = $evidenceId; repository = $repositoryId; source_id = $sourceId; snapshot_id = $snapshotId; snapshot_id_explicit = $snapshotIdExplicit; commit_sha = $commit; path = $path; start_line = [int]$start; end_line = [int]$end; sha256 = $sha.ToLowerInvariant(); hash_mode = $evidenceHashMode; symbol = Get-Field $evidence 'symbol' })
         }
+        $questionRepositories = @($normalizedEvidence | ForEach-Object { [string](Get-Field $_ 'repository') } | Select-Object -Unique)
+        $questionSources = @($normalizedEvidence | ForEach-Object { [string](Get-Field $_ 'source_id') } | Select-Object -Unique)
+        if ($questionRepositories.Count -gt 1 -or $questionSources.Count -gt 1) {
+            if ($questionRepositories -contains '' -or $questionSources.Count -ne $questionRepositories.Count) {
+                Stop-Acceptance 'question_cross_repository_mapping_invalid' 'Cross-repository evidence must resolve through explicit mappings to distinct source identities.'
+            }
+        }
         $questionIds[$id] = $true
         $categoryCounts[$category]++
         $questions.Add([ordered]@{ question_id = $id; category = $category; query = $query; expected_evidence = @($normalizedEvidence.ToArray()) })
@@ -870,6 +1040,7 @@ try {
         if (-not (Test-Path -LiteralPath $MeasurementsFile -PathType Leaf) -or (Get-Item -LiteralPath $MeasurementsFile).Length -gt 2097152) { Stop-Acceptance 'measurements_file_missing' 'The optional measurement input file is missing or exceeds its 2 MiB limit.' }
         $measurements = Get-Content -LiteralPath $MeasurementsFile -Raw | ConvertFrom-Json -Depth 40 -NoEnumerate
         if ((Get-Field $measurements 'schema_version') -ne 1) { Stop-Acceptance 'measurements_schema_invalid' 'Measurement input schema_version must be 1.' }
+        $script:fullRunMeasurement = Get-Field $measurements 'full_run'
         $runs = @(Get-Field $measurements 'incremental_runs')
         foreach ($expectedCount in @(1, 10, 100)) {
             $matches = @($runs | Where-Object { (Get-Field $_ 'changed_file_count') -eq $expectedCount })
@@ -881,19 +1052,10 @@ try {
                 }
                 $runStatus = [string](Get-Field $run 'status')
                 if ($runStatus -notin @('measured', 'unknown')) { Stop-Acceptance 'incremental_metrics_invalid' "The $expectedCount-file scenario status must be measured or unknown." }
-                foreach ($field in $script:measurementScalarFields) {
-                    Assert-OptionalNonNegativeInteger (Get-Field $run $field) "incremental.$expectedCount.$field"
-                }
-                $phases = Get-Field $run 'phase_duration_ms'
-                if ($null -ne $phases) {
-                    foreach ($phase in $phases.PSObject.Properties) {
-                        if ($phase.Name -notin @('fetching', 'parsing', 'indexing', 'publishing')) { Stop-Acceptance 'incremental_metrics_invalid' "The $expectedCount-file phase metric contains an unknown phase." }
-                        Assert-OptionalNonNegativeInteger $phase.Value "incremental.$expectedCount.phase_duration_ms.$($phase.Name)"
-                    }
-                }
+                $metrics = Get-ValidatedMeasurementMetrics $run "incremental.$expectedCount" 'incremental_metrics_invalid'
                 $measurementSummary = Get-MeasurementSummary $run
                 $incrementalInput = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }
-                $incrementalOutput = [ordered]@{ source_id = Get-Field $run 'source_id'; snapshot_id = Get-Field $run 'snapshot_id'; commit_sha = Get-Field $run 'commit_sha'; selected_files = Get-Field $run 'selected_files'; selected_bytes = Get-Field $run 'selected_bytes'; chunk_count = Get-Field $run 'chunk_count'; phase_duration_ms = $phases; elapsed_ms = Get-Field $run 'elapsed_ms'; peak_memory_bytes = Get-Field $run 'peak_memory_bytes'; estimated_input_tokens = Get-Field $run 'estimated_input_tokens'; actual_input_tokens = Get-Field $run 'actual_input_tokens'; embedding_calls = Get-Field $run 'embedding_calls'; generation_calls = Get-Field $run 'generation_calls' }
+                $incrementalOutput = [ordered]@{ source_id = Get-Field $run 'source_id'; snapshot_id = Get-Field $run 'snapshot_id'; commit_sha = Get-Field $run 'commit_sha'; selected_files = $metrics.scalar.selected_files; selected_bytes = $metrics.scalar.selected_bytes; chunk_count = $metrics.scalar.chunk_count; phase_duration_ms = $metrics.phase_duration_ms; elapsed_ms = $metrics.scalar.elapsed_ms; peak_memory_bytes = $metrics.scalar.peak_memory_bytes; estimated_input_tokens = $metrics.scalar.estimated_input_tokens; actual_input_tokens = $metrics.scalar.actual_input_tokens; embedding_calls = $metrics.scalar.embedding_calls; generation_calls = $metrics.scalar.generation_calls }
                 $script:report.incremental_runs = @($script:report.incremental_runs | Where-Object { $_.changed_file_count -ne $expectedCount }) + @([ordered]@{ changed_file_count = $expectedCount; status = $measurementSummary.status; completeness = $measurementSummary.completeness; provided_status = $runStatus; metric_status = $measurementSummary.metric_status; input = $incrementalInput; output = $incrementalOutput })
             }
         }
@@ -904,16 +1066,7 @@ try {
             }
             $baselineStatus = [string](Get-Field $baseline 'status')
             if ($baselineStatus -notin @('measured', 'unknown')) { Stop-Acceptance 'baseline_metrics_invalid' 'Text baseline status must be measured or unknown.' }
-            foreach ($field in $script:measurementScalarFields) {
-                Assert-OptionalNonNegativeInteger (Get-Field $baseline $field) "text_baseline.$field"
-            }
-            $baselinePhases = Get-Field $baseline 'phase_duration_ms'
-            if ($null -ne $baselinePhases) {
-                foreach ($phase in $baselinePhases.PSObject.Properties) {
-                    if ($phase.Name -notin @('fetching', 'parsing', 'indexing', 'publishing')) { Stop-Acceptance 'baseline_metrics_invalid' "The text baseline contains an unknown phase." }
-                    Assert-OptionalNonNegativeInteger $phase.Value "text_baseline.phase_duration_ms.$($phase.Name)"
-                }
-            }
+            $baselineMetrics = Get-ValidatedMeasurementMetrics $baseline 'text_baseline' 'baseline_metrics_invalid'
             $baselineSummary = Get-MeasurementSummary $baseline
             $script:report.text_baseline = [ordered]@{
                 status = $baselineSummary.status
@@ -921,7 +1074,7 @@ try {
                 provided_status = $baselineStatus
                 metric_status = $baselineSummary.metric_status
                 inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }
-                outputs = [ordered]@{ selected_files = Get-Field $baseline 'selected_files'; selected_bytes = Get-Field $baseline 'selected_bytes'; chunk_count = Get-Field $baseline 'chunk_count'; phase_duration_ms = $baselinePhases; elapsed_ms = Get-Field $baseline 'elapsed_ms'; peak_memory_bytes = Get-Field $baseline 'peak_memory_bytes'; estimated_input_tokens = Get-Field $baseline 'estimated_input_tokens'; actual_input_tokens = Get-Field $baseline 'actual_input_tokens'; embedding_calls = Get-Field $baseline 'embedding_calls'; generation_calls = Get-Field $baseline 'generation_calls' }
+                outputs = [ordered]@{ selected_files = $baselineMetrics.scalar.selected_files; selected_bytes = $baselineMetrics.scalar.selected_bytes; chunk_count = $baselineMetrics.scalar.chunk_count; phase_duration_ms = $baselineMetrics.phase_duration_ms; elapsed_ms = $baselineMetrics.scalar.elapsed_ms; peak_memory_bytes = $baselineMetrics.scalar.peak_memory_bytes; estimated_input_tokens = $baselineMetrics.scalar.estimated_input_tokens; actual_input_tokens = $baselineMetrics.scalar.actual_input_tokens; embedding_calls = $baselineMetrics.scalar.embedding_calls; generation_calls = $baselineMetrics.scalar.generation_calls }
             }
         }
     }
@@ -1060,6 +1213,7 @@ try {
             }
         }
     }
+    Set-FullRunMeasurement $script:fullRunMeasurement
     $script:report.scope.snapshots = @($snapshotReports.ToArray())
     if ($snapshotReports.Count -eq 1) {
         $script:report.scope.snapshot_id = $snapshotReports[0].snapshot_id
