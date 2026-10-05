@@ -23,3 +23,11 @@ TLS：正常宿主实际12顶层定向 tests全部 PASS，datasource pkg5.084s /
 Wiki：507e 根两case实际 FAIL17.843s，newSourceWikiFixture重复115导致42P07，尚未到行为。0980首次重跑实际FAIL4.778s：专用PG/parser在暂停期间退出，未到行为；只恢复根自有57822及57823容器后再跑。第二次两case真实 FAIL31.981s：公开 Agent search/read新SQL引用不存在的source_files.deleted_at，42703；源码grep旧快照仍正确。日志 `%TEMP%/weknora-root-t22-wiki-0980e92c-runtime.txt`，session46616已收。已交同T06最小product修，用真实knowledges删除状态/source lifecycle，不加虚构schema，不放宽断言。产品未接受，原Hybrid未绿，不集成Wiki/关闭T22。
 
 独立新增投影测试由原T10负责；负例必须识别明确not-found/授权/租约拒绝，不允许任意SQL或环境错误算通过。仍等待干净冻结与候选上的根实际执行。现场真实GitLab/模型/性能/30题评分未通过，工具/切片通过不等于整票通过。未写GitHub过程评论、未读取旧Docker凭据。
+
+## 9800 修复与独立测试前沿
+
+冻结 `9800de09679184c7bdceb8373cfe67b27e7472df` 仅在 owner SQL 加入知库 id/tenant/KB/type 精确 join，并使用真实 `knowledges.deleted_at`；未修改schema/断言。Sol/high窄 Standards 0新硬/0新判断、Spec 0。根原 carry-forward 与原 Hybrid 两用例全部实际 PASS，pkg21.851s，Hybrid子3.79s；session36317已收，日志 `%TEMP%/weknora-root-t22-wiki-9800de09.txt`。旧raw与新applicability分离、旧问答跨发布检索正文均已真实验证。
+
+T10新单文件由Root host保存干净 `a7cb1ac8d1850c46a90d8380a47d471944f87b99`，compile-only pkg4.089s `[no tests to run]`，不是PG行为通过。Standards完整0硬/0判断；Spec发现两个测试阻断：GC case的source lease本来固定raw旧快照、故整个旧检索快照正确受保护，不能要求索引被GC；单页read负例只排BODYmarker可能忽略标题/summary/ref泄露。已交同Luna修GC前置carry-forward及严格单页拒绝/search空结果区分。Spec最终容量故障不算完整终态，下一冻结仍需完整review。Root曾把先前WIP的marker值捕获问题误派给该冻结；读取精确 `git show a7cb` 确认已是atomic generation，及时撤回，不要求重复修改。
+
+TLS实际启用脚本只在原main准备外部runner，默认metadata-only dry-run；编译后的后端仍未启动。必须在准备完成、复审及明确启用/后端重启确认之后启动；不会为busy-port测试提前执行 `-start`，避免端口退出竞态导致实际启用。三个chat被用户中断后已恢复各自未完成的原任务；T06产品保持9800冻结等待独立门禁，不把idle当新票验收。
