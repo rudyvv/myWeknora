@@ -34,6 +34,7 @@ class SourceRepresentativeQuestionTests(unittest.TestCase):
         return {
             "schema_version": 1,
             "status": "draft_for_human_confirmation",
+            "hash_mode": "sha256_utf8_lf",
             "repositories": [{"id": "nsb", "kind": "representative_repo", "commit": "a" * 40}],
             "questions": [
                 {
@@ -68,6 +69,54 @@ class SourceRepresentativeQuestionTests(unittest.TestCase):
         self.source.write_bytes(b"public void lookupThing() {}\r\n")
 
         self.assertEqual([], self.errors(dataset))
+
+    def test_requires_explicit_utf8_lf_hash_mode(self):
+        missing_mode = self.make_dataset()
+        del missing_mode["hash_mode"]
+        wrong_mode = self.make_dataset()
+        wrong_mode["hash_mode"] = "sha256_raw_bytes"
+
+        for dataset in (missing_mode, wrong_mode):
+            with self.subTest(hash_mode=dataset.get("hash_mode")):
+                errors = self.errors(dataset)
+                self.assertTrue(any("hash_mode" in error for error in errors), errors)
+
+    def test_rejects_unrecognized_fields_at_every_schema_level(self):
+        cases = [
+            ("dataset", lambda dataset: dataset.update({"future_dataset_field": "value"})),
+            (
+                "repository",
+                lambda dataset: dataset["repositories"][0].update({"future_repository_field": "value"}),
+            ),
+            (
+                "question",
+                lambda dataset: dataset["questions"][0].update({"future_question_field": "value"}),
+            ),
+            (
+                "evidence",
+                lambda dataset: dataset["questions"][0]["evidence"][0].update(
+                    {"future_evidence_field": "value"}
+                ),
+            ),
+        ]
+
+        for level, inject in cases:
+            with self.subTest(level=level):
+                dataset = self.make_dataset()
+                inject(dataset)
+                errors = self.errors(dataset)
+                self.assertTrue(any("unknown field" in error.lower() for error in errors), errors)
+
+    def test_rejects_source_body_fields_even_when_they_are_not_in_the_legacy_denylist(self):
+        dataset = self.make_dataset()
+        entire_source = self.source.read_text(encoding="utf-8")
+        dataset["questions"][0]["raw_source"] = entire_source
+        dataset["questions"][1]["evidence"][0]["full_source"] = entire_source
+
+        errors = self.errors(dataset)
+
+        self.assertTrue(any("raw_source" in error for error in errors), errors)
+        self.assertTrue(any("full_source" in error for error in errors), errors)
 
     def test_rejects_duplicate_ids_and_incorrect_group_counts(self):
         dataset = self.make_dataset()

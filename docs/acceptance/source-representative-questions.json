@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "status": "draft_for_human_confirmation",
+  "hash_mode": "sha256_utf8_lf",
   "description": "First-release source-evidence question set. Evidence records locate pinned source spans; this file contains no retrieved hits, expected answers, recall results, or performance measurements.",
   "repositories": [
     {

@@ -21,46 +21,12 @@ EXPECTED_COUNTS = {
 VALID_KINDS = {"representative_repo", "approved_supplement"}
 COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-FORBIDDEN_KEYS = {
-    "answer",
-    "answers",
-    "content",
-    "content_base64",
-    "excerpt",
-    "expected_answer",
-    "expected_hits",
-    "expected_match",
-    "gold_answer",
-    "hit",
-    "hits",
-    "match",
-    "match_label",
-    "match_result",
-    "matches",
-    "matched",
-    "matched_ids",
-    "mrr",
-    "ndcg",
-    "precision",
-    "recall",
-    "recall_at_k",
-    "recall_rate",
-    "retrieved",
-    "retrieved_hits",
-    "retrieved_matches",
-    "retrieval_result",
-    "retrieval_results",
-    "results",
-    "latency",
-    "latency_ms",
-    "performance",
-    "source_body",
-    "source_content",
-    "source_excerpt",
-    "source_text",
-    "snippet",
-    "token_count",
-    "token_total",
+HASH_MODE = "sha256_utf8_lf"
+ALLOWED_FIELDS = {
+    "dataset": frozenset({"schema_version", "status", "description", "hash_mode", "repositories", "questions"}),
+    "repository": frozenset({"id", "kind", "commit", "path_prefixes", "verify_current_revision"}),
+    "question": frozenset({"id", "category", "question", "repository", "source_kind", "evidence"}),
+    "evidence": frozenset({"repository", "path", "start_line", "end_line", "symbol", "sha256", "rationale"}),
 }
 
 
@@ -89,15 +55,11 @@ def _within_prefix(path: str, prefixes: Any) -> bool:
     )
 
 
-def _walk_for_forbidden_keys(value: Any, location: str, errors: list[str]) -> None:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if isinstance(key, str) and key.lower() in FORBIDDEN_KEYS:
-                errors.append(f"{location}.{key}: forbidden result/source-body field")
-            _walk_for_forbidden_keys(nested, f"{location}.{key}", errors)
-    elif isinstance(value, list):
-        for index, nested in enumerate(value):
-            _walk_for_forbidden_keys(nested, f"{location}[{index}]", errors)
+def _reject_unknown_fields(value: dict[str, Any], schema: str, location: str, errors: list[str]) -> None:
+    allowed = ALLOWED_FIELDS[schema]
+    for key in value:
+        if key not in allowed:
+            errors.append(f"{location}.{key!r}: unknown field for {schema} object")
 
 
 def validate_dataset(
@@ -111,11 +73,13 @@ def validate_dataset(
     if not _is_mapping(dataset):
         return ["dataset: expected a JSON object"]
 
-    _walk_for_forbidden_keys(dataset, "dataset", errors)
+    _reject_unknown_fields(dataset, "dataset", "dataset", errors)
     if dataset.get("schema_version") != 1:
         errors.append("dataset.schema_version: expected 1")
     if dataset.get("status") != "draft_for_human_confirmation":
         errors.append("dataset.status: must be draft_for_human_confirmation")
+    if dataset.get("hash_mode") != HASH_MODE:
+        errors.append(f"dataset.hash_mode: expected {HASH_MODE!r}")
 
     repositories = dataset.get("repositories")
     if not isinstance(repositories, list):
@@ -127,6 +91,7 @@ def validate_dataset(
         if not _is_mapping(repository):
             errors.append(f"{location}: expected an object")
             continue
+        _reject_unknown_fields(repository, "repository", location, errors)
         repo_id = repository.get("id")
         if not isinstance(repo_id, str) or not repo_id:
             errors.append(f"{location}.id: expected a non-empty string")
@@ -176,6 +141,7 @@ def validate_dataset(
         if not _is_mapping(question):
             errors.append(f"{location}: expected an object")
             continue
+        _reject_unknown_fields(question, "question", location, errors)
         question_id = question.get("id")
         if not isinstance(question_id, str) or not question_id:
             errors.append(f"{location}.id: expected a non-empty string")
@@ -209,6 +175,7 @@ def validate_dataset(
             if not _is_mapping(evidence):
                 errors.append(f"{evidence_location}: expected an object")
                 continue
+            _reject_unknown_fields(evidence, "evidence", evidence_location, errors)
             path = evidence.get("path")
             if not _safe_relative_path(path):
                 errors.append(f"{evidence_location}.path: expected a safe repository-relative path")
