@@ -134,24 +134,28 @@ def verify_temp_full_isolation(base_url):
     fill_path = Path('/tmp/source-parser-capacity-probe')
     wrote_expected_full = False
     try:
-        with fill_path.open('wb', buffering=0) as output:
-            block = b'x' * (1 << 20)
-            while True:
-                output.write(block)
-    except OSError as error:
-        if error.errno != errno.ENOSPC:
-            raise
-        wrote_expected_full = True
+        try:
+            with fill_path.open('wb', buffering=0) as output:
+                block = b'x' * (1 << 20)
+                while True:
+                    output.write(block)
+        except OSError as error:
+            if error.errno != errno.ENOSPC:
+                raise
+            wrote_expected_full = True
+        if not wrote_expected_full:
+            raise RuntimeError('the configured 32 MiB /tmp tmpfs did not reach ENOSPC')
+        status, result = request(base_url, '/v1/parse', parse_payload())
+        if status != 200 or result.get('quality') not in ('structural', 'partial'):
+            raise RuntimeError('parser stopped serving memory-only requests while /tmp remained full')
+        status, health = request(base_url, '/health')
+        if status != 200 or not health.get('ready'):
+            raise RuntimeError('parser health failed while /tmp remained full')
     finally:
         try:
             fill_path.unlink()
         except FileNotFoundError:
             pass
-    if not wrote_expected_full:
-        raise RuntimeError('the configured 32 MiB /tmp tmpfs did not reach ENOSPC')
-    status, result = request(base_url, '/v1/parse', parse_payload())
-    if status != 200 or result.get('quality') not in ('structural', 'partial'):
-        raise RuntimeError('parser stopped serving memory-only requests after /tmp filled')
 
 
 def verify_memory_pressure(base_url):
@@ -279,7 +283,7 @@ def main():
     print(json.dumps({
         'offline': True, 'container_limits': container_limits,
         'assertions': ['HTTP suite', 'offline parse', 'child crash and slot recovery',
-                       'child timeout and reap', 'tmpfs ENOSPC isolation',
+                       'child timeout and reap', 'parse and health while /tmp is full',
                        'memory pressure recovery', 'process restart recovery'],
     }, sort_keys=True))
     return 0

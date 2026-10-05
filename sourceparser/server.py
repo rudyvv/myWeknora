@@ -404,7 +404,7 @@ class Handler(BaseHTTPRequestHandler):
             maximum = body.get('chunk_max_bytes', 4096)
             if type(maximum) is not int or not 64 <= maximum <= 65536:
                 raise ValueError()
-        except (ValueError, TypeError, KeyError, UnicodeError, binascii.Error):
+        except (ValueError, TypeError, KeyError, UnicodeError, binascii.Error, RecursionError):
             self.respond(400, {'error': 'invalid source content/hash request'})
             return
         parse_slots = getattr(self.server, 'parse_slots', SLOTS)

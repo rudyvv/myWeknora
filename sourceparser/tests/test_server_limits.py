@@ -195,6 +195,30 @@ class ParserHTTPResourceLimits(unittest.TestCase):
             dripper.join(timeout=1)
             first.close()
 
+    def test_deeply_nested_json_returns_generic_bad_request_and_releases_connection(self):
+        self.server.limits = parser_server.ParserLimits(
+            max_connections=1, max_request_bytes=8192,
+            header_timeout_seconds=2, body_timeout_seconds=2,
+            parse_workers=1, parse_timeout_seconds=2,
+            response_timeout_seconds=2, max_response_bytes=512)
+        self.server.connection_slots = threading.BoundedSemaphore(1)
+        body = b'[' * 3000 + b'0' + b']' * 3000
+        self.assertEqual(len(body), 6001)
+        self.assertLessEqual(len(body), self.server.limits.max_request_bytes)
+        request = (b'POST /v1/parse HTTP/1.1\r\nHost: localhost\r\n'
+                   b'Content-Type: application/json\r\nContent-Length: 6001\r\n'
+                   b'Connection: close\r\n\r\n' + body)
+        connection = socket.create_connection(self.address, timeout=3)
+        connection.settimeout(3)
+        try:
+            connection.sendall(request)
+            self.assertEqual(self._read_response(connection),
+                             (400, {'error': 'invalid source content/hash request'}))
+        finally:
+            connection.close()
+        self.assertEqual(self._get_health()[0], 200,
+                         'a malformed JSON request must not retain the accepted connection slot')
+
     def test_declared_oversized_body_is_rejected_before_reading(self):
         first = socket.create_connection(self.address, timeout=3)
         first.settimeout(3)
