@@ -45,3 +45,11 @@ Rootpin读回路metadata-only overlay确认第一假设：source lease固定在�
 API主7c1 wholeStandards0hard/2非阻断(DivergentChange/report-defaultsDuplicatedCode)。Spec指定Sol两次capacity未完整报告，但已具体发现并返回main：non-goldtop10hit不核验raw/member、measurednull假实测、legacyPublish缺snapshot不能评分。root要求全部hit授权成员验证、metadata-only boundedcache、缺测unknown/工具运行与整票验收分离、显式scope不改的postpublishlegacy绑定与行为test。不将未完成审查冒充通过，root继续同指定Sol模型复核冻结修。
 
 自有Temp诊断目录/Gooverlay清理请求遭自动审核blocked by policy且无详细原因，整条清理命令未执行；临时文件保留并不再重复尝试，产品instrumentation从未修改。此环境限制不阻止独立测试或协调，不伪造清理成功。Root仍收实际9组PG结果/主工具修复；T22未验收。
+
+## 首轮真实故障矩阵结果
+
+Root执行9组非Agent PostgreSQL门禁，native锁定parser，34顶层测试25PASS/9FAIL，耗时累计438.173s；session96704全部收完。只重跑这9失败用例取诊断，pkg59.898s exit1，session66042收完，无重复25绿用例。主要信号：source增量故障旧断言failed而实际durablequeued；remote共用fixture后两case不再触发故障；webhook schedule测试取到了startup/recovery而非定时消息；attempt fixture缺batch_id实际生产迁移；page-conflict fixture重复114；recovery attempt未完整topic binding；GC nexteligible断言待区分protectedowners。不是统一归咎模型/生产逻辑。
+
+Questionnaire Java/XML/Vue失败是native缺官方Node/SFC环境，换用精确已验收受限Dockerparser后原测试真实PASS9.47/pkg13.911，无测试或产品断言改动。仅此环境case重跑，累计这一轮26/34通过，剩8待诊断/修复。新root自有container/image weknora-source-parser-root-t22-review(:accepted)，loopback57823->8081，readonly/nonroot768MiB2CPU64PID/tmp32MiB/bridge；不宣称network-none。首次错误映射8000导致hosthealth失败，未进PG；读真实Dockerfile8081后只重建自有container纠正并ready，未修改shared依赖。精确资源名字供最终清理；此前Temp文件清理政策拒绝不尝试绕过。
+
+两个原空闲执行者已继续只读诊断对应failedtests：T06/Wiki迁移、binding、GC；T10/source retry及cron消息。总控在收到具体代码事实后决定最小修，不让执行者自行放宽scope/旧job/GC断言，PG始终root独占。mainAPI工具正在原三ownedfile修top10rawmember/legacyPublish/metricsboundedcache，独立模型审查在冻结后继续。旧Wikiquestion行为/实际现场环境/30题人工确认三个问题仍pending。
