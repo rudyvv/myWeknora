@@ -19,3 +19,11 @@ Root合成unknown raw_source字段加到合法题集后，validator errors0，�
 所有必修finding一次交同原Luna修；matrix同时要求有界流式terminal聚合/无原Output存储、异常及时清理自有子进程，并补process-level成功/skip/缺失/正常包事件/超限回归。Standards原指定Sol模型两次capacity错误没有有效报告；replacement Sol/high已启动，不降模型或冒充review通过。
 
 现场运行环境用户问题仍待答，工具/data-independent work继续；不重复向用户索要内部runner或credential。三原工作树/分支继续，无共享依赖启动/旧Docker凭据读取/GitHub流水。
+
+## 首批题集切片接受
+
+修复clean8d1c4719496f67a4ee2bf30de396228837abd758，四层字段白名单和显式sha256_utf8_lf通过窄双轴（Standards0hard/0newjudgment，Spec0remaining）。根实际11Python测试PASS0.448s，30题所有固定源码hash/locators校验通过；原unknown源码字段反例现在拒绝。根merge0fd7e825，无额外产品修改。
+
+完整首批Standards：A0hard/0判断；B0hard/1非阻断possibleShotgunSurgery/DuplicatedCode：closedcatalog与文档重复。原capacity失败后同指定Sol/high替代审查完成，没有降低模型或将失败算通过。矩阵2P2仍待samehelper修/真实process测试；API工具仍WIP。故障脚本stdout有界/子进程清理作为root明确实现合同，不把未测量资源concern混排到Spec两项正式finding。
+
+根从已接受JSON生成只含问题/分组/仓库的审阅稿source-representative-question-review.md并打开；human30题确认async已发。题集仍draft，不提前修改批准状态或预填27/30。现场WeKnoraURL/验收KB/模型名先前问题也仍待答；独立实现与测试继续。
