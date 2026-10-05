@@ -77,3 +77,9 @@ Wiki fixture 7b250c77 窄双轴均 0 必修，manual NULL 修复 287aceca 独立
 本地 Git 元数据确认三个仓库 remote 均为 `https://gitlab.p.it`、分支master：`zhangruiliang/nsb`、`zy-frontend/evip-dashboard`、`zy-frontend/evip_mobile`；HEAD依次3cf44a4e、c9c4e357、15d9575e。新知识库数据源列表为空；根取消未配置连接向导，没有调用测试连接或提交浏览器自动填充内容。已向用户说明在专用知识库安全配置现有只读令牌，聊天不收凭据。实际远端可达/权限/CA/模型/性能门禁仍未通过。
 
 主API工具六项修复host保存clean9fd54ef1，三ownedfile仍在独立窄Sol/high两轴与根完整fakeHTTP验证中，暂不接受。原T06从已接受bae实施租约固定卡片产品/119/sharedfixture；原T10同base独占NEW projection review测试；均Luna/xhigh，PG57822只root，保留原三个聊天与分支。没有GitHub过程推送或关闭#30。
+
+## 根地址与现场 TLS 阻塞
+
+用户截图填入 `https://gitlab.p.it/zhangruiliang/nsb`。实际UI失败指向拼接后的 `/zhangruiliang/nsb/api/v4/user` 并报 x509 unknown authority。根在获准UI只改地址为实例根 `https://gitlab.p.it`，保留用户令牌不读取/输出；复测 `/api/v4/user` 仍为 `x509: certificate signed by unknown authority`。本机正常证书验证的 `curl.exe -I --max-time 15 https://gitlab.p.it` 同样 exit60/SEC_E_UNTRUSTED_ROOT。令牌有效性尚未验证，不能称令牌错误。
+
+根请求 GitLab 管理员提供可信根/中间 CA 公共证书文件路径，再准备实际后端信任配置。未关闭验证、未导入不明证书、未改变系统信任/共享服务或重启用户应用；没有提交数据源或真实源码/model请求。精确TLS原因已通知用户，其他自动修复继续。主9fd54ef窄审和23HTTP真实结果见 t22-9fd54ef1-review.md。
