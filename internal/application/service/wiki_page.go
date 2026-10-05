@@ -470,7 +470,7 @@ func (s *wikiPageService) GetPageBySlug(ctx context.Context, kbID string, slug s
 		return nil, err
 	}
 	stripWikiPageInlineChunkCitations(page)
-	if page.SourceProvenance != nil && page.SourceProvenance.State == "ready" {
+	if page.SourceProvenance != nil && page.SourceProvenance.State == "ready" && !isPinnedWikiAnswerRead(ctx) {
 		if repo, ok := s.repo.(interfaces.WikiSourceApplicabilityRepository); ok {
 			applicable, err := repo.WikiSourceApplicable(ctx, page)
 			if err != nil {
@@ -506,7 +506,7 @@ func (s *wikiPageService) GetPageByID(ctx context.Context, id string) (*types.Wi
 		return nil, err
 	}
 	stripWikiPageInlineChunkCitations(page)
-	if page.SourceProvenance != nil && page.SourceProvenance.State == "ready" {
+	if page.SourceProvenance != nil && page.SourceProvenance.State == "ready" && !isPinnedWikiAnswerRead(ctx) {
 		if repo, ok := s.repo.(interfaces.WikiSourceApplicabilityRepository); ok {
 			applicable, err := repo.WikiSourceApplicable(ctx, page)
 			if err != nil {

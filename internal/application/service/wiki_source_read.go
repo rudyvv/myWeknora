@@ -30,6 +30,18 @@ func (s *wikiPageService) BeginWikiRead(ctx context.Context, targets types.Searc
 	return pinned, release, nil
 }
 
+// isPinnedWikiAnswerRead identifies the only Wiki read that must preserve the
+// answer projection's captured applicability state. BeginWikiRead has already
+// checked the lease/capacity and repository reads still revalidate permissions
+// and raw evidence before this service-level live applicability check is skipped.
+func isPinnedWikiAnswerRead(ctx context.Context) bool {
+	if !source.IsWikiAnswerRead(ctx) {
+		return false
+	}
+	_, ok := source.ReadLeaseID(ctx)
+	return ok
+}
+
 func (s *wikiPageService) revisionOwnerIdentity(ctx context.Context, kbID, slug string) (*types.WikiPage, error) {
 	if repo, ok := s.repo.(interfaces.WikiRevisionIdentityRepository); ok {
 		return repo.GetWikiPageIdentity(ctx, kbID, slug)
