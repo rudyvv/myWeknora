@@ -170,6 +170,23 @@ CREATE TRIGGER %s BEFORE INSERT ON source_file_versions FOR EACH ROW EXECUTE FUN
 	require.NoError(t, err, "the stable source-file handle must resolve the retried publication")
 	require.Equal(t, newCommit, newView.CommitSHA)
 	require.Contains(t, newView.Content, "diskFaultNewMarker")
+	otherView, err = f.knowledge.GetSourceFile(f.ctx, otherHandle)
+	require.NoError(t, err, "source B's original file handle must remain readable after source A retries")
+	require.Equal(t, publishedCommit, otherView.CommitSHA)
+	require.Contains(t, otherView.Content, "diskFaultOtherMarker")
+
+	retriedScopeOtherHits, err := f.kbs.HybridSearch(readCtx, f.kb.ID, types.SearchParams{
+		QueryText: "diskFaultOtherMarker", MatchCount: 10, DisableVectorMatch: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, retriedScopeOtherHits, 1, "the original mixed read lease must still read source B after retry")
+	require.Equal(t, other.ID, retriedScopeOtherHits[0].Metadata["datasource_id"])
+	retriedScopeDocumentHits, err := f.kbs.HybridSearch(readCtx, f.kb.ID, types.SearchParams{
+		QueryText: "diskFaultOrdinaryDocumentMarker", MatchCount: 10, DisableVectorMatch: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, retriedScopeDocumentHits, 1, "the original mixed read lease must still read the ordinary document after retry")
+	require.Equal(t, document.ID, retriedScopeDocumentHits[0].KnowledgeID)
 
 	excludedSourceHits, err := f.kbs.HybridSearch(readCtx, f.kb.ID, types.SearchParams{
 		QueryText: "diskFaultNewMarker", MatchCount: 10, DisableVectorMatch: true,
