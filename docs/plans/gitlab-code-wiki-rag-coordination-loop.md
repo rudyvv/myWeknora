@@ -426,3 +426,21 @@ Wiki capacitydb914纯NEW157line真实17MiB公开metadata编辑而保持eligible+
 原main/a8ea新同票ops辅助onlyignored metadata read-only preflight：准备读取现有app .env内存并按真实DB规则 read schema_migrations version/dirty、required tables/cols与extensions，默认dryrun不连，Root审后readonly执行，不泄DSN/password/用户内容，不DB writes/migrate/force/安装/旧Dockercredentialmetadata。源码完整部署需要保护性备份+隔离预演+明确migration路径；原Dstartup只101解释版本错配。现有scripts/migrate.sh up打印凭据，禁止调用；Root将准备安全替代路径。
 
 最新processed mainfedcccc0-7c36-4a1f-883b-9f280d95f770:7（之后metadata preflightactive需新snapshot）；T06 16ff9f92-3bfa-47d1-98c9-4586749fa2d1:6 freezeacceptedreviewidle；T10 ca79cd17-7e9c-4427-9d5d-5eb48796672d:13 freezeidle。rootPG57822唯一由10335占用；parser57823healthy，所有其它root测试/build已收。15:23:33UTC截止不可自延，到期不再临时启用/要新窗口须明确用户授权；client每request自动恢复verified，CA正常trust预检仍未通过。真实用户令牌不读/不保存到聊天/GH；IABtab1保留handoff，Test credential wizard未Save。只有新有效结果/问题行动，不ACKloop，不重复gh过程流水。
+
+## Wiki 已集成；只读部署预检恢复（2026-10-05 15:26 UTC）
+
+六项补验 session10335 已全部收取 PASS44.139，四项独立门禁 PASS33.920、容量 PASS11.414 与反例 FAIL17.483 都已收取。Root 接受 Wiki slice 并 merge3a17ede5、记录55322bfc；根树clean。原D main b477保持，当前8080仍为88fa TLS-only兼容应用。没有迁移live数据库、没有保存表单/拉取源码/调用真实模型；21/22、#30OPEN。不得重复跑或审查已接受的Wiki切片。
+
+临时TLS固定截止15:23:33Z已到（北京时间23:23:33），没有续延，client逐请求使用verified transport。15:24:29之后根实际localhost8080健康检查200；并非普通GitLab证书链校验通过。正常CA信任仍待解决，已成功的API测试不能冒充仓库同步/RAG验收。
+
+原三个Luna/xhigh会话继续同票准备，不新票/新chat：main/a8ea的ignored schema_preflight.go冻F0863E08E995D9CEEFCC08049823D9D39BDC9A440FF51568255CB87A1FE2FE8A，root核hash后复制外部test-runners/t22-live-schema-preflight-f0863e08.go并独立build，exe344491B238C97D940B2A5472815A419EA519B33C689435043B6041DBC4FF42EA；默认dryrun实际PASS，仅文件存在性、不读取dotenv值/不DB连接。实际-preflight须完整独立Sol/high两轴与root审后，当前未执行。manifest补齐119两投影表、ledger恰好一行、PG版本与DBsize bytes；unknown不算pass，无DBwrites/rawerrors/DSN/用户内容输出。
+
+T06准备ignored备份/隔离恢复note，允许capability实际pg_dump/restore/psql17.9（只root专用57822 container --version，无DB连接）。初note误把b0df9dc当根候选，Root明确correct实际source-integration55322路径，不为错路径枚举chat；dump端保留ownership/ACL metadata，restore到新隔离库才no-owner/no-privileges，stdout二进制stream不PowerShell文本管道、不含argv密码/旧Docker元数据。note窄修进行中，无dump/restore动作。T10准备同样ignored102–119 up/down迁移风险与核验清单，root提供准确绝对路径避免遍历；不得连接/修改live。
+
+最新processed mainfedcccc0-7c36-4a1f-883b-9f280d95f770:14 freezeidle待review；T06 16ff9f92-3bfa-47d1-98c9-4586749fa2d1:10 note窄修active；T10 ca79cd17-7e9c-4427-9d5d-5eb48796672d:20 read-only迁移noteactive。root无未收test/build、57822 idle、57823healthy。所有ops实际动作由root协调，部署升级须先备份/隔离预演形成具体结果；不调用会打印DB_URL/password的scripts/migrate.sh，不force/auto-recover dirty，不以health200代替源码页面门禁，不GH过程流水。
+
+随后preflight794ed5修明确unknown和NULL/负ledger row，独立Sol/high窄Standards0/Spec0；root独立build/dryrun及真正readonly SELECT全部完成：transaction_read_only=on、native127.0.0.1:5432、PG17.9、**实际ledger103/dirtyfalse**（不是此前根据D只101的推断）、34source表9存在25缺、DB290928307bytes、pg_search0.22.2/vector0.8.1。JSON仅metadata在test-runners/t22-live-schema-inventory-20261005.json，hash63D9F6DBF6070A5DF94F2B81EE67193BDCE8132A780BE97603FB829E0FEE7765；源码794ED5C734E3E85A52A5E068C08F31ED626C3835CBB781A2F1E5AF5B7929159A、root exe9222DF7FD82404E317E9E450680A13E3C0CBACA3F4EEF20A1F40D7391F0BC7E5。没有DBwrite/migration/token/model操作。三会话直接root问题/答复已工作，不再需要人类转内部路径。
+
+备份note修0D6A接受root声明目录且保留dump owner/ACL；T10迁移noteAC6EAA root读全，缺106只编号空洞，锁定migrate4.19.1 Source.Next代码证明用下一实际版本，禁止补虚构文件。Root已新建外部t22-live-db-backups严格DACL（禁继承、仅operator/SYSTEM/Admins、其它Allow0、未建archive），C盘433GB空闲。Root每次同一host调用前复查ACL/非reparse作为备份外部门禁，helper无unsafe DACL造轮子、不自行声称已核ACL；只root未来-backup，workers绝不配置读取/DBdump。T06准备ignored小Go backup_helper.go/exe，defaultstat-only，显式模式loopback5432+固定root-ownedclientcontainer+PGOPTIONS readonly/key-only childenv、exclusive binary partial/status/hash、timeout300s、保留失败partial无自动删除；未完成/未实际备份。T09已接受preflight，继续ignored完整runtime/frontend/parser/storage/Redis差异map，只读代码不build/部署。T10note接受作为辅助但保持冻结idle，不新票。详细root计划在t22-live-deployment-preflight.md。
+
+当前processed mainfedcccc0-7c36-4a1f-883b-9f280d95f770:17 runtime-mapactive；T06 16ff9f92-3bfa-47d1-98c9-4586749fa2d1:12 backup-helperactive，两个路径/ACL问题root已具体答复，禁止问用户；T10 ca79cd17-7e9c-4427-9d5d-5eb48796672d:23 notefreezeidle。Root无未收process，21/22/#30OPEN，普通GitLabCA未解决，截止已到不会自延。备份/restore/隔离迁移还未执行，不接受T22/升级live/分享dump/过程GH流水。
