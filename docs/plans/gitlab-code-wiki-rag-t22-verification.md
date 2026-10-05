@@ -53,3 +53,15 @@ Root执行9组非Agent PostgreSQL门禁，native锁定parser，34顶层测试25P
 Questionnaire Java/XML/Vue失败是native缺官方Node/SFC环境，换用精确已验收受限Dockerparser后原测试真实PASS9.47/pkg13.911，无测试或产品断言改动。仅此环境case重跑，累计这一轮26/34通过，剩8待诊断/修复。新root自有container/image weknora-source-parser-root-t22-review(:accepted)，loopback57823->8081，readonly/nonroot768MiB2CPU64PID/tmp32MiB/bridge；不宣称network-none。首次错误映射8000导致hosthealth失败，未进PG；读真实Dockerfile8081后只重建自有container纠正并ready，未修改shared依赖。精确资源名字供最终清理；此前Temp文件清理政策拒绝不尝试绕过。
 
 两个原空闲执行者已继续只读诊断对应failedtests：T06/Wiki迁移、binding、GC；T10/source retry及cron消息。总控在收到具体代码事实后决定最小修，不让执行者自行放宽scope/旧job/GC断言，PG始终root独占。mainAPI工具正在原三ownedfile修top10rawmember/legacyPublish/metricsboundedcache，独立模型审查在冻结后继续。旧Wikiquestion行为/实际现场环境/30题人工确认三个问题仍pending。
+
+主修074ccd根实际13顶层GoHTTPtests：12PASS/1FAIL，pkg33.171，session80622已收。Rawmember/staging/range非gold三类、授权错误隐私、满测量unknown、freshlegacyPublish/missingpin与explicitoldpin拒绝、normalizedhash、distinctcrossrepo全evidence、draft拒评分均真实绿。最后ParserReadyfixture错误缺mapping，beforepreview报source_mapping_missing；根已一次给准确夹具/更具体检查顺序修，不允许把任意error当通过。
+
+最终data halfSol仍容量故障，已发具体P2：仅selected_files/bytes等任意一字段便保measured会掩盖时间/内存/块/token/调用的缺失。根要求逐metricunknown/observed或partial汇总、关键perf不得整条measured，加入nullable实际chunk_count与calls，估算与实际分开；不会以所有token不可观测而抹掉已知时间，也不虚构0。此审核未完整终态不能claimoverallSpecpass，identity half同容量失败；Standards窄0740hard/1非阻断cacheSchema重复。主API工具仍未接受，前两工具已接受。
+
+## 恢复后的根验证（2026-10-05）
+
+旧session9808恢复时进程句柄已不存在，根读取原持久日志确认两定向tests皆FAIL/pkg8.616：OrderedDictionary无Clone，report初始化在HTTP前崩溃。没有把未知句柄当成功。同Luna最小字典工厂修，host精确保存clean230ed66f。根真实全部14顶层GoHTTP tests PASS42.921s，session20801全收，privacy/numeric三合成反例另外全红8.945。完整Sol/high两半Spec产生5P2+全量测量记录缺口，一次批量交main；Standards0硬/3非阻断判断。完整记录t22-230ed66f-review.md。Runner未接受。
+
+原T10 dirty两文件host精确保存clean6c730aa5。窄Sol/high双轴0硬/0判断、Spec0；根专用PG四门禁全PASS39.076（cron12.27，remote三子合计10.21，vector6.63，keyword5.41）。session15560全收，允许只此夹具切片集成。原T06四testfiles冻结7b250c77；根四PG三PASS(recovery5.31/conflict5.93/GC5.91)、lateRunner FAIL0.07/pkg22.046，session6341全收。真实114 nullable BatchID FK揭示manual ledger.Create写空string导致SQL23503，根明确同Luna最小product修manual持久化NULL且真实FK保留，不dropFK/虚构父batch。原owner-release race和预算fencing断言保持；三绿不重复。首轮34非Agent矩阵目前33项已验证绿/1晚到runner未绿，Hybrid独立合同选择仍pending；此累计是按原病例证据汇总，不宣称整组新一轮通过。
+
+执行者T10 send-to-root被授权校验拒绝，未有详细原因，不重试/换渠道；总控用获准wait_threads收完成证据并告执行者无需用户转达。T06/main正常直接报告已到。保留之前Temp清理政策拒绝限制，未绕过。所有根测试进程已收；新修继续同三聊天，不新建对话/不GitHub过程流水。
