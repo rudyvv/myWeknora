@@ -329,33 +329,41 @@ func TestSourceWikiEvidenceRemainsReadableAfterForcePushAndGitUnavailable(t *tes
 }
 
 func TestSourceRemoteFailuresKeepPublishedVersionAndExposeLastSuccess(t *testing.T) {
-	f := newJavaSourceFixture(t)
-	syncSourceFixture(t, f)
-	old := latestIncrementalRun(t, f)
-
 	for _, failure := range []struct {
 		name string
-		set  func(bool)
+		set  func(*javaSourceFixture, bool)
 	}{
-		{name: "branch missing", set: func(value bool) { f.gitlabBranchMissing = value }},
-		{name: "token invalid", set: func(value bool) { f.gitlabTokenInvalid = value }},
-		{name: "git fetch unavailable", set: func(value bool) { f.gitTransportUnavailable = value }},
+		{name: "branch missing", set: func(f *javaSourceFixture, value bool) { f.gitlabBranchMissing = value }},
+		{name: "token invalid", set: func(f *javaSourceFixture, value bool) { f.gitlabTokenInvalid = value }},
+		{name: "git fetch unavailable", set: func(f *javaSourceFixture, value bool) { f.gitTransportUnavailable = value }},
 	} {
 		t.Run(failure.name, func(t *testing.T) {
-			failure.set(true)
+			f := newJavaSourceFixture(t)
+			syncSourceFixture(t, f)
+			old := latestIncrementalRun(t, f)
+			t.Cleanup(func() { failure.set(f, false) })
+			failure.set(f, true)
 			log, done := startIncrementalRun(t, f)
 			err := <-done
 			require.Error(t, err)
-			failed, getErr := f.service.GetSyncLog(f.ctx, log.ID)
+			stored, getErr := f.service.GetSyncLog(f.ctx, log.ID)
 			require.NoError(t, getErr)
-			require.Equal(t, types.SyncLogStatusFailed, failed.Status)
+			require.Equal(t, types.SyncLogStatusQueued, stored.Status)
+			requireSourceRunPhase(t, f, log.ID, "retry_wait")
+			require.NotEmpty(t, stored.ErrorMessage)
+			require.NotContains(t, stored.ErrorMessage, "fixture-token", "persisted errors must not disclose the connector token")
 			var result types.SyncResult
-			require.NoError(t, json.Unmarshal(failed.Result, &result))
+			require.NoError(t, json.Unmarshal(stored.Result, &result))
 			require.NotNil(t, result.Source)
 			require.Equal(t, old.Snapshot.CommitSHA, result.Source.Snapshot.PreviousCommitSHA)
 			require.NotNil(t, result.Source.Snapshot.LastSuccessfulPublishedAt)
+			require.NotNil(t, old.Snapshot.PublishedAt)
+			require.WithinDuration(t, *old.Snapshot.PublishedAt, *result.Source.Snapshot.LastSuccessfulPublishedAt, time.Microsecond)
+			published, publishErr := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+			require.NoError(t, publishErr)
+			require.NotNil(t, published.Snapshot)
+			require.Equal(t, old.Snapshot.ID, published.Snapshot.ID, "retryable failure must not publish a new snapshot")
 			assertIncrementalOldPublication(t, f, sourceMember(t, old, "src/Service.java").SourceFileID, old.Snapshot.CommitSHA)
-			failure.set(false)
 		})
 	}
 }
@@ -453,7 +461,9 @@ func TestSourceUpdateKeepsPublishedVersionDuringParsingAndVectorFailure(t *testi
 	assertIncrementalOldPublication(t, f, oldFile.SourceFileID, old.Snapshot.CommitSHA)
 	failed, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
-	require.Equal(t, types.SyncLogStatusFailed, failed.Status)
+	require.Equal(t, types.SyncLogStatusQueued, failed.Status)
+	requireSourceRunPhase(t, f, log.ID, "retry_wait")
+	require.Contains(t, failed.ErrorMessage, "zero norm")
 	require.NoError(t, json.Unmarshal(failed.Result, &progress))
 	require.Equal(t, old.Snapshot.CommitSHA, progress.Source.Snapshot.PreviousCommitSHA)
 }
@@ -482,7 +492,9 @@ func TestSourceUpdateKeywordFailureRetainsPreviousCompletePublication(t *testing
 	assertIncrementalOldPublication(t, f, oldFile.SourceFileID, old.Snapshot.CommitSHA)
 	failed, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
-	require.Equal(t, types.SyncLogStatusFailed, failed.Status)
+	require.Equal(t, types.SyncLogStatusQueued, failed.Status)
+	requireSourceRunPhase(t, f, log.ID, "retry_wait")
+	require.Contains(t, failed.ErrorMessage, "keyword index")
 }
 
 func startIncrementalRun(t *testing.T, f *javaSourceFixture) (*types.SyncLog, chan error) {

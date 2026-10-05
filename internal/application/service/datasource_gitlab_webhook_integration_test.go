@@ -181,27 +181,118 @@ func TestGitLabPushHookHTTPDurableTriggerDedupAndScheduledReconciliation(t *test
 	require.Equal(t, http.StatusOK, statusRequest.StatusCode)
 	require.NotNil(t, status.LastReceivedAt)
 	require.Equal(t, "fixture-delivery-001", status.LastEventID)
+	hookLog, err := f.service.GetSyncLog(f.ctx, taskPayload.SyncLogID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, hookLog.Status)
+	requireSourceRunPhase(t, f, hookLog.ID, "published")
+	var syncState struct {
+		ActiveSyncLogID  *string `gorm:"column:active_sync_log_id"`
+		PendingSyncLogID *string `gorm:"column:pending_sync_log_id"`
+	}
+	require.NoError(t, f.db.Table("source_sync_states").Select("active_sync_log_id, pending_sync_log_id").
+		Where("data_source_id=? AND tenant_id=?", f.ds.ID, f.ds.TenantID).Take(&syncState).Error)
+	require.Nil(t, syncState.ActiveSyncLogID, "the completed webhook run must not still be active at scheduler startup")
+	require.Nil(t, syncState.PendingSyncLogID, "the completed webhook run must not leave a recovery delivery pending")
+
+	var publicationEvent struct {
+		ID      string `gorm:"column:id"`
+		Status  string `gorm:"column:status"`
+		Payload []byte `gorm:"column:payload"`
+	}
+	require.NoError(t, f.db.Table("source_publication_outbox").Select("id, status, payload").
+		Where("data_source_id=? AND snapshot_id=? AND event_type=?", f.ds.ID, published.Snapshot.ID, "source.wiki.update").
+		Take(&publicationEvent).Error)
+	require.Equal(t, "pending", publicationEvent.Status, "scheduler startup should relay the current snapshot's durable Wiki outbox event")
+	var durableWikiPayload types.SourceWikiUpdatePayload
+	require.NoError(t, json.Unmarshal(publicationEvent.Payload, &durableWikiPayload))
+	require.Equal(t, publicationEvent.ID, durableWikiPayload.EventID)
+	require.Equal(t, f.ds.ID, durableWikiPayload.DataSourceID)
+	require.Equal(t, published.Snapshot.ID, durableWikiPayload.SnapshotID)
+	require.Equal(t, f.sha, durableWikiPayload.CommitSHA)
 
 	// A missed Push Hook is caught through the ordinary configurable schedule,
 	// which enters the exact same source coordinator and queue path.
-	require.NoError(t, f.db.Model(&types.DataSource{}).Where("id=?", f.ds.ID).Update("sync_schedule", "* * * * * *").Error)
-	scheduledTasks := make(chan *asynq.Task, 1)
+	require.NoError(t, f.db.Model(&types.DataSource{}).Where("id=?", f.ds.ID).Update("sync_schedule", "*/5 * * * * *").Error)
+	var previousScheduledRunCount int64
+	require.NoError(t, f.db.Table("source_sync_runs").Where("data_source_id=? AND trigger=?", f.ds.ID, "schedule").Count(&previousScheduledRunCount).Error)
+	require.Zero(t, previousScheduledRunCount)
+	scheduledTasks := make(chan *asynq.Task, 8)
 	scheduler := datasource.NewScheduler(
 		repository.NewDataSourceRepository(f.db), repository.NewSyncLogRepository(f.db),
 		sourceTestTaskEnqueuer{tasks: scheduledTasks}, f.service.sourceSnapshots,
 	)
 	require.NoError(t, scheduler.Start(context.Background()))
-	defer scheduler.Stop()
+	schedulerStopped := false
+	t.Cleanup(func() {
+		if !schedulerStopped {
+			scheduler.Stop()
+		}
+	})
+	var wikiTask *asynq.Task
 	select {
-	case scheduledTask := <-scheduledTasks:
-		var scheduled types.DataSourceSyncPayload
-		require.NoError(t, json.Unmarshal(scheduledTask.Payload(), &scheduled))
-		require.Equal(t, "schedule", scheduled.Trigger)
-		require.Equal(t, f.ds.ID, scheduled.DataSourceID)
-		require.NoError(t, f.service.ProcessSync(f.ctx, scheduledTask), "periodic reconciliation must use the same source worker")
+	case wikiTask = <-scheduledTasks:
 	case <-time.After(3 * time.Second):
-		t.Fatal("scheduled source reconciliation did not trigger without a webhook delivery")
+		t.Fatal("scheduler startup did not enqueue the published-source Wiki wake-up")
 	}
+	require.Equal(t, types.TypeSourceWikiUpdate, wikiTask.Type(), "startup's first delivery should be the durable Wiki outbox wake-up, not a datasource sync")
+	var wikiWake types.SourceWikiUpdateTriggerPayload
+	require.NoError(t, json.Unmarshal(wikiTask.Payload(), &wikiWake))
+	require.Equal(t, f.ds.TenantID, wikiWake.TenantID)
+	require.Equal(t, f.kb.ID, wikiWake.KnowledgeBaseID)
+	var pendingWikiOp types.TaskPendingOp
+	require.NoError(t, f.db.Where("task_type=? AND scope=? AND scope_id=? AND op=?",
+		types.TypeSourceWikiUpdate, types.TaskScopeKnowledgeBase, f.kb.ID, "published_snapshot").Take(&pendingWikiOp).Error)
+	var acceptedWikiPayload types.SourceWikiUpdatePayload
+	require.NoError(t, json.Unmarshal(pendingWikiOp.Payload, &acceptedWikiPayload))
+	require.Equal(t, durableWikiPayload.EventID, acceptedWikiPayload.EventID)
+	require.Equal(t, durableWikiPayload.DeliveryID, acceptedWikiPayload.DeliveryID)
+	require.Equal(t, f.ds.ID, acceptedWikiPayload.DataSourceID)
+	require.Equal(t, published.Snapshot.ID, acceptedWikiPayload.SnapshotID)
+	require.Equal(t, f.sha, acceptedWikiPayload.CommitSHA)
+	var deliveredOutboxStatus string
+	require.NoError(t, f.db.Table("source_publication_outbox").Select("status").Where("id=?", publicationEvent.ID).Scan(&deliveredOutboxStatus).Error)
+	require.Equal(t, "delivered", deliveredOutboxStatus, "the queued Wiki wake-up must correspond to an accepted durable outbox event")
+
+	var scheduledTask *asynq.Task
+	var scheduled types.DataSourceSyncPayload
+	deadline := time.NewTimer(7 * time.Second)
+	defer deadline.Stop()
+	for scheduledTask == nil {
+		select {
+		case candidate := <-scheduledTasks:
+			require.Equal(t, types.TypeDataSourceSync, candidate.Type(), "only datasource sync deliveries may satisfy the cron assertion")
+			require.NoError(t, json.Unmarshal(candidate.Payload(), &scheduled))
+			require.Equal(t, "schedule", scheduled.Trigger)
+			require.Equal(t, f.ds.ID, scheduled.DataSourceID)
+			require.NotEqual(t, hookLog.ID, scheduled.SyncLogID, "cron must register a new run rather than redeliver the completed webhook run")
+			scheduledTask = candidate
+		case <-deadline.C:
+			t.Fatal("scheduled source reconciliation did not trigger without a webhook delivery")
+		}
+	}
+	scheduler.Stop()
+	schedulerStopped = true
+
+	var scheduledRun struct {
+		SyncLogID          string `gorm:"column:sync_log_id"`
+		Trigger            string `gorm:"column:trigger"`
+		DeliveryGeneration int64  `gorm:"column:delivery_generation"`
+		Phase              string `gorm:"column:phase"`
+	}
+	require.NoError(t, f.db.Table("source_sync_runs").Select("sync_log_id, trigger, delivery_generation, phase").
+		Where("data_source_id=? AND sync_log_id=?", f.ds.ID, scheduled.SyncLogID).Take(&scheduledRun).Error)
+	require.Equal(t, "schedule", scheduledRun.Trigger)
+	require.Equal(t, scheduled.DeliveryGeneration, scheduledRun.DeliveryGeneration)
+	require.Greater(t, scheduledRun.DeliveryGeneration, int64(0))
+	require.Equal(t, "queued", scheduledRun.Phase)
+	var scheduledRunCount int64
+	require.NoError(t, f.db.Table("source_sync_runs").Where("data_source_id=? AND trigger=?", f.ds.ID, "schedule").Count(&scheduledRunCount).Error)
+	require.EqualValues(t, 1, scheduledRunCount, "stopping after capture must keep this one-shot reconciliation from accumulating cron catch-up runs")
+	require.NoError(t, f.service.ProcessSync(f.ctx, scheduledTask), "periodic reconciliation must use the same source worker")
+	refreshed, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.NotNil(t, refreshed.Snapshot)
+	require.Equal(t, f.sha, refreshed.Snapshot.CommitSHA, "scheduled reconciliation must keep the current GitLab HEAD")
 }
 
 func failGitLabSourceAndExhaustRetryBudget(t *testing.T, f *javaSourceFixture, tasks <-chan *asynq.Task) {
