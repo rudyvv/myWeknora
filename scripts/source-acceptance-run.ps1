@@ -35,9 +35,13 @@ $script:baseUri = $null
 $script:httpClient = $null
 $script:accessToken = $null
 $script:runStopwatch = $null
+$script:validatedSourceMetadataCache = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+$script:validatedSourceMetadataCacheBytes = 0
+$script:authorizedSourceReadCount = 0
 $script:report = [ordered]@{
     schema_version = 1
     status = 'running'
+    t22_acceptance_status = 'unknown'
     started_at_utc = [DateTime]::UtcNow.ToString('o')
     scope = [ordered]@{
         knowledge_base_id = $KnowledgeBaseId
@@ -59,6 +63,7 @@ $script:report = [ordered]@{
     preview = $null
     publish = [ordered]@{ requested = [bool]$Publish; status = 'not_requested'; sync_log_id = $null; snapshot_id = $null; commit_sha = $null; telemetry = $null }
     evidence_threshold = [ordered]@{ total_questions = 30; required_top10_matches = 27; matched_count = 0; unknown_count = 0; threshold_met = $false; claim = 'top-10 evidence threshold; not full Recall' }
+    source_read_validation = [ordered]@{ authorized_read_count = 0; metadata_cache_entries = 0; metadata_cache_bytes = 0; max_cache_entries = 300; max_cache_bytes = 524288 }
     question_results = @()
     incremental_runs = @(
         [ordered]@{ changed_file_count = 1; status = 'unknown'; input = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }; output = [ordered]@{ source_id = $null; snapshot_id = $null; commit_sha = $null; selected_files = $null; selected_bytes = $null; phase_duration_ms = $null; peak_memory_bytes = $null; estimated_input_tokens = $null; actual_input_tokens = $null } },
@@ -93,6 +98,53 @@ function Get-NormalizedFileHash([string] $Content, [string] $Mode) {
     if ($Mode -eq 'sha256_utf8_lf') { $hashContent = [regex]::Replace($hashContent, "\r\n?", "`n") }
     $bytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($hashContent)
     return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+function Get-SourceLineCount([string] $Content) {
+    if ([string]::IsNullOrEmpty($Content)) { return 0L }
+    $lineCount = [long][regex]::Matches($Content, "\r\n|\n|\r").Count
+    $lastCharacter = $Content[$Content.Length - 1]
+    if ($lastCharacter -ne "`r" -and $lastCharacter -ne "`n") { $lineCount++ }
+    return $lineCount
+}
+
+function Add-ValidatedSourceMetadata($Metadata) {
+    $identity = [ordered]@{
+        knowledge_id = $Metadata.knowledge_id
+        source_id = $Metadata.source_id
+        snapshot_id = $Metadata.snapshot_id
+        file_version_id = $Metadata.file_version_id
+        commit_sha = $Metadata.commit_sha
+        path = $Metadata.path
+    }
+    $identityJson = $identity | ConvertTo-Json -Compress -Depth 5
+    $cacheKey = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($identityJson))).ToLowerInvariant()
+    $cacheEntry = [ordered]@{
+        knowledge_id = $Metadata.knowledge_id
+        source_id = $Metadata.source_id
+        snapshot_id = $Metadata.snapshot_id
+        file_version_id = $Metadata.file_version_id
+        commit_sha = $Metadata.commit_sha
+        path = $Metadata.path
+        source_sha256 = $Metadata.source_sha256
+        line_count = $Metadata.line_count
+    }
+    $entryBytes = [System.Text.UTF8Encoding]::new($false).GetByteCount(($cacheEntry | ConvertTo-Json -Compress -Depth 5))
+    if ($script:validatedSourceMetadataCache.ContainsKey($cacheKey)) {
+        $existing = $script:validatedSourceMetadataCache[$cacheKey]
+        if ((Get-Field $existing 'source_sha256') -cne $Metadata.source_sha256 -or (Get-Field $existing 'line_count') -ne $Metadata.line_count) {
+            Stop-Acceptance 'source_identity_changed' 'The same immutable source-file identity produced different raw content metadata during this run.'
+        }
+        return $existing
+    }
+    if ($script:validatedSourceMetadataCache.Count -ge 300 -or $script:validatedSourceMetadataCacheBytes + $entryBytes -gt 524288) {
+        Stop-Acceptance 'source_metadata_cache_limit' 'Verified source metadata exceeded the 300-entry or 512 KiB in-memory cache limit.'
+    }
+    $script:validatedSourceMetadataCache.Add($cacheKey, $cacheEntry)
+    $script:validatedSourceMetadataCacheBytes += $entryBytes
+    $script:report.source_read_validation.metadata_cache_entries = $script:validatedSourceMetadataCache.Count
+    $script:report.source_read_validation.metadata_cache_bytes = $script:validatedSourceMetadataCacheBytes
+    return $cacheEntry
 }
 
 function Get-RepositoryMapping([string] $RepositoryId) {
@@ -370,6 +422,8 @@ function Read-AuthorizedSourceFile([string] $KnowledgeId, [string] $VersionId) {
     $escapedKnowledge = [Uri]::EscapeDataString($KnowledgeId)
     $escapedVersion = [Uri]::EscapeDataString($VersionId)
     $path = "/knowledge/$escapedKnowledge/source?version_id=$escapedVersion"
+    $script:authorizedSourceReadCount++
+    $script:report.source_read_validation.authorized_read_count = $script:authorizedSourceReadCount
     $response = Invoke-AcceptanceHttp 'GET' $path
     if ([int]$response.StatusCode -ne 200) {
         $readStatus = if ([int]$response.StatusCode -in @(401, 403)) { 'denied' } elseif ([int]$response.StatusCode -eq 404) { 'unavailable' } else { 'http_error' }
@@ -407,6 +461,7 @@ function Invoke-QuestionSearch($Question) {
         $commit = [string](Get-Field $metadata 'commit_sha')
         $path = [string](Get-Field $metadata 'source_path')
         $versionId = [string](Get-Field $metadata 'source_file_version_id')
+        $knowledgeId = [string](Get-Field $hit 'knowledge_id')
         if ($sourceId -notin $sourceIds -or -not $script:publishedBySource.ContainsKey($sourceId)) {
             Stop-Acceptance 'search_scope_violation' "Question '$questionId' returned evidence from a source outside its repository mapping."
         }
@@ -414,16 +469,23 @@ function Invoke-QuestionSearch($Question) {
         if ($snapshotId -ne (Get-Field $snapshotRecord.snapshot 'id') -or $commit -ne (Get-Field $snapshotRecord.snapshot 'commit_sha')) {
             Stop-Acceptance 'search_scope_violation' "Question '$questionId' returned evidence outside the selected published source snapshot."
         }
+        if (-not $knowledgeId -or $knowledgeId.Length -gt 128 -or -not $versionId -or $versionId.Length -gt 128 -or
+            -not $path -or $path.Length -gt 1024 -or $path.StartsWith('/') -or $path.Contains('\') -or
+            $path.Split('/') -contains '..' -or $path -match '[\r\n\x00]') {
+            Stop-Acceptance 'search_hit_identity_invalid' "Question '$questionId' returned an incomplete or unsafe fixed-version source identity."
+        }
         $range = Get-ChunkSourceRange $hit
-        $start = $null
-        $end = $null
-        if ($null -ne $range) {
-            $start = Get-Field $range 'start_line'
-            $end = Get-Field $range 'end_line'
+        $start = 0L
+        $end = 0L
+        if ($null -eq $range -or
+            -not [long]::TryParse([string](Get-Field $range 'start_line'), [ref]$start) -or
+            -not [long]::TryParse([string](Get-Field $range 'end_line'), [ref]$end) -or
+            $start -lt 1 -or $end -lt $start -or $end -gt 16777216) {
+            Stop-Acceptance 'search_hit_range_invalid' "Question '$questionId' returned an invalid source line range."
         }
         $row = [ordered]@{
             rank = $rank
-            knowledge_id = Get-Field $hit 'knowledge_id'
+            knowledge_id = $knowledgeId
             source_id = $sourceId
             snapshot_id = $snapshotId
             commit_sha = $commit
@@ -434,8 +496,9 @@ function Invoke-QuestionSearch($Question) {
             score = Get-Field $hit 'score'
             match_type = Get-Field $hit 'match_type'
             verified_source_sha256 = $null
+            source_line_count = $null
             matched_normalized_sha256 = $null
-            authorized_read_status = 'not_needed'
+            authorized_read_status = 'pending'
             matched_expected_evidence_ids = @()
         }
         $matchingExpected = [System.Collections.Generic.List[object]]::new()
@@ -453,40 +516,61 @@ function Invoke-QuestionSearch($Question) {
                 $matchingExpected.Add($expectedItem)
             }
         }
-        if ($matchingExpected.Count -gt 0) {
-            $knowledgeId = [string](Get-Field $hit 'knowledge_id')
-            $read = Read-AuthorizedSourceFile $knowledgeId $versionId
-            $row.authorized_read_status = $read.status
-            if ($read.status -eq 'read') {
-                $view = $read.view
-                $content = [string](Get-Field $view 'content')
-                $actualRawHash = Get-NormalizedFileHash $content 'raw_utf8'
-                $storedHash = ([string](Get-Field $view 'sha256')).ToLowerInvariant()
-                if ($actualRawHash -ne $storedHash -or
-                    (Get-Field $view 'knowledge_id') -ne $knowledgeId -or
-                    (Get-Field $view 'data_source_id') -ne $sourceId -or
-                    (Get-Field $view 'snapshot_id') -ne $snapshotId -or
-                    (Get-Field $view 'file_version_id') -ne $versionId -or
-                    (Get-Field $view 'commit_sha') -ne $commit -or
-                    (Get-Field $view 'path') -cne $path) {
-                    Stop-Acceptance 'source_read_identity_mismatch' "Question '$questionId' source read did not match its immutable search evidence identity."
-                }
-                $row.verified_source_sha256 = $actualRawHash
-                $parserVersion = [string](Get-Field $view 'parser_version')
-                if ($parserVersion -and -not $script:report.parser.parser_version) { $script:report.parser.parser_version = $parserVersion }
-                foreach ($expectedItem in $matchingExpected) {
-                    $evidenceId = [string](Get-Field $expectedItem 'evidence_id')
-                    $normalizedHash = Get-NormalizedFileHash $content ([string](Get-Field $expectedItem 'hash_mode'))
-                    if ($normalizedHash -ceq [string](Get-Field $expectedItem 'sha256')) {
-                        $evidenceSatisfied[$evidenceId] = $true
-                        $matchedEvidenceIds.Add($evidenceId)
-                        $row.matched_normalized_sha256 = $normalizedHash
-                        $row.matched_expected_evidence_ids += $evidenceId
-                    }
-                }
+
+        # Every returned top-10 row must pass a normal authorized, fixed-version read,
+        # including rows that cannot match any gold evidence span.
+        $read = Read-AuthorizedSourceFile $knowledgeId $versionId
+        if ($read.status -ne 'read') {
+            Stop-Acceptance 'source_hit_read_failed' "Question '$questionId' top-10 hit failed its authorized fixed-version source read."
+        }
+        $view = $read.view
+        $content = [string](Get-Field $view 'content')
+        $actualRawHash = Get-NormalizedFileHash $content 'raw_utf8'
+        $storedHash = ([string](Get-Field $view 'sha256')).ToLowerInvariant()
+        if ($actualRawHash -ne $storedHash -or
+            (Get-Field $view 'knowledge_id') -ne $knowledgeId -or
+            (Get-Field $view 'data_source_id') -ne $sourceId -or
+            (Get-Field $view 'snapshot_id') -ne $snapshotId -or
+            (Get-Field $view 'file_version_id') -ne $versionId -or
+            (Get-Field $view 'commit_sha') -ne $commit -or
+            (Get-Field $view 'path') -cne $path) {
+            Stop-Acceptance 'source_read_identity_mismatch' "Question '$questionId' source read did not match its immutable search evidence identity."
+        }
+        $lineCount = Get-SourceLineCount $content
+        if ($end -gt $lineCount) {
+            Stop-Acceptance 'search_hit_range_invalid' "Question '$questionId' returned a source line range beyond the authorized file's line count."
+        }
+        $verifiedMetadata = Add-ValidatedSourceMetadata ([ordered]@{
+            knowledge_id = $knowledgeId
+            source_id = $sourceId
+            snapshot_id = $snapshotId
+            file_version_id = $versionId
+            commit_sha = $commit
+            path = $path
+            source_sha256 = $actualRawHash
+            line_count = $lineCount
+        })
+        $row.verified_source_sha256 = Get-Field $verifiedMetadata 'source_sha256'
+        $row.source_line_count = Get-Field $verifiedMetadata 'line_count'
+        $row.authorized_read_status = 'read'
+
+        $parserVersion = [string](Get-Field $view 'parser_version')
+        if ($parserVersion -and -not $script:report.parser.parser_version) { $script:report.parser.parser_version = $parserVersion }
+        foreach ($expectedItem in $matchingExpected) {
+            $evidenceId = [string](Get-Field $expectedItem 'evidence_id')
+            $normalizedHash = Get-NormalizedFileHash $content ([string](Get-Field $expectedItem 'hash_mode'))
+            if ($normalizedHash -ceq [string](Get-Field $expectedItem 'sha256')) {
+                $evidenceSatisfied[$evidenceId] = $true
+                $matchedEvidenceIds.Add($evidenceId)
+                $row.matched_normalized_sha256 = $normalizedHash
+                $row.matched_expected_evidence_ids += $evidenceId
             }
         }
         $evidence.Add($row)
+        $content = $null
+        $view = $null
+        $read = $null
+        $verifiedMetadata = $null
     }
     $queryDigest = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($query))).ToLowerInvariant()
     $allExpectedFound = $true
@@ -623,7 +707,7 @@ try {
             (Get-Field $mappingManifest 'knowledge_base_id') -ne $KnowledgeBaseId) {
             Stop-Acceptance 'source_mapping_invalid' 'Repository source mapping must be schema v1, explicitly approved, and scoped to the selected knowledge base.'
         }
-        $mappingEntries = @(Get-Field $mappingManifest 'repositories')
+        $mappingEntries = @((Get-Field $mappingManifest 'repositories') | Where-Object { $null -ne $_ })
         if ($mappingEntries.Count -eq 0) {
             $mappingObject = Get-Field $mappingManifest 'mappings'
             if ($mappingObject -is [System.Collections.IDictionary]) {
@@ -670,7 +754,7 @@ try {
         $query = [string](Get-Field $question 'query')
         if (-not $query) { $query = [string](Get-Field $question 'question') }
         if ($category -eq 'business_flow') { $category = 'business_chain' }
-        $evidenceItems = @(Get-Field $question 'evidence')
+        $evidenceItems = @((Get-Field $question 'evidence') | Where-Object { $null -ne $_ })
         if ($evidenceItems.Count -eq 0) {
             $expected = Get-Field $question 'expected'
             if ($null -ne $expected) { $evidenceItems = @($expected) }
@@ -701,10 +785,17 @@ try {
             if ($mapping -and (Get-Field $mapping 'knowledge_base_id') -and (Get-Field $mapping 'knowledge_base_id') -ne $KnowledgeBaseId) { Stop-Acceptance 'source_mapping_scope_mismatch' "Question '$id' repository mapping is outside the selected knowledge base." }
             if ($mapping -and (Get-Field $mapping 'source_id') -ne $sourceId) { Stop-Acceptance 'source_mapping_scope_mismatch' "Question '$id' evidence source differs from its approved repository mapping." }
             $snapshotId = [string](Get-Field $evidence 'snapshot_id')
-            if (-not $snapshotId -and $mapping) { $snapshotId = [string](Get-Field $mapping 'snapshot_id') }
+            $snapshotIdExplicit = -not [string]::IsNullOrWhiteSpace($snapshotId)
+            if (-not $snapshotId -and $mapping) {
+                $snapshotId = [string](Get-Field $mapping 'snapshot_id')
+                $snapshotIdExplicit = -not [string]::IsNullOrWhiteSpace($snapshotId)
+            }
             $commit = [string](Get-Field $evidence 'commit_sha')
             if (-not $commit -and $repositoryId -and $repositoryCommits.ContainsKey($repositoryId)) { $commit = [string]$repositoryCommits[$repositoryId] }
             if (-not $commit -and $mapping) { $commit = [string](Get-Field $mapping 'commit_sha') }
+            if ($Publish -and -not $RepositorySourceMap -and -not $commit) {
+                Stop-Acceptance 'publish_commit_required' "Question '$id' evidence must pin a commit before the legacy source is published."
+            }
             $mappingMode = [string](Get-Field $mapping 'hash_mode')
             $evidenceHashMode = [string](Get-Field $evidence 'hash_mode')
             $datasetHashMode = [string](Get-Field $manifest 'hash_mode')
@@ -716,7 +807,7 @@ try {
             if ($mapping -and $commit -cne [string](Get-Field $mapping 'commit_sha')) { Stop-Acceptance 'source_mapping_commit_mismatch' "Question '$id' evidence commit differs from its approved repository mapping." }
             if ($repositoryId -and $repositoryCommits.ContainsKey($repositoryId) -and $commit -cne [string]$repositoryCommits[$repositoryId]) { Stop-Acceptance 'question_commit_mismatch' "Question '$id' evidence commit differs from the question bank's pinned repository commit." }
             $evidenceId = '{0}-{1:D2}' -f $id, $evidenceOrdinal
-            $normalizedEvidence.Add([ordered]@{ evidence_id = $evidenceId; repository = $repositoryId; source_id = $sourceId; snapshot_id = $snapshotId; commit_sha = $commit; path = $path; start_line = [int]$start; end_line = [int]$end; sha256 = $sha.ToLowerInvariant(); hash_mode = $evidenceHashMode; symbol = Get-Field $evidence 'symbol' })
+            $normalizedEvidence.Add([ordered]@{ evidence_id = $evidenceId; repository = $repositoryId; source_id = $sourceId; snapshot_id = $snapshotId; snapshot_id_explicit = $snapshotIdExplicit; commit_sha = $commit; path = $path; start_line = [int]$start; end_line = [int]$end; sha256 = $sha.ToLowerInvariant(); hash_mode = $evidenceHashMode; symbol = Get-Field $evidence 'symbol' })
         }
         $questionIds[$id] = $true
         $categoryCounts[$category]++
@@ -757,6 +848,14 @@ try {
                         Assert-OptionalNonNegativeInteger $phase.Value "incremental.$expectedCount.phase_duration_ms.$($phase.Name)"
                     }
                 }
+                $hasRunMeasurement = $false
+                foreach ($field in @('selected_files', 'selected_bytes', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens')) {
+                    if ($null -ne (Get-Field $run $field)) { $hasRunMeasurement = $true }
+                }
+                if ($null -ne $phases) {
+                    foreach ($phase in $phases.PSObject.Properties) { if ($null -ne $phase.Value) { $hasRunMeasurement = $true } }
+                }
+                if ($runStatus -eq 'measured' -and -not $hasRunMeasurement) { $runStatus = 'unknown' }
                 $incrementalInput = [ordered]@{ model_identifier = $ModelIdentifier; tokenizer = $Tokenizer; context_limit_tokens = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }
                 $incrementalOutput = [ordered]@{ source_id = Get-Field $run 'source_id'; snapshot_id = Get-Field $run 'snapshot_id'; commit_sha = Get-Field $run 'commit_sha'; selected_files = Get-Field $run 'selected_files'; selected_bytes = Get-Field $run 'selected_bytes'; phase_duration_ms = $phases; peak_memory_bytes = Get-Field $run 'peak_memory_bytes'; estimated_input_tokens = Get-Field $run 'estimated_input_tokens'; actual_input_tokens = Get-Field $run 'actual_input_tokens' }
                 $script:report.incremental_runs = @($script:report.incremental_runs | Where-Object { $_.changed_file_count -ne $expectedCount }) + @([ordered]@{ changed_file_count = $expectedCount; status = $runStatus; input = $incrementalInput; output = $incrementalOutput })
@@ -772,6 +871,11 @@ try {
             foreach ($field in @('selected_files', 'selected_bytes', 'elapsed_ms', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens')) {
                 Assert-OptionalNonNegativeInteger (Get-Field $baseline $field) "text_baseline.$field"
             }
+            $hasBaselineMeasurement = $false
+            foreach ($field in @('selected_files', 'selected_bytes', 'elapsed_ms', 'peak_memory_bytes', 'estimated_input_tokens', 'actual_input_tokens')) {
+                if ($null -ne (Get-Field $baseline $field)) { $hasBaselineMeasurement = $true }
+            }
+            if ($baselineStatus -eq 'measured' -and -not $hasBaselineMeasurement) { $baselineStatus = 'unknown' }
             $script:report.text_baseline = [ordered]@{
                 status = $baselineStatus
                 inputs = [ordered]@{ tokenizer = $Tokenizer; model_identifier = $ModelIdentifier; same_budget_input_token_limit = $ConfiguredInputTokenLimit; hardware = $HardwareDescription }
@@ -851,9 +955,19 @@ try {
 
     if ($Publish) {
         if ($RepositorySourceMap -or $script:dataSourceIds.Count -ne 1) { Stop-Acceptance 'publish_scope_requires_review' 'Publish mode supports only one explicitly selected legacy source; mapped representative runs are read-only against their approved target snapshots.' }
+        $publishSourceId = [string]$script:dataSourceIds[0]
+        $publishPreviewCommit = [string](Get-Field $script:previewBySource[$publishSourceId].preview 'commit_sha')
+        foreach ($question in $questions) {
+            foreach ($expectedItem in $question.expected_evidence) {
+                if ((Get-Field $expectedItem 'source_id') -cne $publishSourceId -or
+                    (Get-Field $expectedItem 'commit_sha') -cne $publishPreviewCommit) {
+                    Stop-Acceptance 'publish_input_scope_mismatch' 'Legacy publish requires every evidence source and pinned commit to match the selected source preview.'
+                }
+            }
+        }
         $script:report.publish.status = 'starting'
-        $initialLog = Invoke-AcceptanceJson 'POST' "/datasource/$(Get-PathSegment $script:dataSourceIds[0])/sync" ([ordered]@{})
-        $published = Wait-ForPublishedRun $initialLog $script:dataSourceIds[0]
+        $initialLog = Invoke-AcceptanceJson 'POST' "/datasource/$(Get-PathSegment $publishSourceId)/sync" ([ordered]@{})
+        $published = Wait-ForPublishedRun $initialLog $publishSourceId
         $publishedRuns = @($published)
     } else {
         $script:report.publish.status = 'not_requested'
@@ -882,6 +996,27 @@ try {
         $snapshotReports.Add([ordered]@{ source_id = $sourceId; knowledge_base_id = $KnowledgeBaseId; snapshot_id = $snapshotId; commit_sha = $commitSha; state = Get-Field $snapshot 'state'; previous_snapshot_id = Get-Field $snapshot 'previous_snapshot_id'; file_count = Get-Field $snapshot 'file_count'; telemetry = $published.telemetry })
         if ($published.telemetry) { $publishTelemetry.Add([ordered]@{ source_id = $sourceId; snapshot_id = $snapshotId; telemetry = $published.telemetry }) }
         if (-not $script:report.parser.processing_version) { $script:report.parser.processing_version = Get-Field $snapshot 'processing_version' }
+    }
+    if ($Publish) {
+        $publishSourceId = [string]$script:dataSourceIds[0]
+        $publishedSnapshot = $script:publishedBySource[$publishSourceId].snapshot
+        $actualSnapshotId = [string](Get-Field $publishedSnapshot 'id')
+        $actualCommit = [string](Get-Field $publishedSnapshot 'commit_sha')
+        foreach ($question in $questions) {
+            foreach ($expectedItem in $question.expected_evidence) {
+                if ((Get-Field $expectedItem 'source_id') -cne $publishSourceId -or
+                    (Get-Field $expectedItem 'commit_sha') -cne $actualCommit) {
+                    Stop-Acceptance 'publish_input_scope_mismatch' 'The successful publication does not match the source and commit pinned by legacy evidence.'
+                }
+                if ((Get-Field $expectedItem 'snapshot_id_explicit') -eq $true) {
+                    if ((Get-Field $expectedItem 'snapshot_id') -cne $actualSnapshotId) {
+                        Stop-Acceptance 'publish_snapshot_explicit_mismatch' 'The newly published snapshot differs from an explicitly pinned legacy evidence snapshot; the pin was not rewritten.'
+                    }
+                } else {
+                    $expectedItem.snapshot_id = $actualSnapshotId
+                }
+            }
+        }
     }
     $script:report.scope.snapshots = @($snapshotReports.ToArray())
     if ($snapshotReports.Count -eq 1) {

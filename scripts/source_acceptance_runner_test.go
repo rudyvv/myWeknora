@@ -19,16 +19,20 @@ import (
 const acceptanceTestToken = "test-token-never-print"
 
 type acceptanceFixture struct {
-	wrongSnapshot  bool
-	denySourceRead bool
-	syncTimeout    bool
-	parserNotReady bool
-	chainEvidence  bool
-	sourceContent  string
-	sourceSHA      string
-	logOffsets     []int
-	searchCalls    int
-	agentCalls     int
+	wrongSnapshot     bool
+	denySourceRead    bool
+	syncTimeout       bool
+	parserNotReady    bool
+	chainEvidence     bool
+	badExtraHit       string
+	publishSuccess    bool
+	publishSnapshotID string
+	sourceContent     string
+	sourceSHA         string
+	logOffsets        []int
+	searchCalls       int
+	sourceReadCalls   int
+	agentCalls        int
 }
 
 func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,17 +42,25 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/datasource/source-1":
-		writeFixtureJSON(w, map[string]any{"id": "source-1", "type": "gitlab", "knowledge_base_id": "kb-1", "config": map[string]any{"settings": map[string]any{"content_mode": "source", "projects": []any{map[string]any{"project_id": "42", "paths": []any{"src"}}}}}, "source_lifecycle": map[string]any{"binding_state": "bound", "query_enabled": true}})
+	case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/datasource/source-1" || r.URL.Path == "/api/v1/datasource/source-2"):
+		sourceID := strings.TrimPrefix(r.URL.Path, "/api/v1/datasource/")
+		writeFixtureJSON(w, map[string]any{"id": sourceID, "type": "gitlab", "knowledge_base_id": "kb-1", "config": map[string]any{"settings": map[string]any{"content_mode": "source", "projects": []any{map[string]any{"project_id": "42", "paths": []any{"src"}}}}}, "source_lifecycle": map[string]any{"binding_state": "bound", "query_enabled": true}})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/knowledge-bases/kb-1":
 		writeFixtureJSON(w, map[string]any{"success": true, "data": map[string]any{"id": "kb-1", "embedding_model_id": "model-1"}})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/models/model-1":
 		writeFixtureJSON(w, map[string]any{"success": true, "data": map[string]any{"id": "model-1", "type": "Embedding", "parameters": map[string]any{"embedding_parameters": map[string]any{"tokenizer": "cl100k_base", "max_input_tokens": 8192}}}})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/datasource/source-1/sync":
-		writeFixtureJSON(w, map[string]any{"id": "log-1", "data_source_id": "source-1", "status": "running"})
+		logID := "log-1"
+		if f.publishSuccess {
+			logID = "sync-new-log"
+		}
+		writeFixtureJSON(w, map[string]any{"id": logID, "data_source_id": "source-1", "status": "running"})
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/datasource/logs/sync-new-log" && f.publishSuccess:
+		writeFixtureJSON(w, publishedTestLogAt("source-1", "sync-new-log", f.publishSnapshotID))
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/datasource/logs/log-1" && f.syncTimeout:
 		writeFixtureJSON(w, map[string]any{"id": "log-1", "data_source_id": "source-1", "status": "running"})
-	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/datasource/source-1/source-preview":
+	case r.Method == http.MethodPost && (r.URL.Path == "/api/v1/datasource/source-1/source-preview" || r.URL.Path == "/api/v1/datasource/source-2/source-preview"):
+		sourceID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/datasource/"), "/source-preview")
 		var request map[string]any
 		if json.NewDecoder(r.Body).Decode(&request) != nil {
 			http.Error(w, `{"error":"invalid test body"}`, http.StatusBadRequest)
@@ -60,12 +72,14 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		parserReady, canSync := !f.parserNotReady, !f.parserNotReady
+		_, commit, _, _ := fixtureSourceIdentity(sourceID)
 		writeFixtureJSON(w, map[string]any{"data": map[string]any{
-			"project_id": "42", "branch": "main", "commit_sha": "commit-1", "rules_version": "rules-v1", "can_sync": canSync,
+			"project_id": "42", "branch": "main", "commit_sha": commit, "rules_version": "rules-v1", "can_sync": canSync,
 			"files":  []any{map[string]any{"path": "src/Foo.java", "blob_sha": "blob-1", "size": len(testSourceContent), "status": "included"}},
 			"checks": []any{map[string]any{"name": "parser", "ready": parserReady, "message": "ready"}, map[string]any{"name": "indexes", "ready": true, "message": "ready"}, map[string]any{"name": "source_pipeline", "ready": canSync, "message": "ready"}},
 		}})
-	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/datasource/source-1/logs":
+	case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/datasource/source-1/logs" || r.URL.Path == "/api/v1/datasource/source-2/logs"):
+		sourceID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/datasource/"), "/logs")
 		offset, _ := url.QueryUnescape(r.URL.Query().Get("offset"))
 		var value int
 		_, _ = fmt.Sscan(offset, &value)
@@ -77,7 +91,7 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			writeFixtureJSON(w, logs)
 		} else {
-			writeFixtureJSON(w, []any{publishedTestLog()})
+			writeFixtureJSON(w, []any{publishedTestLog(sourceID)})
 		}
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/knowledge-bases/kb-1/hybrid-search":
 		var request map[string]any
@@ -86,7 +100,9 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ids, _ := request["source_ids"].([]any)
-		if len(ids) != 1 || ids[0] != "source-1" || request["match_count"] != float64(10) {
+		isSingleSource := len(ids) == 1 && ids[0] == "source-1"
+		isCrossRepository := len(ids) == 2 && ids[0] == "source-1" && ids[1] == "source-2"
+		if (!isSingleSource && !isCrossRepository) || request["match_count"] != float64(10) {
 			http.Error(w, `{"error":"search scope or top-k was not explicit"}`, http.StatusBadRequest)
 			return
 		}
@@ -100,31 +116,63 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// The first hit is deliberately from a different publication.
 				}
 			}
-			if f.chainEvidence && i == 1 {
+			sourceID := "source-1"
+			if isCrossRepository && f.chainEvidence && i == 1 {
 				path, version, knowledgeID, startLine, endLine = "src/Foo.java", "version-1", "file-1", 3, 3
+				sourceID = "source-2"
 			}
-			snapshotID := "snapshot-1"
+			snapshotID, commit, _, _ := fixtureSourceIdentity(sourceID)
+			if sourceID == "source-1" && f.publishSnapshotID != "" {
+				snapshotID = f.publishSnapshotID
+			}
 			if f.wrongSnapshot && i == 0 {
 				snapshotID = "snapshot-old"
 			}
+			if i == 1 {
+				switch f.badExtraHit {
+				case "snapshot":
+					snapshotID = "snapshot-staging"
+				case "version":
+					version = "version-staging"
+				case "range":
+					startLine, endLine = 99, 100
+				}
+			}
+			if sourceID == "source-2" {
+				version, knowledgeID = "version-2", "file-2"
+			}
 			hits[i] = map[string]any{
 				"knowledge_id":   knowledgeID,
-				"metadata":       map[string]string{"datasource_id": "source-1", "source_snapshot_id": snapshotID, "commit_sha": "commit-1", "source_path": path, "source_file_version_id": version},
+				"metadata":       map[string]string{"datasource_id": sourceID, "source_snapshot_id": snapshotID, "commit_sha": commit, "source_path": path, "source_file_version_id": version},
 				"chunk_metadata": map[string]any{"source": map[string]any{"range": map[string]any{"start_line": startLine, "end_line": endLine}}},
 			}
 		}
 		writeFixtureJSON(w, map[string]any{"success": true, "data": hits})
-	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/knowledge/file-1/source":
+	case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/knowledge/file-1/source" || r.URL.Path == "/api/v1/knowledge/file-2/source" || r.URL.Path == "/api/v1/knowledge/file-other/source"):
+		f.sourceReadCalls++
 		if f.denySourceRead {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"sensitive-error-marker"}`))
 			return
 		}
-		if r.URL.Query().Get("version_id") != "version-1" {
-			http.Error(w, `{"error":"version was not fixed"}`, http.StatusBadRequest)
+		sourceID, knowledgeID, versionID, path := "source-1", "file-1", "version-1", "src/Foo.java"
+		if r.URL.Path == "/api/v1/knowledge/file-2/source" {
+			sourceID, knowledgeID, versionID = "source-2", "file-2", "version-2"
+		} else if r.URL.Path == "/api/v1/knowledge/file-other/source" {
+			knowledgeID, versionID, path = "file-other", "version-other", "src/Other.java"
+		}
+		if r.URL.Query().Get("version_id") != versionID {
+			http.Error(w, `{"error":"version is not a published member"}`, http.StatusNotFound)
 			return
 		}
-		content, digest := testSourceContent, testSourceSHA
+		snapshotID, commit, _, _ := fixtureSourceIdentity(sourceID)
+		if sourceID == "source-1" && f.publishSnapshotID != "" {
+			snapshotID = f.publishSnapshotID
+		}
+		content, digest := otherSourceContent, otherSourceSHA
+		if path == "src/Foo.java" {
+			content, digest = testSourceContent, testSourceSHA
+		}
 		if f.sourceContent != "" {
 			content = f.sourceContent
 		}
@@ -132,7 +180,7 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			digest = f.sourceSHA
 		}
 		writeFixtureJSON(w, map[string]any{"success": true, "data": map[string]any{
-			"knowledge_id": "file-1", "data_source_id": "source-1", "snapshot_id": "snapshot-1", "file_version_id": "version-1", "commit_sha": "commit-1", "path": "src/Foo.java", "sha256": digest, "parser_version": "source-pack-test", "content": content,
+			"knowledge_id": knowledgeID, "data_source_id": sourceID, "snapshot_id": snapshotID, "file_version_id": versionID, "commit_sha": commit, "path": path, "sha256": digest, "parser_version": "source-pack-test", "content": content,
 		}})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agent-chat/session-1":
 		f.agentCalls++
@@ -149,17 +197,44 @@ func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 const testSourceContent = "class Foo {\n void getPushSchedule() {}\n}\n"
+const otherSourceContent = "package Other {\n func fallback() {}\n}\n"
 
 var testSourceSHA = func() string {
 	digest := sha256.Sum256([]byte(testSourceContent))
 	return hex.EncodeToString(digest[:])
 }()
 
-func publishedTestLog() map[string]any {
+var otherSourceSHA = func() string {
+	digest := sha256.Sum256([]byte(otherSourceContent))
+	return hex.EncodeToString(digest[:])
+}()
+
+func fixtureSourceIdentity(sourceID string) (snapshotID, commit, knowledgeID, versionID string) {
+	if sourceID == "source-2" {
+		return "snapshot-2", "commit-2", "file-2", "version-2"
+	}
+	return "snapshot-1", "commit-1", "file-1", "version-1"
+}
+
+func publishedTestLog(sourceID string) map[string]any {
+	snapshotID, _, _, _ := fixtureSourceIdentity(sourceID)
+	logID := "log-1"
+	if sourceID == "source-2" {
+		logID = "log-2"
+	}
+	return publishedTestLogAt(sourceID, logID, snapshotID)
+}
+
+func publishedTestLogAt(sourceID, logID, snapshotID string) map[string]any {
+	_, commit, _, _ := fixtureSourceIdentity(sourceID)
+	previousSnapshotID := "snapshot-0"
+	if sourceID == "source-2" {
+		previousSnapshotID = "snapshot-1"
+	}
 	return map[string]any{
-		"id": "log-1", "status": "success", "data_source_id": "source-1",
+		"id": logID, "status": "success", "data_source_id": sourceID,
 		"result": map[string]any{"source": map[string]any{"snapshot": map[string]any{
-			"id": "snapshot-1", "data_source_id": "source-1", "knowledge_base_id": "kb-1", "commit_sha": "commit-1", "state": "published", "previous_snapshot_id": "snapshot-0", "file_count": 1,
+			"id": snapshotID, "data_source_id": sourceID, "knowledge_base_id": "kb-1", "commit_sha": commit, "state": "published", "previous_snapshot_id": previousSnapshotID, "file_count": 1,
 		}, "telemetry": map[string]any{
 			"schema_version": 1, "selected_bytes": len(testSourceContent),
 			"phase_duration_ms": map[string]int{"fetching": 12, "parsing": 34, "indexing": 56, "publishing": 7, "unknown_phase": 99},
@@ -186,7 +261,7 @@ func TestSourceAcceptanceRunnerChecksParserPublicationScopeAndAuthorizedEvidence
 	if !strings.Contains(report, `"schema_version": 1`) || !strings.Contains(report, `"parser_version"`) || !strings.Contains(report, `"ready": true`) || !strings.Contains(report, `"snapshot_id": "snapshot-1"`) || !strings.Contains(report, `"matched_count": 30`) || !strings.Contains(report, `"status": "matched"`) {
 		t.Fatalf("report is missing required v1 evidence fields: %s", report)
 	}
-	if strings.Contains(report, testSourceContent) || strings.Contains(result.Stdout+result.Stderr+report, acceptanceTestToken) {
+	if strings.Contains(report, testSourceContent) || strings.Contains(report, otherSourceContent) || strings.Contains(result.Stdout+result.Stderr+report, acceptanceTestToken) {
 		t.Fatal("runner exposed source text or the process credential")
 	}
 	if strings.Contains(report, "telemetry-secret-marker") || strings.Contains(report, "unknown_phase") || !strings.Contains(report, `"fetching": 12`) {
@@ -194,6 +269,28 @@ func TestSourceAcceptanceRunnerChecksParserPublicationScopeAndAuthorizedEvidence
 	}
 	if fixture.searchCalls != 30 || fixture.agentCalls != 1 {
 		t.Fatalf("expected 30 scoped searches and one UI agent request, got searches=%d agent=%d", fixture.searchCalls, fixture.agentCalls)
+	}
+	if fixture.sourceReadCalls != 300 {
+		t.Fatalf("expected a fixed-version authorized source read for all 300 top-10 hits, got %d", fixture.sourceReadCalls)
+	}
+	var reportEnvelope struct {
+		SourceReadValidation struct {
+			AuthorizedReadCount  int `json:"authorized_read_count"`
+			MetadataCacheEntries int `json:"metadata_cache_entries"`
+			MetadataCacheBytes   int `json:"metadata_cache_bytes"`
+			MaxCacheEntries      int `json:"max_cache_entries"`
+			MaxCacheBytes        int `json:"max_cache_bytes"`
+		} `json:"source_read_validation"`
+	}
+	if err := json.Unmarshal([]byte(report), &reportEnvelope); err != nil {
+		t.Fatalf("could not decode source-read cache bounds: %v", err)
+	}
+	readValidation := reportEnvelope.SourceReadValidation
+	if readValidation.AuthorizedReadCount != 300 || readValidation.MetadataCacheEntries > 300 || readValidation.MetadataCacheBytes > 524288 || readValidation.MaxCacheEntries != 300 || readValidation.MaxCacheBytes != 524288 {
+		t.Fatalf("source validation cache exceeded or misreported its metadata-only bounds: %+v", readValidation)
+	}
+	if !strings.Contains(report, `"t22_acceptance_status": "unknown"`) {
+		t.Fatal("a completed retrieval run incorrectly decided the whole T22 gate")
 	}
 	if len(fixture.logOffsets) != 2 || fixture.logOffsets[0] != 0 || fixture.logOffsets[1] != 100 {
 		t.Fatalf("published-run lookup did not paginate logs: offsets=%v", fixture.logOffsets)
@@ -231,6 +328,108 @@ func TestSourceAcceptanceRunnerDoesNotEchoDeniedReadDetails(t *testing.T) {
 	}
 }
 
+func TestSourceAcceptanceRunnerFailsClosedOnAnyInvalidNonGoldTop10Hit(t *testing.T) {
+	tests := []struct {
+		name          string
+		badHit        string
+		wantErrorCode string
+		wantReads     int
+	}{
+		{name: "staging snapshot", badHit: "snapshot", wantErrorCode: "search_scope_violation", wantReads: 1},
+		{name: "staging file version", badHit: "version", wantErrorCode: "source_hit_read_failed", wantReads: 2},
+		{name: "out of range", badHit: "range", wantErrorCode: "search_hit_range_invalid", wantReads: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &acceptanceFixture{badExtraHit: test.badHit}
+			server := httptest.NewServer(fixture)
+			defer server.Close()
+
+			result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken)
+			if result.ExitCode == 0 || !strings.Contains(report, test.wantErrorCode) {
+				t.Fatalf("runner accepted an invalid non-gold top-10 hit: exit=%d want=%s report=%s", result.ExitCode, test.wantErrorCode, report)
+			}
+			if fixture.sourceReadCalls != test.wantReads {
+				t.Fatalf("unexpected authorized-read count before fail-closed stop: got=%d want=%d", fixture.sourceReadCalls, test.wantReads)
+			}
+		})
+	}
+}
+
+func TestSourceAcceptanceRunnerKeepsWholeT22StatusUnknown(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken)
+	if result.ExitCode != 0 {
+		t.Fatalf("retrieval fixture failed: exit=%d report=%s", result.ExitCode, report)
+	}
+	var document struct {
+		Status              string `json:"status"`
+		T22AcceptanceStatus string `json:"t22_acceptance_status"`
+		IncrementalRuns     []struct {
+			Status string `json:"status"`
+		} `json:"incremental_runs"`
+		TextBaseline struct {
+			Status string `json:"status"`
+		} `json:"text_baseline"`
+	}
+	if err := json.Unmarshal([]byte(report), &document); err != nil {
+		t.Fatalf("could not decode runner report: %v", err)
+	}
+	if document.Status != "completed" || document.T22AcceptanceStatus != "unknown" || len(document.IncrementalRuns) != 3 || document.TextBaseline.Status != "unknown" {
+		t.Fatalf("retrieval completion was conflated with the whole T22 gate or missing measurements: %+v", document)
+	}
+	for _, run := range document.IncrementalRuns {
+		if run.Status != "unknown" {
+			t.Fatalf("missing incremental data was reported as %q", run.Status)
+		}
+	}
+}
+
+func TestSourceAcceptanceRunnerDowngradesEmptyMeasuredRecordsToUnknown(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	measurement := map[string]any{
+		"schema_version": 1,
+		"incremental_runs": []any{map[string]any{
+			"changed_file_count": 1, "status": "measured", "model_identifier": "model-1", "tokenizer": "cl100k_base", "context_limit_tokens": 8192,
+			"selected_files": nil, "selected_bytes": nil, "phase_duration_ms": nil, "peak_memory_bytes": nil, "estimated_input_tokens": nil, "actual_input_tokens": nil,
+		}},
+		"text_baseline": map[string]any{
+			"status": "measured", "model_identifier": "model-1", "tokenizer": "cl100k_base", "budget_tokens": 8192,
+			"selected_files": nil, "selected_bytes": nil, "elapsed_ms": nil, "peak_memory_bytes": nil, "estimated_input_tokens": nil, "actual_input_tokens": nil,
+		},
+	}
+	measurementPath := writeAcceptanceJSON(t, "measurements.json", measurement)
+	result, report := runSourceAcceptance(t, server.URL, acceptanceTestToken, "-MeasurementsFile", measurementPath)
+	if result.ExitCode != 0 {
+		t.Fatalf("empty optional measurements should remain unknown without failing retrieval: exit=%d report=%s", result.ExitCode, report)
+	}
+	var document struct {
+		T22AcceptanceStatus string `json:"t22_acceptance_status"`
+		IncrementalRuns     []struct {
+			ChangedFileCount int    `json:"changed_file_count"`
+			Status           string `json:"status"`
+		} `json:"incremental_runs"`
+		TextBaseline struct {
+			Status string `json:"status"`
+		} `json:"text_baseline"`
+	}
+	if err := json.Unmarshal([]byte(report), &document); err != nil {
+		t.Fatalf("could not decode measurement report: %v", err)
+	}
+	if document.T22AcceptanceStatus != "unknown" || document.TextBaseline.Status != "unknown" {
+		t.Fatalf("empty measurements were treated as complete evidence: %+v", document)
+	}
+	for _, run := range document.IncrementalRuns {
+		if run.Status != "unknown" {
+			t.Fatalf("%d-file run missing measured values was reported as %q", run.ChangedFileCount, run.Status)
+		}
+	}
+}
+
 func TestSourceAcceptanceRunnerBoundsPublishPolling(t *testing.T) {
 	fixture := &acceptanceFixture{syncTimeout: true}
 	server := httptest.NewServer(fixture)
@@ -242,6 +441,28 @@ func TestSourceAcceptanceRunnerBoundsPublishPolling(t *testing.T) {
 	}
 	if !strings.Contains(report, "sync_timeout") || strings.Contains(result.Stdout+result.Stderr+report, acceptanceTestToken) {
 		t.Fatalf("publish timeout was not safely reported: stdout=%s stderr=%s report=%s", result.Stdout, result.Stderr, report)
+	}
+}
+
+func TestSourceAcceptanceRunnerBindsMissingLegacySnapshotToFreshPublish(t *testing.T) {
+	fixture := &acceptanceFixture{publishSuccess: true, publishSnapshotID: "snapshot-new"}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	manifest := legacyQuestionManifest("")
+	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, nil, "-Publish", "-PollIntervalSeconds", "1")
+	if result.ExitCode != 0 || !strings.Contains(report, `"sync_log_id": "sync-new-log"`) || !strings.Contains(report, `"snapshot_id": "snapshot-new"`) || !strings.Contains(report, `"matched_count": 30`) {
+		t.Fatalf("legacy evidence with an omitted snapshot did not bind to the verified fresh publication: exit=%d report=%s", result.ExitCode, report)
+	}
+}
+
+func TestSourceAcceptanceRunnerDoesNotRewriteExplicitLegacySnapshot(t *testing.T) {
+	fixture := &acceptanceFixture{publishSuccess: true, publishSnapshotID: "snapshot-new"}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	manifest := legacyQuestionManifest("snapshot-1")
+	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, nil, "-Publish", "-PollIntervalSeconds", "1")
+	if result.ExitCode == 0 || !strings.Contains(report, "publish_snapshot_explicit_mismatch") || fixture.searchCalls != 0 {
+		t.Fatalf("runner silently replaced an explicit legacy snapshot with the fresh publication: exit=%d searches=%d report=%s", result.ExitCode, fixture.searchCalls, report)
 	}
 }
 
@@ -260,15 +481,15 @@ func TestSourceAcceptanceRunnerAcceptsGoldQuestionShapeAndNormalizedLFHash(t *te
 		"knowledge_base_id": "kb-1",
 		"repositories": []any{
 			map[string]any{"repository_id": "evip_mobile", "source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1", "hash_mode": "sha256_utf8_lf"},
-			map[string]any{"repository_id": "nsb", "source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1", "hash_mode": "sha256_utf8_lf"},
+			map[string]any{"repository_id": "nsb", "source_id": "source-2", "snapshot_id": "snapshot-2", "commit_sha": "commit-2", "hash_mode": "sha256_utf8_lf"},
 		},
 	}
 	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap)
 	if result.ExitCode != 0 {
 		t.Fatalf("gold-shaped multi-evidence run failed: exit=%d stdout=%s stderr=%s report=%s", result.ExitCode, result.Stdout, result.Stderr, report)
 	}
-	if !strings.Contains(report, `"category": "business_chain"`) || !strings.Contains(report, `"question_id": "BC-01"`) || !strings.Contains(report, `"matched_count": 30`) || !strings.Contains(report, `"hash_mode": "sha256_utf8_lf"`) {
-		t.Fatalf("runner did not preserve the gold bank category, evidence mode, or normalized-LF result: %s", report)
+	if !strings.Contains(report, `"category": "business_chain"`) || !strings.Contains(report, `"question_id": "BC-01"`) || !strings.Contains(report, `"matched_count": 30`) || !strings.Contains(report, `"hash_mode": "sha256_utf8_lf"`) || !strings.Contains(report, `"source_id": "source-2"`) || !strings.Contains(report, `"snapshot_id": "snapshot-2"`) {
+		t.Fatalf("runner did not preserve the gold bank category, normalized-LF result, or distinct second-source snapshot evidence: %s", report)
 	}
 }
 
@@ -281,7 +502,7 @@ func TestSourceAcceptanceRunnerRequiresEveryCrossRepositoryEvidenceSpan(t *testi
 		"schema_version": 1, "status": "approved", "knowledge_base_id": "kb-1",
 		"mappings": map[string]any{
 			"evip_mobile": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
-			"nsb":         map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+			"nsb":         map[string]any{"source_id": "source-2", "snapshot_id": "snapshot-2", "commit_sha": "commit-2"},
 		},
 	}
 	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap)
@@ -345,7 +566,7 @@ func goldShapedQuestionManifest(twoEvidence bool) map[string]any {
 		"hash_mode":      "sha256_utf8_lf",
 		"repositories": []any{
 			map[string]any{"id": "evip_mobile", "kind": "representative_repo", "commit": "commit-1"},
-			map[string]any{"id": "nsb", "kind": "representative_repo", "commit": "commit-1"},
+			map[string]any{"id": "nsb", "kind": "representative_repo", "commit": "commit-2"},
 		},
 		"questions": make([]any, 0, 30),
 	}
@@ -383,6 +604,11 @@ type commandResult struct {
 
 func runSourceAcceptance(t *testing.T, baseURL, token string, extra ...string) (commandResult, string) {
 	t.Helper()
+	questions := legacyQuestionManifest("snapshot-1")
+	return runSourceAcceptanceWithQuestions(t, baseURL, token, questions, nil, extra...)
+}
+
+func legacyQuestionManifest(snapshotID string) map[string]any {
 	questions := map[string]any{"schema_version": 1, "status": "human_confirmed", "hash_mode": "sha256_utf8_lf", "questions": make([]any, 0, 30)}
 	for i := 0; i < 30; i++ {
 		category := "symbol_path"
@@ -391,12 +617,29 @@ func runSourceAcceptance(t *testing.T, baseURL, token string, extra ...string) (
 		} else if i >= 20 {
 			category = "frontend_sql"
 		}
+		expected := map[string]any{"source_id": "source-1", "commit_sha": "commit-1", "path": "src/Foo.java", "start_line": 2, "end_line": 2, "sha256": testSourceSHA, "hash_mode": "sha256_utf8_lf"}
+		if snapshotID != "" {
+			expected["snapshot_id"] = snapshotID
+		}
 		questions["questions"] = append(questions["questions"].([]any), map[string]any{
 			"question_id": fmt.Sprintf("q-%02d", i+1), "category": category, "query": fmt.Sprintf("Where is the verified behavior for case %d?", i+1),
-			"expected": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1", "path": "src/Foo.java", "start_line": 2, "end_line": 2, "sha256": testSourceSHA, "hash_mode": "sha256_utf8_lf"},
+			"expected": expected,
 		})
 	}
-	return runSourceAcceptanceWithQuestions(t, baseURL, token, questions, nil, extra...)
+	return questions
+}
+
+func writeAcceptanceJSON(t *testing.T, filename string, value any) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), filename)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func runSourceAcceptanceWithQuestions(t *testing.T, baseURL, token string, questions map[string]any, sourceMap any, extra ...string) (commandResult, string) {
