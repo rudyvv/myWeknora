@@ -416,3 +416,13 @@ Wiki产品初冻507e fixture duplicate115红，0980修后专用容器暂停退�
 原T10 helperhostfreezea7cb，compile-only4.089 no-tests非行为绿。完整Standards0，Spec两个具体必修GC activeRead夹具与singlepage deny仅BODY检查；Spec最后容量故障未算终态。两修同Luna进行，Root读冻a7cb撤回先前WIP marker误派（真实freeze已有atomic）。负例查询改通用Scheduling防止合法query echo导致隐私假红。helper新freeze后完整双轴+根实际PG，禁止Go cache/共享夹具试错，不人为转述问题。
 
 当前cursors mainfedcccc0-7c36-4a1f-883b-9f280d95f770:5 acceptedopsidle；T06 16ff9f92-3bfa-47d1-98c9-4586749fa2d1:4 capacityactive；T10 ca79cd17-7e9c-4427-9d5d-5eb48796672d:9 repairsactive。Root目前无未收测试/构建，PG57822独占idle、parser57823healthy；后续新结果才read/行动，不重复消息ACK。21/22、#30 OPEN，现场GitLab/model/30题评分/大仓性能仍无通过证据。
+
+## 实际连接成功与最终 Wiki 复验（2026-10-05）
+
+用户明确批准TLS/restart后，ded完整新backend在旧liveDB缺source schema而UI settings失败；Root立即恢复备份原server普通verify，实际health200+UI设置恢复，不DB迁移。复用a8ea clean新分支codex/t22-live-tls-compat from原D cleanb477，不新chat/tree；冻88fa74c5四files，policy与ded byte-identical，完整独立Sol/high两轴0/root9top TLS+API actualPASS6.255/5.979及build成功。新compatlauncher固定最初15:23:33Z截止（北京时间23:23:33，不续延），独立metadata-only dryrun/hash核对后Root启compatPID38476/launcher13692，health200。用户填GitLab PAT后UI实际「已连接」；之前浏览器自动填邮箱+不明秘密值未发送。仅API连接成功，未SourceSync/模型/30题评分。Source/wikifunctions仍只根集成树，live仅TLS原版compat；原Dmain/配置文件/系统trust/shareDB未改。详尽actual证据在t22-tls-and-projection-review.md。
+
+Wiki capacitydb914纯NEW157line真实17MiB公开metadata编辑而保持eligible+owner，PG全PASS11.414，完整两轴0。独立helper9adf四cases2PASS/2FAIL36.940，Root确认不是产品泄漏：漏access.ErrForbidden识别、GC合法1min next_attempt_at延期未到期。FreshSol还抓到Getter live复核把fixedready改stale（旧static0不能覆盖后新finding）；T06twoproductfiles7fc修，T10 ONLY NEWtest01122231修preciseForbidden/retryclock/capturedready slug+ID/Scheduling匹配搜索。Root原Getter3f Gooverlay对新断言actualFAIL17.483，State ready→stale，非仪表代码。当前临时候选842f174，完整narrowSol双轴0；四问答门禁全部actualPASS33.920，session74286已收。根正在运行六既有公开边界/混合文档/多源/腐化raw/过滤清除/三Agent补验session10335，未收不能算PASS。尚未集成Wiki到根分支，21/22/#30OPEN。
+
+原main/a8ea新同票ops辅助onlyignored metadata read-only preflight：准备读取现有app .env内存并按真实DB规则 read schema_migrations version/dirty、required tables/cols与extensions，默认dryrun不连，Root审后readonly执行，不泄DSN/password/用户内容，不DB writes/migrate/force/安装/旧Dockercredentialmetadata。源码完整部署需要保护性备份+隔离预演+明确migration路径；原Dstartup只101解释版本错配。现有scripts/migrate.sh up打印凭据，禁止调用；Root将准备安全替代路径。
+
+最新processed mainfedcccc0-7c36-4a1f-883b-9f280d95f770:7（之后metadata preflightactive需新snapshot）；T06 16ff9f92-3bfa-47d1-98c9-4586749fa2d1:6 freezeacceptedreviewidle；T10 ca79cd17-7e9c-4427-9d5d-5eb48796672d:13 freezeidle。rootPG57822唯一由10335占用；parser57823healthy，所有其它root测试/build已收。15:23:33UTC截止不可自延，到期不再临时启用/要新窗口须明确用户授权；client每request自动恢复verified，CA正常trust预检仍未通过。真实用户令牌不读/不保存到聊天/GH；IABtab1保留handoff，Test credential wizard未Save。只有新有效结果/问题行动，不ACKloop，不重复gh过程流水。
