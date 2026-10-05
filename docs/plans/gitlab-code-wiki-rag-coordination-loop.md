@@ -454,3 +454,13 @@ Main runtime-map4DDF已Root读全，作为源码事实参考接受；其mock/隔
 最新processed mainfedcccc0-7c36-4a1f-883b-9f280d95f770:27 原map完成后rehearsalhelper已派active；T06 16ff9f92-3bfa-47d1-98c9-4586749fa2d1:20 backup接受freezeidle，不ACK重复执行；T10 ca79cd17-7e9c-4427-9d5d-5eb48796672d:23 note已收freezeidle，不新票。Root无未收build/test/backup；21/22/#30OPEN，现有8080兼容应用保持运行，临时TLS已到期不续。下一新READY/NEEDS_ROOT就读、双轴Sol/high及Root真实隔离验证，再形成完整具体部署方案；没有GH过程流水。原automation view返回card但本机旧automations/weknora/automation.toml不存在，未创建duplicate/乱改现有调度；独立会话已获授权直接向root问/报告，不能让用户人工转达。
 
 最后root post-backup localhost8080 health200，doc清理时间顺序commit d21bd022（previous86cc15）。main新cursor:28已实际active准备仅隔离helper，T06backup完冻结idle无需新票。Root为保持有益并行派原T10 ONLY ignored t22-model-profile-facts/notes.md：源码入场tokenizer/input-limit/dimension/index约束及UI/API字段facts，不读actualconfig/DB、不调用模型/发源码、不推断内部模型alias，Root最终决定；不为此额外研究/审查或PG。T22已批准真实model/30题/代表规模仍未通过，不能用mock/题集批准/备份成功代替。
+
+## 自主验收恢复（2026-10-06 北京时间约01:00）
+
+用户要求睡眠期间继续当前及原三个执行对话，缺信息自行查找/决定，至五小时额度耗尽或完成；另明确授权过期GitLab证书例外自行延期。只限精确https://gitlab.p.it、每次固定截止，不改系统/browser/globalTLS；原8080兼容进程仍维持旧已到期截止。无需重复问内部runner/DSN或批准已授权例外。双向消息实际工作，Root收freeze后审查/独立执行，不能让worker自行部署或冒充验收。
+
+Root真正恢复归档到新固定隔离库并升级103→119，session93989 exit0全收，34source表/两扩展和七旧数据counts通过；见t22-live-deployment-preflight.md精确hash。不能重建现有目标/Drop/force。真实三Git ls-remote exit0已收，remote nsb/dashboard与旧gold本地SHA不同，API权限/同步未验证。只读模型元数据真实核验：Doubao1024/tokenizer空/inputlimit0，Deepseekactive；模型请求仍pending。完整已接受55322后端build+frontendbuild PASS，未启动app。Root新建严格ACL files/logs/Redis目录及自身内部网络Redis57824、认证PING成功；不读旧Dockercredentials或修改共享依赖。
+
+当前原三个Luna/xhigh：main/a8ea ONLY ignored clone-quiescence/prepare.go默认stat-only，准备固定clone只读聚合风险清单；T06/b0df ONLY ignored isolated-runtime/launch.go，Root审后才能实际start，明确新Redis57824认证、SOURCE_PARSER_URL57823、57825loopback、迁移OFF、新存储目录、冻结二进制hash与后台零任务/外部storage门禁；T10/2119 bridge canonical E62AF414冻结已收，Sol/high两轴审查中，Root将复制feature编译，不为旧树缺新TLS API反复fresh-cache构建。T10已接续ONLY NEW ignored model-smoke/main.go默认stat-only，Root未来单次synthetic embedding/chat，不源码/用户内容/secret输出、不DB写。
+
+已处理compact cursors：main443711fc-d0d4-42ac-b045-53030dbce32e:13；T06a131e4be-949a-48bd-984b-0bba32929db0:11；T10 418a822d-3751-4389-938e-049bb21546e7:8（之后new模型helperactive）。Root review agents t22_ops_standards与t22_ops_spec复用Sol/high，外部NEWhelper空文件baseline，formalT22base1d32不变。原acceptedWiki/tool/static slices不重复审/跑。原Dmain保持；累计21/22/#30OPEN，没有GH过程流水；real同期过滤/增量/index/Wiki/30题/performance仍待证据。
