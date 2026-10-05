@@ -51,7 +51,10 @@ func (r *sourceSnapshotRepository) SaveParsedArtifact(ctx context.Context, tenan
 		if err := assertSourceLeaseTx(tx, ctx); err != nil {
 			return err
 		}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(artifact).Error
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(artifact).Error; err != nil {
+			return err
+		}
+		return r.assertSourceResourceQuotaTx(tx, tenant, sourceID)
 	})
 }
 func (r *sourceSnapshotRepository) GetEmbeddingArtifacts(ctx context.Context, tenant uint64, sourceID string, keys []string) (map[string][]float32, error) {
@@ -88,7 +91,10 @@ func (r *sourceSnapshotRepository) SaveEmbeddingArtifacts(ctx context.Context, t
 		if err := assertSourceLeaseTx(tx, ctx); err != nil {
 			return err
 		}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(artifacts, 100).Error
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(artifacts, 100).Error; err != nil {
+			return err
+		}
+		return r.assertSourceResourceQuotaTx(tx, tenant, sourceID)
 	})
 }
 

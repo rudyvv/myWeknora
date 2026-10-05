@@ -217,8 +217,17 @@ type SourceChunkReference struct {
 }
 
 type SourceRunResult struct {
-	Snapshot *SourceSnapshot        `json:"snapshot"`
-	Members  []SourceSnapshotMember `json:"members"`
+	Snapshot  *SourceSnapshot        `json:"snapshot"`
+	Members   []SourceSnapshotMember `json:"members"`
+	Telemetry *SourceRunTelemetry    `json:"telemetry,omitempty"`
+}
+
+// SourceResourceUsage is the exact scoped logical payload measured from the
+// source-owned PostgreSQL rows. Vector bytes use dimension*float32 size.
+type SourceResourceUsage struct {
+	OriginalBytes    int64 `json:"original_bytes"`
+	ParsedCacheBytes int64 `json:"parsed_cache_bytes"`
+	VectorBytes      int64 `json:"vector_bytes"`
 }
 
 // SourceWikiUpdatePayload is the stable, DB-derived acceptance record for a

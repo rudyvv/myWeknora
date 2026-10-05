@@ -51,6 +51,63 @@ func newSourceWikiTestBatch(f *javaSourceFixture, snapshotID string, now time.Ti
 	}
 }
 
+func TestSourceWikiCoverageTelemetryRequiresCompleteSnapshotInventory(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` })
+	reader, ok := generator.(interfaces.SourceWikiBatchReadService)
+	require.True(t, ok)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	now := time.Now().UTC()
+	keys := []string{"ready", "stale", "failed", "planned", "expansion", "missing"}
+	inventory := types.SourceWikiImpactTopicInventory{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID,
+		Complete: true, ExpectedTopicCount: len(keys),
+	}
+	for _, key := range keys {
+		inventory.Topics = append(inventory.Topics, types.SourceWikiImpactTopicDependencies{TopicKey: key})
+	}
+	inventoryJSON, err := json.Marshal(inventory)
+	require.NoError(t, err)
+	var plan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("tenant_id=? AND knowledge_base_id=? AND source_id=? AND snapshot_id=?",
+		f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID).Take(&plan).Error)
+	plan.Status = "completed"
+	plan.NextInventory = types.JSON(inventoryJSON)
+	plan.UpdatedAt = now
+	plan.CompletedAt = &now
+	require.NoError(t, f.db.Save(&plan).Error)
+	topics := []types.SourceWikiCoverageTopic{
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "ready", Kind: "flow", Title: "Ready flow", Status: "ready", LastReadySnapshotID: publication.SnapshotID, UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "stale", Kind: "flow", Title: "Stale flow", Status: "ready", LastReadySnapshotID: "older-snapshot", UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "failed", Kind: "flow", Title: "Failed flow", Status: "failed", UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "planned", Kind: "flow", Title: "Planned flow", Status: "planned", Initial: true, UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "expansion", Kind: "flow", Title: "Expansion flow", Status: "expansion", UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+	}
+	require.NoError(t, f.db.Create(&topics).Error)
+	coverage, err := reader.GetSourceWikiCoverageSummary(f.ctx, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.NoError(t, err)
+	require.NotNil(t, coverage)
+	require.Equal(t, int64(6), *coverage.EligibleTopics)
+	require.Equal(t, int64(1), *coverage.ReadyTopics)
+	require.Equal(t, int64(1), *coverage.StaleTopics)
+	require.Equal(t, int64(1), *coverage.FailedTopics)
+	require.Equal(t, int64(2), *coverage.UngeneratedTopics)
+	require.Equal(t, int64(1), *coverage.DeferredTopics)
+
+	wrongTenant := types.WithCaller(context.Background(), types.Caller{TenantID: 2})
+	_, err = reader.GetSourceWikiCoverageSummary(wrongTenant, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.Error(t, err, "coverage summary must respect the same tenant/source read boundary as the UI")
+
+	plan.NextInventory = types.JSON(`{"tenantid":1}`)
+	plan.UpdatedAt = now.Add(time.Second)
+	require.NoError(t, f.db.Save(&plan).Error)
+	coverage, err = reader.GetSourceWikiCoverageSummary(f.ctx, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.NoError(t, err)
+	require.Nil(t, coverage, "an incomplete or mismatched inventory is unmeasured, not fabricated zero coverage")
+}
+
 func TestSourceWikiBatchLedgerReservesBudgetsAndPersistsStableCoverage(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	syncSourceFixture(t, f)

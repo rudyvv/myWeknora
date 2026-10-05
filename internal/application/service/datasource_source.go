@@ -77,10 +77,12 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 	preflightCount := 0
 	var preflightSize int64
 	preflightWithinPipelineLimits := true
-	files, err := source.ReadGit(ctx, repository, rules, func(file types.SourcePreviewFile, content []byte) error {
+	resourcePolicy := s.sourceResources.Policy()
+	rules = resourcePolicy.ApplyFileLimit(rules)
+	files, err := source.ReadGitWithPolicy(ctx, repository, rules, resourcePolicy, func(file types.SourcePreviewFile, content []byte) error {
 		preflightCount++
-		preflightSize += file.Size
-		if preflightCount > 100 || preflightSize > 16<<20 {
+		preflightSize += int64(len(content))
+		if preflightCount > resourcePolicy.MaxSelectedFiles || preflightSize > resourcePolicy.MaxSelectedBytes {
 			preflightWithinPipelineLimits = false
 		}
 		if profileErr != nil || source.LanguageForPath(file.Path) == "" || !preflightWithinPipelineLimits {
@@ -142,8 +144,8 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 		previous, publishedErr := s.sourceSnapshots.GetPublished(ctx, ds.TenantID, ds.ID)
 		canPublishEmpty := publishedErr == nil && previous != nil
 		pipeline := &preview.Checks[3]
-		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && supportedOnly && (count > 0 || canPublishEmpty) && count <= 100 && size <= 16<<20 && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
-		pipeline.Message = "source sync requires explicit paths, at most 100 supported source, template, and text configuration files and 16 MiB with built-in PostgreSQL indexes; an existing publication may become empty"
+		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && supportedOnly && (count > 0 || canPublishEmpty) && count <= resourcePolicy.MaxSelectedFiles && size <= resourcePolicy.MaxSelectedBytes && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
+		pipeline.Message = "source sync requires explicit paths, files within the configured source resource budgets, supported source, template, and text configuration formats, and built-in PostgreSQL indexes; an existing publication may become empty"
 		preview.CanSync = true
 		for _, check := range preview.Checks {
 			preview.CanSync = preview.CanSync && check.Ready

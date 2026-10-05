@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
@@ -129,7 +130,7 @@ func (s *DataSourceService) currentSourceEmbeddingVersion(ctx context.Context, k
 	return source.EmbeddingVersion(configured, model.GetDimensions()), nil
 }
 
-func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase, snapshot *types.SourceSnapshot, indexes []*types.IndexInfo, indexProfile source.IndexProfile) (int, error) {
+func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase, snapshot *types.SourceSnapshot, indexes []*types.IndexInfo, indexProfile source.IndexProfile, usage *sourceEmbeddingUsage) (int, error) {
 	config, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
 	if err != nil {
 		return 0, err
@@ -161,6 +162,9 @@ func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.Da
 		return 0, fmt.Errorf("source embedding token profile changed during initialization")
 	}
 	snapshot.EmbeddingVersion = source.EmbeddingVersion(config, dimension)
+	if usage != nil {
+		usage.estimateAvailable.Store(true)
+	}
 	for offset := 0; offset < len(indexes); offset += 32 {
 		end := offset + 32
 		if end > len(indexes) {
@@ -186,7 +190,26 @@ func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.Da
 		}
 		newVectors := map[string][]float32{}
 		if len(texts) > 0 {
-			vectors, err := model.BatchEmbed(ctx, texts)
+			if usage != nil {
+				usage.providerCallExpected = true
+			}
+			embedCtx := ctx
+			if usage != nil {
+				embedCtx = embedding.WithHTTPAttemptObserver(ctx, texts, func(attemptTexts []string) {
+					usage.attempts.Add(1)
+					var attemptTokenEstimate int64
+					for _, attemptText := range attemptTexts {
+						tokens, tokenErr := indexProfile.CountTokens(attemptText)
+						if tokenErr != nil {
+							usage.estimateAvailable.Store(false)
+							return
+						}
+						attemptTokenEstimate += int64(tokens)
+					}
+					usage.estimatedTokens.Add(attemptTokenEstimate)
+				})
+			}
+			vectors, err := model.BatchEmbed(embedCtx, texts)
 			if err != nil {
 				return 0, fmt.Errorf("source embedding request failed")
 			}
@@ -231,6 +254,9 @@ func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.Da
 		if err := s.sourceSnapshots.StageIndexes(ctx, batch, mapped); err != nil {
 			return 0, err
 		}
+	}
+	if usage != nil {
+		usage.completed = true
 	}
 	return dimension, nil
 }

@@ -2,6 +2,7 @@ package embedding
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,7 @@ type fakeEmbedder struct {
 	pooler   EmbedderPooler // optional: exercises the BatchEmbedWithPool fan-out
 	inFlight int32
 	maxSeen  int32
+	calls    atomic.Int32
 	enter    chan struct{} // one signal per call that reaches the provider
 	release  chan struct{} // closed to unblock all (current + future) calls
 }
@@ -33,6 +35,7 @@ func newFakeEmbedder(id string) *fakeEmbedder {
 }
 
 func (f *fakeEmbedder) track() {
+	f.calls.Add(1)
 	n := atomic.AddInt32(&f.inFlight, 1)
 	for {
 		old := atomic.LoadInt32(&f.maxSeen)
@@ -229,4 +232,74 @@ func TestConcurrencyEmbedderPoolFanOutGated(t *testing.T) {
 	if got := atomic.LoadInt32(&f.maxSeen); got > 2 {
 		t.Fatalf("max in-flight sub-batches %d exceeded limit 2", got)
 	}
+}
+
+func TestConcurrencyEmbedderCanceledWaitDoesNotStartProviderCall(t *testing.T) {
+	t.Cleanup(func() { limiter.SetGovernor(nil, 0) })
+	limiter.SetGovernor(limiter.NewLocalLimiter(), 1)
+
+	const id = "emb-cancel-wait"
+	f := newFakeEmbedder(id)
+	w := wrapEmbeddingConcurrency(f, 0)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := w.Embed(types.WithBackgroundTask(context.Background()), "first")
+		firstDone <- err
+	}()
+	defer func() {
+		close(f.release)
+		select {
+		case <-firstDone:
+		case <-time.After(2 * time.Second):
+			t.Error("first provider call did not finish after release")
+		}
+	}()
+	select {
+	case <-f.enter: // first provider call owns the only slot
+	case <-time.After(2 * time.Second):
+		t.Fatal("first provider call did not enter")
+	}
+	f.calls.Store(0)
+
+	ctx, cancel := context.WithCancel(types.WithBackgroundTask(context.Background()))
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := w.Embed(ctx, "canceled")
+		secondDone <- err
+	}()
+	waitForEmbeddingLimiterWaiter(t, id)
+	cancel()
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled waiter error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled model waiter did not return")
+	}
+	select {
+	case <-f.enter:
+		t.Fatal("canceled waiter started an embedding provider call after the model slot wait")
+	default:
+	}
+	if got := f.calls.Load(); got != 0 {
+		t.Fatalf("embedding provider calls from the canceled waiter = %d, want 0", got)
+	}
+}
+
+func waitForEmbeddingLimiterWaiter(t *testing.T, modelID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, available, err := limiter.RuntimeStats(context.Background())
+		if err == nil && available {
+			for _, stat := range stats {
+				if stat.ModelID == modelID && stat.Waiting > 0 {
+					return
+				}
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("model %q never reported a waiting caller", modelID)
 }

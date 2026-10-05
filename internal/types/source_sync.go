@@ -12,14 +12,15 @@ var ErrSourceSyncLeaseLost = errors.New("source sync lease lost")
 // Its monotonically increasing fencing token is checked by staging and publish
 // transactions; a stale worker cannot regain authority by continuing to run.
 type SourceSyncLease struct {
-	DataSourceID     string
-	TenantID         uint64
-	SyncLogID        string
-	Owner            string
-	ConfigGeneration int64
-	FencingToken     int64
-	ExpiresAt        time.Time
-	TargetCommitSHA  string
+	DataSourceID       string
+	TenantID           uint64
+	SyncLogID          string
+	Owner              string
+	ConfigGeneration   int64
+	FencingToken       int64
+	LeaseRecoveryCount int64
+	ExpiresAt          time.Time
+	TargetCommitSHA    string
 }
 
 // SourceSyncDispatch is a durable trigger ready for queue delivery.

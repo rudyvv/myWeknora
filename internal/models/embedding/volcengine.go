@@ -218,7 +218,7 @@ func (e *VolcengineEmbedder) BatchEmbed(ctx context.Context, texts []string) ([]
 			return nil, fmt.Errorf("marshal request: %w", err)
 		}
 
-		resp, err := e.doRequestWithRetry(ctx, jsonData)
+		resp, err := e.doRequestWithRetry(WithHTTPAttemptInputTexts(ctx, []string{text}), jsonData)
 		if err != nil {
 			logger.GetLogger(ctx).Errorf("VolcengineEmbedder BatchEmbed send request error: %v", err)
 			return nil, fmt.Errorf("send request: %w", err)
