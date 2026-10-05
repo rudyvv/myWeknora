@@ -86,6 +86,23 @@ Record the date, model deployment identifier, tokenizer/profile, configured inpu
 
 For Lite, run equivalent TLS and reachability checks from the Lite app host/container to GitLab, the selected model endpoint, and the external parser endpoint. A successful host-browser check does not prove the application runtime trusts the internal CA or can route to those services.
 
+## Temporary GitLab TLS troubleshooting exception
+
+The app normally verifies GitLab's certificate chain and hostname. If an operator has explicitly approved a short diagnostic exception, the GitLab API client and the app's Go HTTP Git bridge accept this process-environment pair:
+
+| Environment setting | Required value |
+| --- | --- |
+| `GITLAB_TLS_INSECURE_ORIGIN` | One exact `https://` origin only, with no path, wildcard, user info, query, or fragment; an explicit `:443` is equivalent to the default port. |
+| `GITLAB_TLS_INSECURE_UNTIL` | RFC 3339 timestamp with timezone, strictly in the future and no more than 24 hours away. |
+
+Both settings must be supplied together. If both are unset or empty, normal certificate verification remains enabled. An incomplete, malformed, or more-than-24-hours-ahead pair fails closed. A well-formed pair whose deadline has passed is inert: clients can still be created, but they use normal certificate verification. The exception is evaluated for every request and applies only to that HTTPS origin until the deadline; all other HTTPS origins and requests after expiry use independent normally verified connections. HTTP never matches the exception. Redirects from an active exception origin to another origin or to HTTP are not followed. Existing URL/SSRF checks, dial-time IP checks, timeouts, and transfer limits remain in force. This does not alter the parser, model clients, other connectors, or Git's configuration/environment, and it does not set `GIT_SSL_NO_VERIFY` or `http.sslVerify`.
+
+This mode disables server certificate identity verification for the selected GitLab origin and therefore permits an active network attacker to impersonate that server during the window. It is a temporary connectivity diagnostic, not a successful TLS preflight and not a credential-validation result. Prefer installing the GitLab administrator's trusted CA in the app runtime or repairing the certificate chain. Do not enable this exception without explicit operational approval.
+
+For an approved diagnostic, set the pair only in the app process environment (for example, in the deployment's protected `.env` file; do not put tokens or certificate material there), then recreate the app service so it reads the new environment. Use the exact origin from the configured GitLab endpoint, not a URL containing an API path or repository path. Record the chosen host and cutoff time without recording tokens or request contents. Do not extend the deadline beyond 24 hours.
+
+To restore verification, remove both settings (or set both to empty), recreate the app service again, and rerun the ordinary preflight above from the app runtime. Confirm the certificate chain succeeds with the exception absent; only then treat TLS preflight as passed. Removing the variables from a running container is not sufficient—the app process must be recreated to receive the updated environment. Keep the temporary exception disabled until that separate operator confirmation.
+
 ## Isolated parser fault/offline verification
 
 From the repository root, run:
