@@ -270,12 +270,13 @@ func sourceWikiProjectionEvidenceOwnerSQL(ctx context.Context, projection, evide
 	return `EXISTS(SELECT 1 FROM source_read_wiki_evidence_refs wr
 		JOIN source_file_versions sv ON sv.id=wr.file_version_id AND sv.source_file_id=wr.source_file_id AND sv.snapshot_id=wr.snapshot_id
 		JOIN source_files sf ON sf.id=wr.source_file_id
+		JOIN knowledges wk ON wk.id=sf.id AND wk.tenant_id=sf.tenant_id AND wk.knowledge_base_id=sf.knowledge_base_id AND wk.type='source'
 		JOIN data_sources ds ON ds.id=sf.data_source_id AND ds.tenant_id=sf.tenant_id AND ds.knowledge_base_id=sf.knowledge_base_id
 		WHERE wr.lease_id=` + lease + ` AND wr.page_id=` + projection + `.page_id AND wr.revision_id IS NULL AND wr.version=` + projection + `.page_version
 			AND wr.evidence_id=` + item + `->>'id' AND wr.source_file_id=` + item + `->>'knowledge_id'
 			AND wr.file_version_id=` + item + `->>'file_version_id' AND wr.snapshot_id=` + item + `->>'snapshot_id'
 			AND wr.path=` + item + `->>'path' AND wr.commit_sha=` + item + `->>'commit_sha'
-			AND sf.deleted_at IS NULL AND sf.tenant_id=(` + projection + `.page_snapshot->>'tenant_id')::bigint
+			AND wk.deleted_at IS NULL AND sf.tenant_id=(` + projection + `.page_snapshot->>'tenant_id')::bigint
 			AND sf.knowledge_base_id=` + projection + `.page_snapshot->>'knowledge_base_id'
 			AND sf.data_source_id=` + sourceID + ` AND ds.deleted_at IS NULL AND ds.source_query_enabled IS TRUE
 			AND ds.config->'settings'->>'content_mode'='source'
