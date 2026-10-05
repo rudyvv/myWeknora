@@ -19,13 +19,13 @@
 | 102–119 所需 source 表 | 34 张中 9 张存在，25 张缺失 |
 | 相关扩展 | `pg_search=0.22.2`、`vector=0.8.1`；完整列表在本地脱敏报告 |
 | 备份客户端能力 | 根专用容器内 `pg_dump`、`pg_restore`、`psql` 均为 17.9，仅执行版本命令 |
-| 备份目录 | 新建在外部 test-runners；已禁继承，只允许当前操作用户、SYSTEM、Administrators，无其它 Allow 规则；尚未创建备份 |
+| 备份目录 | 外部 test-runners，已禁继承；仅当前操作用户、SYSTEM、Administrators，无其它 Allow 规则。首次预检时未建归档，后续实际备份结果见下节。 |
 
 预检源码冻结 SHA256 `794ED5C734E3E85A52A5E068C08F31ED626C3835CBB781A2F1E5AF5B7929159A`；根独立构建 exe SHA256 `9222DF7FD82404E317E9E450680A13E3C0CBACA3F4EEF20A1F40D7391F0BC7E5`。原冻结的 Spec 两项问题（early-return 状态为空、NULL ledger 误报 ok）已经最小修复；窄 Standards 0、Spec 0，均为独立 Sol/high。根独立 build、默认 dry-run 和实际只读查询均已完成，不能把 worker 未连接模式当实际查询证据。
 
 本地脱敏报告 `C:/Users/28211/.codex/test-runners/t22-live-schema-inventory-20261005.json`，SHA256 `63D9F6DBF6070A5DF94F2B81EE67193BDCE8132A780BE97603FB829E0FEE7765`。不包含 DSN、数据库用户名/密码、模型密钥或用户行数据。
 
-## 待完成的备份与隔离预演
+## 备份与隔离预演进度
 
 备份门禁已进一步完成：外部 helper 冻结源码 `EF81A28DB8B9051BDE51615E8C0716A636E99BED4AA300323D31C11B5DE1C5AE`，根独立构建 exe `72E27170DA63FD515C6ACB6C05E60E6BB596B267347A811E0F3C0564899405C2`。独立 Standards 无硬违规（1 项非阻断 stderr buffer 维护判断）、Spec 0；根独立默认 dry-run 通过。根在同一执行前再次核验固定目录严格 ACL/owner/非 reparse，再执行仅源端只读 pg_dump。实际正常退出，session70702已全部收取；开始 `2026-10-05T16:00:28Z`，归档于16:01:02Z前完成。
 
