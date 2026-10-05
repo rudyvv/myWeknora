@@ -53,7 +53,7 @@ func (l *SourceWikiAttemptLedger) Create(ctx context.Context, attempt *types.Sou
 		if attempt.ModulePath == "" {
 			return fmt.Errorf("%w: manual module attempt requires a module path", ErrSourceWikiAttemptInvalidState)
 		}
-		if err := l.db.WithContext(ctx).Create(attempt).Error; err != nil {
+		if err := l.db.WithContext(ctx).Omit("BatchID").Create(attempt).Error; err != nil {
 			return fmt.Errorf("create source Wiki attempt: %w", err)
 		}
 		return nil
