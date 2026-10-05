@@ -54,13 +54,11 @@ func logEmbeddingDebug(ctx context.Context, model string, inputs []string, outpu
 		Duration: dur,
 	}
 
-	// Input section: show each text with a preview
+	// Input section: retain counts and lengths without logging source text.
 	var inputBuf strings.Builder
 	inputBuf.WriteString(fmt.Sprintf("count=%d\n", len(inputs)))
 	for i, t := range inputs {
-		preview := strings.ReplaceAll(t, "\n", "\\n")
-		preview = logger.TruncateRunes(preview, 200)
-		inputBuf.WriteString(fmt.Sprintf("[%d] (len=%d) %s\n", i, len([]rune(t)), preview))
+		inputBuf.WriteString(fmt.Sprintf("[%d] (len=%d)\n", i, len([]rune(t))))
 	}
 	record.Sections = append(record.Sections, logger.RecordSection{Title: "Input", Content: inputBuf.String()})
 

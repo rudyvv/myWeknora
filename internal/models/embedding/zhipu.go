@@ -173,19 +173,15 @@ func (e *ZhipuEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]flo
 	hasInvalidLength := false
 	for i, text := range texts {
 		textLen := len(text)
-		textPreview := text
-		if len(textPreview) > 200 {
-			textPreview = textPreview[:200] + "..."
-		}
 
 		// Log warning if length is outside valid range [1, 8192]
 		if textLen == 0 || textLen > 8192 {
 			hasInvalidLength = true
-			logger.GetLogger(ctx).Errorf("ZhipuEmbedder BatchEmbed input[%d]: INVALID length=%d (must be [1, 8192]), preview=%s",
-				i, textLen, textPreview)
+			logger.GetLogger(ctx).Errorf("ZhipuEmbedder BatchEmbed input[%d]: INVALID length=%d (must be [1, 8192])",
+				i, textLen)
 		} else {
-			logger.GetLogger(ctx).Debugf("ZhipuEmbedder BatchEmbed input[%d]: length=%d, preview=%s",
-				i, textLen, textPreview)
+			logger.GetLogger(ctx).Debugf("ZhipuEmbedder BatchEmbed input[%d]: length=%d",
+				i, textLen)
 		}
 	}
 
