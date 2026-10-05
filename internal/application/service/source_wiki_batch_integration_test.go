@@ -70,12 +70,14 @@ func TestSourceWikiCoverageTelemetryRequiresCompleteSnapshotInventory(t *testing
 	}
 	inventoryJSON, err := json.Marshal(inventory)
 	require.NoError(t, err)
-	plan := types.SourceWikiUpdatePlan{
-		ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID,
-		SnapshotID: publication.SnapshotID, Status: "completed", Plan: types.JSON(`{}`),
-		NextInventory: types.JSON(inventoryJSON), CreatedAt: now, UpdatedAt: now,
-	}
-	require.NoError(t, f.db.Create(&plan).Error)
+	var plan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("tenant_id=? AND knowledge_base_id=? AND source_id=? AND snapshot_id=?",
+		f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID).Take(&plan).Error)
+	plan.Status = "completed"
+	plan.NextInventory = types.JSON(inventoryJSON)
+	plan.UpdatedAt = now
+	plan.CompletedAt = &now
+	require.NoError(t, f.db.Save(&plan).Error)
 	topics := []types.SourceWikiCoverageTopic{
 		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "ready", Status: "ready", LastReadySnapshotID: publication.SnapshotID},
 		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "stale", Status: "ready", LastReadySnapshotID: "older-snapshot"},

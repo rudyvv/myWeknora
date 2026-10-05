@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -186,12 +185,17 @@ func TestSourceLeaseRecoveryCountIsDurableAndExcludesOrdinaryRetry(t *testing.T)
 
 	directLog, err := f.service.ManualSync(f.ctx, f.ds.ID)
 	require.NoError(t, err)
-	directLease, claimed, err := control.ClaimSourceRun(f.ctx, ds, directLog.ID, 1, uuid.NewString(), time.Minute)
+	var directRun struct {
+		DeliveryGeneration int64 `gorm:"column:delivery_generation"`
+	}
+	require.NoError(t, f.db.Table("source_sync_runs").Select("delivery_generation").
+		Where("sync_log_id=?", directLog.ID).Take(&directRun).Error)
+	directLease, claimed, err := control.ClaimSourceRun(f.ctx, ds, directLog.ID, directRun.DeliveryGeneration, uuid.NewString(), time.Minute)
 	require.NoError(t, err)
 	require.True(t, claimed)
 	require.Zero(t, directLease.LeaseRecoveryCount)
 	require.NoError(t, f.db.Exec("UPDATE source_sync_states SET lease_expires_at=now()-interval '1 second' WHERE data_source_id=?", f.ds.ID).Error)
-	directTakeover, claimed, err := control.ClaimSourceRun(f.ctx, ds, directLog.ID, 1, uuid.NewString(), time.Minute)
+	directTakeover, claimed, err := control.ClaimSourceRun(f.ctx, ds, directLog.ID, directRun.DeliveryGeneration, uuid.NewString(), time.Minute)
 	require.NoError(t, err)
 	require.True(t, claimed)
 	require.EqualValues(t, 1, directTakeover.LeaseRecoveryCount,
@@ -223,12 +227,14 @@ func insertSourceTelemetryReviewCoverage(t *testing.T, f *javaSourceFixture, sna
 		Topics: []types.SourceWikiImpactTopicDependencies{{TopicKey: topicKey}},
 	})
 	require.NoError(t, err)
-	plan := &types.SourceWikiUpdatePlan{
-		ID: uuid.NewString(), TenantID: f.ds.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID,
-		SnapshotID: snapshotID, ConfigGeneration: 1, PlanDigest: strings.Repeat("a", 64), Status: "completed",
-		Plan: types.JSON(`{}`), NextInventory: types.JSON(inventory), CreatedAt: now, UpdatedAt: now, CompletedAt: &now,
-	}
-	require.NoError(t, f.db.Create(plan).Error)
+	var plan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("tenant_id=? AND knowledge_base_id=? AND source_id=? AND snapshot_id=?",
+		f.ds.TenantID, f.kb.ID, f.ds.ID, snapshotID).Take(&plan).Error)
+	plan.Status = "completed"
+	plan.NextInventory = types.JSON(inventory)
+	plan.UpdatedAt = now
+	plan.CompletedAt = &now
+	require.NoError(t, f.db.Save(&plan).Error)
 	topic := &types.SourceWikiCoverageTopic{
 		ID: uuid.NewString(), TenantID: f.ds.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID,
 		TopicKey: topicKey, SnapshotID: snapshotID, Kind: "flow", Title: topicKey, Status: status,
