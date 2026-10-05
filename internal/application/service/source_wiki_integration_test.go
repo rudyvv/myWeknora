@@ -564,6 +564,16 @@ func TestSourceWikiGCRequeuesWhenFinalRevisionOwnerReleasesDuringCollection(t *t
 	second, err := generator.GenerateModule(f.ctx, req)
 	require.NoError(t, err)
 	require.Equal(t, "ready", second.Status)
+	drainSourceWikiReviewUpdateLane(t, f, generator)
+	generator.(*sourceWikiService).StopSourceWikiBatches()
+	var updatePlan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("source_id=? AND snapshot_id=?", f.ds.ID, second.SnapshotID).Take(&updatePlan).Error)
+	require.Equal(t, "completed", updatePlan.Status, "the accepted publication must finish through the durable Wiki update lane")
+	var activePlanCount int64
+	require.NoError(t, f.db.Model(&types.SourceWikiUpdatePlan{}).
+		Where("source_id=? AND previous_snapshot_id=? AND status IN ?", f.ds.ID, oldEvidence.SnapshotID, []string{"pending", "running"}).
+		Count(&activePlanCount).Error)
+	require.Zero(t, activePlanCount, "the durable Wiki update lane must release its old-snapshot plan protection before collection")
 	page, err = wiki.GetPageBySlug(f.ctx, f.kb.ID, first.Slug)
 	require.NoError(t, err)
 	require.NotEqual(t, oldEvidence.SnapshotID, page.SourceProvenance.Evidence[0].SnapshotID,
@@ -581,6 +591,10 @@ func TestSourceWikiGCRequeuesWhenFinalRevisionOwnerReleasesDuringCollection(t *t
 	var queued int64
 	require.NoError(t, f.db.Table("source_snapshot_gc_candidates").Count(&queued).Error)
 	require.EqualValues(t, 1, queued, "the fixture isolates the retired snapshot from unrelated queue work")
+	var candidateSnapshotID string
+	require.NoError(t, f.db.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", oldEvidence.SnapshotID).
+		Select("snapshot_id").Scan(&candidateSnapshotID).Error)
+	require.Equal(t, oldEvidence.SnapshotID, candidateSnapshotID, "the collector candidate must be the retired evidence snapshot")
 
 	const advisoryKey1, advisoryKey2 = 198342, 118
 	require.NoError(t, f.db.Exec("CREATE SEQUENCE source_gc_test_candidate_update_seq").Error)

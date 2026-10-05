@@ -35,6 +35,7 @@ func makeSourceWikiRecoveryAttempt(t *testing.T, f *javaSourceFixture, generator
 	ledger := repository.NewSourceWikiAttemptLedger(svc.db)
 	attempt, err := svc.loadOrCreateSourceWikiAttempt(f.ctx, ledger, f.kb, types.SourceWikiGenerateRequest{
 		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+		TopicKind: "module", TopicKey: "module/src",
 	}, "src")
 	require.NoError(t, err)
 	return attempt, ledger

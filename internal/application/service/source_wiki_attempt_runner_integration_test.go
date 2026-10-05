@@ -102,6 +102,14 @@ func newSourceWikiRunnerPostgres(t *testing.T) (*gorm.DB, *repository.SourceWiki
 	if err := db.Exec(string(migration)).Error; err != nil {
 		t.Fatalf("apply attempt-ledger migration 113: %v", err)
 	}
+	batchMigrationPath := filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql")
+	batchMigration, err := os.ReadFile(batchMigrationPath)
+	if err != nil {
+		t.Fatalf("read source Wiki batch migration 114: %v", err)
+	}
+	if err := db.Exec(string(batchMigration)).Error; err != nil {
+		t.Fatalf("apply source Wiki batch migration 114: %v", err)
+	}
 	return db, repository.NewSourceWikiAttemptLedger(db)
 }
 
