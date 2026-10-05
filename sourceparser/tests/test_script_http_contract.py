@@ -189,7 +189,7 @@ class ScriptHTTPContract(unittest.TestCase):
             expected.add('vue')
         expected = sorted(expected)
         self.assertEqual(health['languages'], expected)
-        expected_rules = 'rules-10' if 'java' in expected else ('rules-4' if 'python' in expected else 'rules-3')
+        expected_rules = 'rules-11' if 'java' in expected else ('rules-4' if 'python' in expected else 'rules-3')
         self.assertIn(expected_rules, health['parser_version'])
 
     def test_legacy_java_cache_stays_ready_but_changed_script_grammar_cannot_advertise_readiness(self):
@@ -232,7 +232,7 @@ class ScriptHTTPContract(unittest.TestCase):
                 expected_languages.append('vue')
                 expected_languages.sort()
             self.assertEqual(health['languages'], expected_languages)
-            self.assertIn('rules-10', health['parser_version'])
+            self.assertIn('rules-11', health['parser_version'])
             legacy = {k: lock[k] for k in ('pack_version', 'bundle_sha256')}
             legacy.update(lock['grammars']['java'])
             grammar = destination / legacy['grammar']
@@ -328,7 +328,7 @@ class ScriptHTTPContract(unittest.TestCase):
             if not allow_cleanup.wait(timeout=12):
                 raise TimeoutError('test did not release the parser cleanup barrier')
             try:
-                original_cleanup(process)
+                return original_cleanup(process)
             finally:
                 cleanup_finished.set()
 

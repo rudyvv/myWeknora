@@ -143,7 +143,7 @@ class VueHTTPContract(unittest.TestCase):
         status, health = self.request('/health')
         self.assertEqual(status, 200, health)
         self.assertIn('vue', health['languages'])
-        expected_rules = ('rules-10' if 'java' in health['languages'] else
+        expected_rules = ('rules-11' if 'java' in health['languages'] else
                           'rules-4' if 'python' in health['languages'] else 'rules-3')
         self.assertIn(expected_rules, health['parser_version'])
         self.assertEqual(self.sfc_runtime, 'vue-sfc-node-24.19.0-compiler-2.7.16-rules-4')
