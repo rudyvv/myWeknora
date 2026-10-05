@@ -79,11 +79,11 @@ func TestSourceWikiCoverageTelemetryRequiresCompleteSnapshotInventory(t *testing
 	plan.CompletedAt = &now
 	require.NoError(t, f.db.Save(&plan).Error)
 	topics := []types.SourceWikiCoverageTopic{
-		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "ready", Status: "ready", LastReadySnapshotID: publication.SnapshotID},
-		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "stale", Status: "ready", LastReadySnapshotID: "older-snapshot"},
-		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "failed", Status: "failed"},
-		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "planned", Status: "planned", Initial: true},
-		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "expansion", Status: "expansion"},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "ready", Status: "ready", LastReadySnapshotID: publication.SnapshotID, UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "stale", Status: "ready", LastReadySnapshotID: "older-snapshot", UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "failed", Status: "failed", UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "planned", Status: "planned", Initial: true, UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
+		{ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "expansion", Status: "expansion", UncertaintyReasons: types.JSON(`[]`), Relations: types.JSON(`[]`)},
 	}
 	require.NoError(t, f.db.Create(&topics).Error)
 	coverage, err := reader.GetSourceWikiCoverageSummary(f.ctx, f.kb.ID, f.ds.ID, publication.SnapshotID)
