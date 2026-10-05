@@ -213,6 +213,10 @@ func TestSourceWikiUnaffectedModuleCarriesApplicabilityAcrossPublishedSnapshot(t
 	require.Equal(t, "ready", carried.SourceProvenance.State)
 	require.Equal(t, next.Snapshot.ID, carried.SourceProvenance.ApplicableSnapshotID,
 		"a complete unchanged module must be re-attested to the new published snapshot")
+	require.Equal(t, previous.Snapshot.ID, carried.SourceProvenance.Evidence[0].SnapshotID,
+		"carry-forward must retain the original raw evidence snapshot")
+	require.NotEqual(t, carried.SourceProvenance.Evidence[0].SnapshotID, carried.SourceProvenance.ApplicableSnapshotID,
+		"the real carried card must keep raw evidence separate from its new applicability snapshot")
 	require.Equal(t, oldBody, carried.Content, "carrying applicability forward must preserve the page body")
 	require.Equal(t, oldEvidenceSHA, carried.SourceProvenance.Evidence[0].SHA256,
 		"carrying applicability forward must preserve the exact evidence digest")

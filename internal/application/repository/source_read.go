@@ -104,6 +104,11 @@ func (r *knowledgeRepository) AcquireSourceRead(ctx context.Context, targets typ
 				}
 			}
 		}
+		if tx.Migrator().HasTable("source_wiki_evidence_refs") {
+			if err := captureSourceWikiReadProjection(tx, ctx, id); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

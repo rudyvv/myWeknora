@@ -22,6 +22,16 @@ func (r *wikiPageRepository) readDB(ctx context.Context, table string) *gorm.DB 
 }
 
 func readWikiPageDB(ctx context.Context, base *gorm.DB, sourceWiki, sourceWikiContributions bool, table string) *gorm.DB {
+	return readWikiPageDBMode(ctx, base, sourceWiki, sourceWikiContributions, table, true)
+}
+
+// readWikiPageCaptureDB keeps the current answer predicate while bypassing the
+// fixed-projection source. It is used only inside the atomic lease-capture SQL.
+func readWikiPageCaptureDB(ctx context.Context, base *gorm.DB, sourceWiki, sourceWikiContributions bool, table string) *gorm.DB {
+	return readWikiPageDBMode(ctx, base, sourceWiki, sourceWikiContributions, table, false)
+}
+
+func readWikiPageDBMode(ctx context.Context, base *gorm.DB, sourceWiki, sourceWikiContributions bool, table string, useAnswerProjection bool) *gorm.DB {
 	db := base.WithContext(ctx)
 	if !sourceWiki {
 		return db
@@ -29,6 +39,11 @@ func readWikiPageDB(ctx context.Context, base *gorm.DB, sourceWiki, sourceWikiCo
 	if err := source.ValidateReadScope(ctx); err != nil {
 		db.AddError(err)
 		return db
+	}
+	if useAnswerProjection && sourceWiki && source.IsWikiAnswerRead(ctx) && table == "wiki_pages" {
+		if _, ok := source.ReadLeaseID(ctx); ok {
+			return sourceWikiAnswerProjectionDB(ctx, db)
+		}
 	}
 	p := table + ".source_provenance"
 	evidenceArray := "(CASE WHEN jsonb_typeof(" + p + "->'evidence')='array' THEN " + p + "->'evidence' ELSE '[]'::jsonb END)"
@@ -90,9 +105,15 @@ func readWikiPageDB(ctx context.Context, base *gorm.DB, sourceWiki, sourceWikiCo
 	}
 	// Ordinary wiki rows that contain a source contribution without complete typed
 	// provenance fail closed instead of falling back to the legacy intersect rule.
-	ordinary := p + " IS NULL AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text(COALESCE(" + refs + ",'[]'::jsonb)) fr JOIN source_files sf ON sf.id=split_part(fr,'|',1))"
+	ordinary := wikiPageOrdinaryReadCondition(table)
 
 	return db.Where("(" + ordinary + ") OR (" + condition + ")")
+}
+
+func wikiPageOrdinaryReadCondition(table string) string {
+	p := table + ".source_provenance"
+	refs := "(CASE WHEN jsonb_typeof(" + table + ".source_refs::jsonb)='array' THEN " + table + ".source_refs::jsonb ELSE '[]'::jsonb END)"
+	return p + " IS NULL AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text(COALESCE(" + refs + ",'[]'::jsonb)) fr JOIN source_files sf ON sf.id=split_part(fr,'|',1))"
 }
 
 func wikiPageMixedContributionOwnerSQL(ctx context.Context, table, refs, owner, pageProvenance string) string {
