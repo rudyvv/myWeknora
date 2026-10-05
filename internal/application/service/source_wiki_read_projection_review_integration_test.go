@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/application/access"
@@ -101,7 +102,8 @@ func t22RequireRecognizedToolDenial(t *testing.T, denialText string) {
 	require.True(t, strings.Contains(denial, "not found") || strings.Contains(denial, "forbidden") ||
 		strings.Contains(denial, "unauthorized") || strings.Contains(denial, "expired") ||
 		strings.Contains(denial, "explicitly cleared") || strings.Contains(denial, "error code: 1001") ||
-		strings.Contains(denial, "error code: 1002"), "tool failure must be a recognized authorization/lifecycle denial, got: %q", denialText)
+		strings.Contains(denial, "error code: 1002") || strings.Contains(denial, strings.ToLower(access.ErrForbidden.Error())),
+		"tool failure must be a recognized authorization/lifecycle denial, got: %q", denialText)
 }
 
 func t22RequireNoPageDetails(t *testing.T, output, errorText string, page *types.WikiPage) {
@@ -147,6 +149,9 @@ func t22RequireExpectedReadDenial(t *testing.T, err error) {
 	t.Helper()
 	require.Error(t, err)
 	if errors.Is(err, repository.ErrWikiPageNotFound) {
+		return
+	}
+	if errors.Is(err, access.ErrForbidden) {
 		return
 	}
 	var appErr *apperrors.AppError
@@ -244,8 +249,17 @@ func TestSourceWikiAnswerLeaseKeepsExactCardAcrossPublicationAndRegeneration(t *
 	oldPage, err := wiki.GetPageBySlug(oldCtx, f.kb.ID, first.Slug)
 	require.NoError(t, err)
 	require.Equal(t, firstPage.Version, oldPage.Version)
+	require.Equal(t, carried.SourceProvenance, oldPage.SourceProvenance,
+		"the old lease must return its captured provenance, not reclassify it from the newer current contribution")
+	require.Equal(t, "ready", oldPage.SourceProvenance.State)
 	require.Contains(t, oldPage.Content, "T22_OLD_VALIDATED_BODY")
 	require.NotContains(t, oldPage.Content, "T22_NEW_VALIDATED_BODY")
+	oldPageByID, err := wiki.GetPageByID(oldCtx, firstPage.ID)
+	require.NoError(t, err)
+	require.Equal(t, firstPage.Version, oldPageByID.Version)
+	require.Equal(t, carried.SourceProvenance, oldPageByID.SourceProvenance,
+		"ID reads must return the same captured provenance as slug reads")
+	require.Equal(t, "ready", oldPageByID.SourceProvenance.State)
 	oldRead, err := t22WikiReadToolResult(t, wiki, f, oldCtx, first.Slug)
 	require.NoError(t, err)
 	require.Contains(t, oldRead.Output, "T22_OLD_VALIDATED_BODY")
@@ -266,7 +280,7 @@ func TestSourceWikiAnswerLeaseKeepsExactCardAcrossPublicationAndRegeneration(t *
 
 	_, staleErr := wiki.GetPageBySlug(staleCtx, f.kb.ID, first.Slug)
 	t22RequireWikiReadDenied(t, nil, staleErr, firstPage)
-	staleSearch, staleSearchErr := t22WikiSearchToolResult(t, wiki, f, staleCtx, "T22_NO_MATCH_QUERY_OLD")
+	staleSearch, staleSearchErr := t22WikiSearchToolResult(t, wiki, f, staleCtx, "Scheduling")
 	t22RequireWikiSearchEmpty(t, staleSearch, staleSearchErr, firstPage)
 }
 
@@ -294,7 +308,7 @@ func TestSourceWikiAnswerLeaseExcludesLaterValidatedCard(t *testing.T) {
 	require.Empty(t, search, "a card first validated after lease capture is not part of that question")
 	read, err := t22WikiReadToolResult(t, wiki, f, oldCtx, validated.Slug)
 	t22RequireWikiReadDenied(t, read, err, latePage)
-	lateSearch, err := t22WikiSearchToolResult(t, wiki, f, oldCtx, "T22_NO_MATCH_QUERY_LATE")
+	lateSearch, err := t22WikiSearchToolResult(t, wiki, f, oldCtx, "Scheduling")
 	t22RequireWikiSearchEmpty(t, lateSearch, err, latePage)
 
 	newCtx, releaseNew, err := t22BeginWikiAnswerRead(wiki, f.ctx, t22WikiTargets(f, f.ds.ID))
@@ -443,6 +457,10 @@ func TestSourceWikiAnswerLeasePinsRawEvidenceAcrossRevisionPruneAndGC(t *testing
 	require.Positive(t, count, "the active lease continues to protect its distinct applicability/RAG snapshot")
 	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", oldEvidence.FileVersionID).Count(&count).Error)
 	require.EqualValues(t, 1, count, "the active answer projection retains the exact old raw version after pruning")
+	var retryAt time.Time
+	require.NoError(t, f.db.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", carryRun.Snapshot.ID).
+		Select("next_attempt_at").Scan(&retryAt).Error)
+	require.True(t, retryAt.After(time.Now().UTC()), "the active read should defer this snapshot's GC retry")
 
 	pinnedPage, err := wiki.GetPageBySlug(oldCtx, f.kb.ID, first.Slug)
 	require.NoError(t, err)
@@ -457,10 +475,44 @@ func TestSourceWikiAnswerLeasePinsRawEvidenceAcrossRevisionPruneAndGC(t *testing
 	require.NotContains(t, string(raw.RawContent), "new schedule")
 
 	releaseOld()
-	_, err = collector.CollectRetiredSourceVersions(f.ctx, 100)
+	var leaseRows int64
+	for _, leaseTable := range []struct{ table, keyColumn string }{
+		{"source_read_leases", "id"}, {"source_read_scopes", "lease_id"},
+		{"source_read_document_scopes", "lease_id"}, {"source_read_wiki_scopes", "lease_id"},
+		{"source_read_wiki_evidence_refs", "lease_id"}, {"source_read_wiki_projection_captures", "lease_id"},
+		{"source_read_wiki_page_projections", "lease_id"},
+	} {
+		require.NoError(t, f.db.Table(leaseTable.table).Where(leaseTable.keyColumn+"=?", leaseID).Count(&leaseRows).Error, leaseTable.table)
+		require.Zero(t, leaseRows, "released answer lease must leave no lease-owned scope, projection or evidence pin: %s", leaseTable.table)
+	}
+	require.NoError(t, f.db.Table("source_read_scopes").Where("snapshot_id=?", carryRun.Snapshot.ID).Count(&leaseRows).Error)
+	require.Zero(t, leaseRows, "no source read lease may remain on the applicability snapshot")
+	require.NoError(t, f.db.Table("source_publications").Where("snapshot_id=?", carryRun.Snapshot.ID).Count(&leaseRows).Error)
+	require.Zero(t, leaseRows, "the applicability snapshot is no longer the current publication")
+	require.NoError(t, f.db.Model(&types.SourceWikiUpdatePlan{}).
+		Where("previous_snapshot_id=? AND status IN ?", carryRun.Snapshot.ID, []string{"pending", "running"}).Count(&leaseRows).Error)
+	require.Zero(t, leaseRows, "no pending Wiki update plan may retain the applicability snapshot")
+	for _, table := range []string{
+		"source_wiki_evidence_refs", "source_read_wiki_evidence_refs", "source_wiki_attempt_evidence_refs",
+	} {
+		require.NoError(t, f.db.Table(table).Where("file_version_id=?", oldEvidence.FileVersionID).Count(&leaseRows).Error, table)
+		require.Zero(t, leaseRows, "the exact raw version must have no remaining evidence owner: %s", table)
+	}
+
+	// The active lease made the collector defer this candidate. Once the lease
+	// and other live owners are proven gone, advance only this test snapshot's
+	// retry time and let the real collector perform its normal cleanup.
+	candidate := f.db.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", carryRun.Snapshot.ID).
+		Update("next_attempt_at", time.Now().UTC().Add(-time.Second))
+	require.NoError(t, candidate.Error)
+	require.EqualValues(t, 1, candidate.RowsAffected, "the deferred applicability-snapshot candidate must remain queued")
+	processed, err := collector.CollectRetiredSourceVersions(f.ctx, 100)
 	require.NoError(t, err)
+	require.Positive(t, processed, "the eligible deferred candidate must be collected by the real repository")
 	require.NoError(t, f.db.Table("source_file_versions").Where("id=?", oldEvidence.FileVersionID).Count(&count).Error)
 	require.Zero(t, count, "release removes the projection owner and leaves ordinary GC to collect the raw version")
 	require.NoError(t, f.db.Table("source_chunk_references").Where("snapshot_id=?", carryRun.Snapshot.ID).Count(&count).Error)
 	require.Zero(t, count, "release removes the remaining RAG lease protection for the applicability snapshot")
+	require.NoError(t, f.db.Table("source_snapshot_gc_candidates").Where("snapshot_id=?", carryRun.Snapshot.ID).Count(&count).Error)
+	require.Zero(t, count, "successfully collected snapshots leave no retry candidate")
 }
