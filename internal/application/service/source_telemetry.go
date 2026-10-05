@@ -27,14 +27,21 @@ func finishSourceTelemetryPhase(telemetry *types.SourceRunTelemetry, phase strin
 }
 
 func incrementSourceTelemetryCounter(counter **int64) {
+	addSourceTelemetryCounter(counter, 1)
+}
+
+func addSourceTelemetryCounter(counter **int64, amount int64) {
 	if counter == nil {
+		return
+	}
+	if amount < 0 {
 		return
 	}
 	value := int64(0)
 	if *counter != nil {
 		value = **counter
 	}
-	value++
+	value += amount
 	*counter = &value
 }
 

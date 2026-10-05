@@ -988,6 +988,9 @@ func (s *DataSourceService) GetSyncLogs(ctx context.Context, dsID string, limit 
 		logger.Errorf(ctx, "failed to get sync logs: %v", err)
 		return nil, err
 	}
+	if err := s.enrichSourceWikiCoverage(ctx, logs); err != nil {
+		return nil, err
+	}
 	return logs, nil
 }
 
@@ -995,6 +998,9 @@ func (s *DataSourceService) GetSyncLogs(ctx context.Context, dsID string, limit 
 func (s *DataSourceService) GetSyncLog(ctx context.Context, syncLogID string) (*types.SyncLog, error) {
 	log, err := s.syncLogRepo.FindByID(ctx, syncLogID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enrichSourceWikiCoverage(ctx, []*types.SyncLog{log}); err != nil {
 		return nil, err
 	}
 	return log, nil

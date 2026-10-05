@@ -70,6 +70,10 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			telemetry = prior.Source.Telemetry
 		}
 	}
+	if lease, ok := types.SourceSyncLeaseFromContext(ctx); ok {
+		leaseRecoveries := lease.LeaseRecoveryCount
+		telemetry.LeaseRecoveries = &leaseRecoveries
+	}
 	result := &types.SyncResult{Source: &types.SourceRunResult{Snapshot: &types.SourceSnapshot{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, DataSourceID: ds.ID, SyncLogID: log.ID, State: "fetching"}, Members: []types.SourceSnapshotMember{}, Telemetry: telemetry}}
 	snapshot := result.Source.Snapshot
 	created := false
@@ -230,8 +234,7 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		telemetry.GitTransferBytes = &transferred
 	}
 	if gitMetrics.ObjectStageMeasured {
-		residues := gitMetrics.CleanupResidueCount
-		telemetry.CleanupResidueCount = &residues
+		addSourceTelemetryCounter(&telemetry.CleanupResidueCount, gitMetrics.CleanupResidueCount)
 	}
 	if err != nil {
 		return err

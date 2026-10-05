@@ -63,12 +63,12 @@ type SourceModelUsageTelemetry struct {
 // snapshot-scoped topic inventory. Pointer counters distinguish measured zero
 // from unavailable coverage.
 type SourceWikiCoverageTelemetry struct {
-	EligibleTopics    *int64 `json:"eligible_topics,omitempty"`
-	ReadyTopics       *int64 `json:"ready_topics,omitempty"`
-	StaleTopics       *int64 `json:"stale_topics,omitempty"`
-	FailedTopics      *int64 `json:"failed_topics,omitempty"`
-	UngeneratedTopics *int64 `json:"ungenerated_topics,omitempty"`
-	DeferredTopics    *int64 `json:"deferred_topics,omitempty"`
+	EligibleTopics    *int64 `json:"eligible,omitempty"`
+	ReadyTopics       *int64 `json:"ready,omitempty"`
+	StaleTopics       *int64 `json:"stale,omitempty"`
+	FailedTopics      *int64 `json:"failed,omitempty"`
+	UngeneratedTopics *int64 `json:"ungenerated,omitempty"`
+	DeferredTopics    *int64 `json:"deferred,omitempty"`
 }
 
 func NewSourceRunTelemetry() *SourceRunTelemetry {

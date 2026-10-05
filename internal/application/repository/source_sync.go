@@ -49,6 +49,7 @@ type sourceSyncRunRow struct {
 	Trigger            string `gorm:"column:trigger"`
 	Phase              string `gorm:"column:phase"`
 	TargetCommitSHA    string `gorm:"column:target_commit_sha"`
+	LeaseRecoveryCount int64  `gorm:"column:lease_recovery_count"`
 	RetryCount         int    `gorm:"column:retry_count"`
 }
 
@@ -712,6 +713,13 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 		activeID := derefSourceID(state.ActiveSyncLogID)
 		leaseExpired := state.LeaseExpiresAt == nil || !state.LeaseExpiresAt.After(now)
 		resumingActive := activeID == logID && leaseExpired
+		if resumingActive && state.LeaseOwner != nil && *state.LeaseOwner != "" && state.LeaseExpiresAt != nil && !state.LeaseExpiresAt.After(now) {
+			run.LeaseRecoveryCount++
+			if err := tx.Table("source_sync_runs").Where("sync_log_id=?", logID).
+				Update("lease_recovery_count", run.LeaseRecoveryCount).Error; err != nil {
+				return err
+			}
+		}
 		if activeID != "" && !resumingActive {
 			if !leaseExpired {
 				if activeID == logID {
@@ -776,7 +784,8 @@ func (r *SyncLogRepository) ClaimSourceRun(ctx context.Context, ds *types.DataSo
 			return err
 		}
 		lease = types.SourceSyncLease{DataSourceID: ds.ID, TenantID: ds.TenantID, SyncLogID: logID, Owner: owner,
-			ConfigGeneration: state.ConfigGeneration, FencingToken: state.FencingToken, ExpiresAt: expires, TargetCommitSHA: run.TargetCommitSHA}
+			ConfigGeneration: state.ConfigGeneration, FencingToken: state.FencingToken, LeaseRecoveryCount: run.LeaseRecoveryCount,
+			ExpiresAt: expires, TargetCommitSHA: run.TargetCommitSHA}
 		claimed = true
 		return nil
 	})
@@ -1067,12 +1076,18 @@ func (r *SyncLogRepository) RecoverSourceTriggers(ctx context.Context, ds *types
 			now := time.Now().UTC()
 			run.RetryCount++
 			run.DeliveryGeneration++
+			if state.LeaseOwner != nil && *state.LeaseOwner != "" {
+				run.LeaseRecoveryCount++
+			}
 			state.FencingToken++ // invalidate the previous owner before re-dispatch
 			state.LeaseOwner, state.LeaseExpiresAt = nil, nil
 			if err := sourceStateUpdate(tx, &state, map[string]any{"fencing_token": state.FencingToken, "lease_owner": nil, "lease_expires_at": nil}); err != nil {
 				return err
 			}
-			if err := tx.Table("source_sync_runs").Where("sync_log_id=?", activeID).Updates(map[string]any{"retry_count": run.RetryCount, "delivery_generation": run.DeliveryGeneration, "updated_at": now}).Error; err != nil {
+			if err := tx.Table("source_sync_runs").Where("sync_log_id=?", activeID).Updates(map[string]any{
+				"retry_count": run.RetryCount, "delivery_generation": run.DeliveryGeneration,
+				"lease_recovery_count": run.LeaseRecoveryCount, "updated_at": now,
+			}).Error; err != nil {
 				return err
 			}
 			if err := tx.Model(&types.SyncLog{}).Where("id=?", activeID).Updates(map[string]any{"status": types.SyncLogStatusQueued, "finished_at": nil, "source_fencing_token": 0, "updated_at": now}).Error; err != nil {

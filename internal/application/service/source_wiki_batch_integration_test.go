@@ -55,9 +55,6 @@ func TestSourceWikiCoverageTelemetryRequiresCompleteSnapshotInventory(t *testing
 	f := newJavaSourceFixture(t)
 	syncSourceFixture(t, f)
 	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` })
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000115_source_wiki_incremental_updates.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 	reader, ok := generator.(interfaces.SourceWikiBatchReadService)
 	require.True(t, ok)
 	var publication types.SourcePublication

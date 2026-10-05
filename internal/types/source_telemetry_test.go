@@ -1,9 +1,26 @@
 package types
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
+
+func TestSourceWikiCoverageTelemetryUsesContractJSONNames(t *testing.T) {
+	eligible, ready, stale, failed, ungenerated, deferred := int64(6), int64(1), int64(1), int64(1), int64(2), int64(1)
+	coverage := SourceWikiCoverageTelemetry{
+		EligibleTopics: &eligible, ReadyTopics: &ready, StaleTopics: &stale,
+		FailedTopics: &failed, UngeneratedTopics: &ungenerated, DeferredTopics: &deferred,
+	}
+	encoded, err := json.Marshal(coverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"eligible":6,"ready":1,"stale":1,"failed":1,"ungenerated":2,"deferred":1}`
+	if string(encoded) != want {
+		t.Fatalf("Wiki coverage JSON = %s, want %s", encoded, want)
+	}
+}
 
 func TestSourceRunTelemetryAllowlistedAndAccumulatesDurations(t *testing.T) {
 	telemetry := NewSourceRunTelemetry()

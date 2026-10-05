@@ -3188,6 +3188,10 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	sourceWikiCoverage := NewSourceWikiService(nil, kbs, nil, modelService, db).(interfaces.SourceWikiBatchReadService)
 	svc := NewDataSourceService(dsRepo, repository.NewSyncLogRepository(db), nil, kbs, kbDeleteTaskEnqueuer{}, registry, datasource.NewScheduler(dsRepo, repository.NewSyncLogRepository(db), kbDeleteTaskEnqueuer{}, sourceSnapshots), repository.NewTenantRepository(db), nil, nil, engines, nil, models, sourceSnapshots, modelService, nil, sourceWikiCoverage).(*DataSourceService)
 	f.ctx, f.db, f.service, f.kbs, f.ds, f.kb, f.sha = ctx, db, svc, kbs, ds, kb, sha
+	ensureT19LifecycleSchema(t, f)
+	leaseRecoveryMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000118_source_sync_lease_recoveries.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(leaseRecoveryMigration)).Error)
 	f.modelService = modelService
 	f.chunks = NewChunkService(repository.NewSourceAwareChunkRepository(db), repository.NewSourceAwareKnowledgeRepository(db), kbRepo, modelService, engines, nil, nil, nil, kbs)
 	f.knowledge = &knowledgeService{repo: repository.NewSourceAwareKnowledgeRepository(db), kbService: kbs, kbShareService: f.shares, chunkRepo: repository.NewSourceAwareChunkRepository(db), chunkService: f.chunks, modelService: modelService, retrieveEngine: engines, task: kbDeleteTaskEnqueuer{}, fileSvc: sourceNoObjectStorage{}, tagRepo: repository.NewKnowledgeTagRepository(db)}
