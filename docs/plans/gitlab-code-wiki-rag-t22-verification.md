@@ -65,3 +65,15 @@ Questionnaire Java/XML/Vue失败是native缺官方Node/SFC环境，换用精确�
 原T10 dirty两文件host精确保存clean6c730aa5。窄Sol/high双轴0硬/0判断、Spec0；根专用PG四门禁全PASS39.076（cron12.27，remote三子合计10.21，vector6.63，keyword5.41）。session15560全收，允许只此夹具切片集成。原T06四testfiles冻结7b250c77；根四PG三PASS(recovery5.31/conflict5.93/GC5.91)、lateRunner FAIL0.07/pkg22.046，session6341全收。真实114 nullable BatchID FK揭示manual ledger.Create写空string导致SQL23503，根明确同Luna最小product修manual持久化NULL且真实FK保留，不dropFK/虚构父batch。原owner-release race和预算fencing断言保持；三绿不重复。首轮34非Agent矩阵目前33项已验证绿/1晚到runner未绿，Hybrid独立合同选择仍pending；此累计是按原病例证据汇总，不宣称整组新一轮通过。
 
 执行者T10 send-to-root被授权校验拒绝，未有详细原因，不重试/换渠道；总控用获准wait_threads收完成证据并告执行者无需用户转达。T06/main正常直接报告已到。保留之前Temp清理政策拒绝限制，未绕过。所有根测试进程已收；新修继续同三聊天，不新建对话/不GitHub过程流水。
+
+## 最新覆盖与用户决定（2026-10-05）
+
+Wiki fixture 7b250c77 窄双轴均 0 必修，manual NULL 修复 287aceca 独立 Sol/high Standards 0 硬违规/0 判断、Spec 0。根真实六个 TestSourceWikiRunner PostgreSQL 用例全部 PASS，pkg 5.003s；LateResult 还断言 nullable SQL NULL 与真实 batch FK 存在，原非空 batch 生命周期及预算 fence 保留。session19582 已完整收取，日志 `%TEMP%/weknora-root-t22-runner-287aceca-pg.txt`。已合入 bae1c65a。首轮34非Agent canonical cases现在均有累计实际通过证据；不是新的一次完整矩阵重跑。Hybrid 仍待产品修复验证，整票仍21/22、#30 OPEN。
+
+用户明确批准现有固定30题，仅问题范围批准、不代表评分或票验收。原题集字节保持；外部批准标记 `docs/acceptance/source-question-bank-approval.json` 绑定其实际 SHA256。用户另选旧问答继续使用其开始时已验证旧卡片，具体实现合同 `gitlab-code-wiki-rag-t22-old-wiki-contract.md` 与 ADR-0011；新问答 stale 排除、当前权限撤销及明确清除优先保持。
+
+用户已在 Codex 浏览器完成登录。根通过实际 UI 读取：前端 `http://localhost:5173`，后端本机8080；生成模型 `deepseek-v4-flash-ga-260731`（UI显示200K），Embedding `doubao-embedding-vision-251215`（1024维）。这不是 tokenizer 或 Embedding 输入上限的实测。根创建独立空知识库「T22 GitLab 源码验收 2026-10-05」，ID `65658207-a2ec-47fb-bf0f-11e7b685369e`，RAG/Wiki皆启用并选择现有模型；UI成功保存、0文件确认。未修改已有 EVIP 92文档知识库、未运行模型请求或真实源码导入。
+
+本地 Git 元数据确认三个仓库 remote 均为 `https://gitlab.p.it`、分支master：`zhangruiliang/nsb`、`zy-frontend/evip-dashboard`、`zy-frontend/evip_mobile`；HEAD依次3cf44a4e、c9c4e357、15d9575e。新知识库数据源列表为空；根取消未配置连接向导，没有调用测试连接或提交浏览器自动填充内容。已向用户说明在专用知识库安全配置现有只读令牌，聊天不收凭据。实际远端可达/权限/CA/模型/性能门禁仍未通过。
+
+主API工具六项修复host保存clean9fd54ef1，三ownedfile仍在独立窄Sol/high两轴与根完整fakeHTTP验证中，暂不接受。原T06从已接受bae实施租约固定卡片产品/119/sharedfixture；原T10同base独占NEW projection review测试；均Luna/xhigh，PG57822只root，保留原三个聊天与分支。没有GitHub过程推送或关闭#30。

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "approved",
+  "question_manifest_sha256": "c8e527d3cad34dfd5d4fd2ed54853f1babcba17dfb78eb96a170f2a876ae1b44",
+  "approved_by": "human_user",
+  "approved_at_utc": "2026-10-05T07:44:53.1288944Z",
+  "approval_note": "User explicitly approved existing 30 questions in this root chat on 2026-10-05; approval is question scope only, not retrieval or ticket acceptance."
+}
