@@ -404,3 +404,15 @@ Main六finding修hostfreeze9fd54ef188bcb4a22099bbe338af927a3289aa53，root完整
 原T06产品单MVCC projection已写出但未冻结。Root发现raw证据snapshot被强制等于applicability，违反ADR0010 carry-forward允许旧raw证据；已交同Luna最小修，租约匹配applicability、raw owner/hash独立验证，并补公开read regression。原T10先前stream断开且无文件不算完成，root恢复同一个Luna/xhigh对话，转交真实T06 seam，限定新增review test文件，先完成可行的旧body/新问排stale/撤权清除/prune保留四类，不为尚缺capacity合法fixture停住。不向用户询问内部runner。
 
 最新processed main2e338483-8967-4344-a3df-1e275491384c:8，T06 1bd61794-e8b7-46ec-879d-b07b4db1953a:8，T10 f3cb49ee-47de-4780-bcad-adf8da4107cc:7。三个active实施同票，root尚无新PG/test进程；57822仍root唯一，Dockerparser57823仍保留。接到干净freeze再Sol/high双轴及必要根真实复验；不把结束/环境失败/部分通过算验收，不新建聊天，不ACK循环。
+
+## TLS 已接受，Wiki 行为门禁与运行准备（2026-10-05）
+
+Root TLS ded7780a 独立Sol/high完整两轴0hard/Spec0，实际12定向顶层全PASS(5.084/4.820/5.024)，merge93b6e8ac。已审查源码生成的独立后端exe成功build，使用repo既有sqlite官方header shim及dev.sh protobuf conflictPolicy=warn启动flag，session92219已收。实际例外仍关闭，现有8080后端未停。原main完成外部ignored runner，Root读完整源码/比对artifact hash/复制至test-runners后实际默认dryrunPASS，无配置内容读取/进程启动。源码start-weknora-t22-tls-diagnostic.go SHA256 0A570CBF015424299E7824E7078330797437C6881E67930390D3F85142793DB1，runner exe SHA256 195625C93CEE8AA66922AEF978942673E11AA103152F994E1511469A75F8B2C7。worker外部目录不可写没有绕过；host按授权准备正常外部artifact。worker在Root收紧前有一次-start守卫验证，实际因busy8080拒绝且无dotenv读取/启动，之后未再-start。
+
+根已向用户请求具体最后确认：重启当前8080后端、仅https://gitlab.p.it例外1小时、到期自动正常验证，再复测；未收到答复不得启动或停止当前app。解释确认为TLS身份校验丧失及实际后端重启，不是技能虚构审批。原Dmain/系统trust/Dockershared服务未改，无Github过程push。
+
+Wiki产品初冻507e fixture duplicate115红，0980修后专用容器暂停退出先环境拒绝；根只恢复自有57822/57823，真实复验SQL sf.deleted_at不存在红31.981。最小9800de09改为knowledges精确owner join/delete状态，独立窄0新hard/Spec0，原carry-forward+Hybrid两门禁实际全部PASS21.851，session36317收。根保留未整体accept直到独立授权/clear/prune/newquestion四门禁。详情t22-tls-and-projection-review.md。原T06保持9800产品冻结，现同票ONLY NEW source_wiki_read_capacity_integration_test.go，尝试合法public metadata-only大值触发真实16MiB预算/全零Wiki投影/sourceRAG继续，不造无效页面/降阈值/改schema，不PG。
+
+原T10 helperhostfreezea7cb，compile-only4.089 no-tests非行为绿。完整Standards0，Spec两个具体必修GC activeRead夹具与singlepage deny仅BODY检查；Spec最后容量故障未算终态。两修同Luna进行，Root读冻a7cb撤回先前WIP marker误派（真实freeze已有atomic）。负例查询改通用Scheduling防止合法query echo导致隐私假红。helper新freeze后完整双轴+根实际PG，禁止Go cache/共享夹具试错，不人为转述问题。
+
+当前cursors mainfedcccc0-7c36-4a1f-883b-9f280d95f770:5 acceptedopsidle；T06 16ff9f92-3bfa-47d1-98c9-4586749fa2d1:4 capacityactive；T10 ca79cd17-7e9c-4427-9d5d-5eb48796672d:9 repairsactive。Root目前无未收测试/构建，PG57822独占idle、parser57823healthy；后续新结果才read/行动，不重复消息ACK。21/22、#30 OPEN，现场GitLab/model/30题评分/大仓性能仍无通过证据。
