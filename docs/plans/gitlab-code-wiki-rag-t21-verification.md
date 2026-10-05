@@ -35,3 +35,35 @@ UI slice accepted and merged into root, with frontend diff against the accepted 
 Independent native HTTP probe used the current parser Handler, one connection slot and a one-second header timeout. A client sent an unfinished header and then one byte every 0.3 seconds. Actual output after 2.094 seconds: `slow_peer_closed=false`; a second connection received `HTTP/1.1 503 Service Unavailable`. Thus the socket idle timeout does not enforce the intended finite absolute header-read duration. Root sent the exact evidence and requested an absolute request-line/header deadline plus a real slow-header recovery regression before parser freeze. This is not a formal whole-ticket acceptance or a parser build claim.
 
 Probe: `C:/Users/28211/AppData/Local/Temp/weknora-root-t21-header-deadline.py`, using the existing Python and approved dependency path without credentials or source text. First probe sent a complete second request and hit Windows receive-side WinError 10053; revised second connection only read the server's admission response, producing the concrete result above. Both host commands ended; no test process remains. Parser's separately reported fault-only success does not cover this newly measured header gap, so a final full run after repair is necessary.
+
+After the executor's absolute-header deadline repair, root's independent real Handler probe actually PASS: one-second configured header deadline, `slow_peer_closed=true` at 1.532 seconds and subsequent full health request `HTTP/1.0 200 OK`. Script `Temp/weknora-root-t21-header-deadline-fixed.py` tests closure and recovered public HTTP service, without invoking grammar or a provider. This closes the measured header counterexample at the pre-freeze stage; full frozen parser review and the executor's final bounded Docker suite are still pending. The host command completed and left no process running.
+
+## Frozen parser slice review: 3c8f655b
+
+Executor froze clean `3c8f655b9d713aa0cac651ce3ddf2f58b2c3b40b` (ten files, 1166 insertions/38 deletions); root resolved refs and nonempty three-dot diff against approved c074. Executor actual isolated HTTP suite: 89/89 PASS, 92.778 seconds, followed by seven fault/offline assertions under verified network-none/read-only/768MiB/2CPU/64PID limits. No native Go/PG/source publication or database-disk-full claim. Compose syntax check omitted a missing local .env and therefore does not verify real secret/env loading.
+
+### Standards
+
+Independent Sol/high: zero documented hard violations; two nonblocking possible Duplicated Code judgments (eight-limit defaults/mappings in server.py; repeated complete ParserLimits test literals). No tooling-only or Spec completeness findings mixed into this axis. Neither judgment requires a broad refactor.
+
+### Spec
+
+Independent Sol/high: two findings, worst P2. P2: disk-full fixture deletes the filler before parsing, contradicting the claimed request behavior while /tmp remains full. P3: deeply nested JSON can raise uncaught RecursionError and close the HTTP handler rather than return its newly documented bounded generic error; this input behavior pre-existed c074, so it is a contract mismatch, not a new parser-wide outage claim. Root confirmed real HTTP reachability at 3000 levels/6001 bytes under8192-byte transport limit: connection_closed_without_response, RecursionError logged=true. Initial1500-level probe received generic400 because that body decodes on the host Python3.12.14; it is not the counterexample. All probe processes completed; no provider, source repository or credentials were involved.
+
+Root sent both required corrections in one repair batch to the same Luna/xhigh parser chat. Preserve ENOSPC through real parse/health assertions then remove the unique filler in finally; catch the JSON recursion failure generically with deep-input+subsequent-health regression. Production guard changes justify one final full HTTP/fault run, followed by narrow dual re-review. Parser slice and wholeT21 remain unaccepted; no integration/GitHub close/push/T22 dispatch.
+
+## Backend frozen 39eb6f40 and helper gates (2026-10-05)
+
+Root saved exactly 38 stable backend-owned files after actual worker Git denial, clean39eb6f407131abfbda636ba24c99bba2b80115b9. Fixed c074...39eb resolved/nonempty; parallel Sol/high whole review started. Helper clean39d434c701557a1d3b95e94259c2011dad06f143 static Standards0hard/0material and Spec0; host consumed only that test commit into backend candidate b37ce7d15c2d3fc25bc7d9e3c1ee35215c96b768. Product SHA remains39eb for frozen review; no root product integration or whole-ticket acceptance.
+
+Actual native13 top-level tests PASS: source5.524s/config4.160s/types3.938s/embedding5.567s. Covers finite defaults/invalid budgets/admission cancellation/blob spool/cumulative transfer/tokenizer/telemetry validation/outbound HTTP retry and cancelled request; earlier eight shared governor tests remain valid. Session8242 collected.
+
+First service command omitted integration build tag and returned no-tests4.633s; this is compilation only, not a gate pass. Corrected tags integration command reaches three real cases but ALLFAIL before behavior assertions with SQL42P01 source_cleanup_operations absent (package18.031s). Existing common java fixture only loads migration116 while previous T19 lifecycle tests separately initialize117. Root will return this precise common-fixture correction to main, using production migration rather than fictional schema. Sessions57437/37348 collected; PG57822 root exclusive, no running root tests.
+
+Backend review confirmed measurable Wiki coverage JSON keys mismatch accepted UI, asynchronous coverage only captured at sync-time, and recovery counters partial; full findings batch is still being finalized before same-main repair dispatch. Parser two required repairs remain in original chat; first complete suite hit two timing failures, isolated repeat passes do not equal whole acceptance, final full/fault rerun is active. Original helper now owns only NEW source_quota_review_integration_test.go for retained original/cache/vector quota rejection and old-publication gates. This is same-ticket non-overlapping test assistance, not T22 dispatch.
+
+### Backend whole review and single repair batch
+
+Standards: 0 documented hard violations; 2 nonblocking possible Duplicated Code judgments (config/domain budget defaults-validation and staged/new index admission checks). No broad refactor required.
+
+Spec: 2 P2 findings. Wiki coverage uses *_topics JSON names rather than approved short keys; asynchronous completed-plan coverage is captured only immediately after synchronous source publication, so no later UI/log refresh. Operational counters: durable lease recovery count never populated, and prior cleanup-residue count overwritten by current zero. Root sent one exact batch to original main, with JSON/read-scope/snapshot/recovery assertions and common real117 migration fixture repair. Whole T21 still unaccepted20/22. Existing helper owns separate quota regression file; no shared-file ownership conflict.
