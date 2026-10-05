@@ -1,0 +1,97 @@
+# Source acceptance runner
+
+`scripts/source-acceptance-run.ps1` performs a bounded acceptance pass against the existing WeKnora API. It verifies model and source scope, obtains source previews, associates each source with its approved published snapshot, issues 30 source-scoped top-10 searches, then checks expected evidence through authorized original-file reads. Its default mode does not publish or otherwise mutate sources.
+
+The WeKnora bearer token must be injected into the process environment as `WEKNORA_ACCESS_TOKEN` by the approved secret mechanism. The runner never reads GitLab credentials (they remain in the configured datasource), accepts no credentials as command arguments, suppresses API error bodies, and never places source text or answers in the report. Avoid PowerShell transcription during a run that handles credentials.
+
+## Inputs and fixed evidence scope
+
+Required inputs identify the API origin, one knowledge base, a version-1 question bank, a report path, and the exact embedding model, tokenizer, and input-token limit. The runner verifies every referenced datasource belongs to that KB, is GitLab source mode, and is bound for reads. It checks the KB's selected embedding model and reads `/api/v1/models/{id}` to verify the model type, tokenizer, and configured hard input limit. The provider-documented hard limit must be at least the configured input limit. The provider-limit reference and hardware description are recorded metadata, not independently verified claims.
+
+The checked-in T06 question-bank shape is accepted directly: exactly 30 entries, each with `id`, `category` (`symbol_path`, `business_chain`, or `frontend_sql`), `question`, `repository`, and one or more `evidence` records. Each evidence record contains a relative `path`, one-based `start_line`/`end_line`, and whole-file SHA-256; a record can override `repository` for cross-repository chains. The bank's top-level `hash_mode` governs the evidence digests. `sha256_utf8_lf` means SHA-256 over UTF-8 file bytes after CRLF and lone CR are normalized to LF. The authorized source API reports a separate raw-byte SHA-256; the runner verifies that identity first, then applies the declared bank hash mode. It never conflates those hashes.
+
+The question bank must have status `human_confirmed` or `approved_for_acceptance`, or `-ApprovalMarkerFile` must provide schema v1 with `status: approved`, the exact question-manifest SHA-256, an approver, and a timestamp. A `draft_for_human_confirmation` bank is rejected by default. `-AllowDraftQuestions` is exploratory only: even if searches run, the report is `draft_not_scored`, the threshold remains false, and exit code 3 prevents treating it as release acceptance. Repository-backed question banks must declare an explicit supported top-level `hash_mode`.
+
+`-RepositorySourceMap` binds each question-bank repository ID to an already published source in the selected KB. Every referenced repository must be mapped; an unmapped repository fails closed and is never silently assigned to `-DataSourceId`. Mapping file shape:
+
+```json
+{
+  "schema_version": 1,
+  "status": "approved",
+  "knowledge_base_id": "<acceptance-kb-id>",
+  "repositories": [
+    {
+      "repository_id": "evip_mobile",
+      "source_id": "<mobile-source-id>",
+      "snapshot_id": "<mobile-published-snapshot-id>",
+      "commit_sha": "<mobile-commit-sha>"
+    },
+    {
+      "repository_id": "nsb",
+      "source_id": "<nsb-source-id>",
+      "snapshot_id": "<nsb-published-snapshot-id>",
+      "commit_sha": "<nsb-commit-sha>"
+    }
+  ]
+}
+```
+
+The runner verifies each mapping's datasource, KB, previewed commit, and current published snapshot/commit before searching. Each question sends only the source IDs required by its expected evidence. All expected evidence spans in a question must be found in that question's top 10 and pass original-file verification for the question to count as `matched`. If one span in a cross-repository chain is absent or unauthorized, that question remains `unknown`. `-DataSourceId` is a compatibility option for a small single-source manifest whose evidence has no repository IDs; it cannot replace mappings for the T06 gold bank.
+
+The runner reads datasource settings from the existing response and sends them only to `POST /api/v1/datasource/{id}/source-preview`, which does not persist the draft settings. Settings with credential-like field names are rejected. The preview's parser-readiness flag is the API-level signal that the app reached a ready, versioned parser over the private parser HTTP interface. An explicitly requested real sync exercises the app's `/v1/parse` calls; fake-server tests do not claim to run a parser process. Preview inventory in the report is limited to relative path, Git blob SHA, size, and status.
+
+Every search calls `POST /api/v1/knowledge-bases/{id}/hybrid-search` with `match_count: 10` and only that question's selected `source_ids`. All hits must belong to the selected source's approved published snapshot and commit. A candidate counts only when its source range contains the expected lines and `GET /api/v1/knowledge/{knowledge_id}/source?version_id=...` succeeds under normal KB authorization. The returned knowledge/source/snapshot/version/commit/path and raw-byte SHA must match the hit; the bank's separate whole-file digest is then computed using its declared `hash_mode`. Search answer wording is not scored. The 27/30 threshold is a top-10 evidence threshold, not full Recall.
+
+Source preview and manual sync are Admin operations. Retrieval and original-source reads require the corresponding KB read authorization. A denied source read cannot count as a hit.
+
+## Running
+
+Run with PowerShell 7 or later. Production API calls require HTTPS and normal certificate validation. HTTP is accepted only for localhost/loopback fake-server tests.
+
+```powershell
+# WEKNORA_ACCESS_TOKEN is injected into this process by the approved secret provider.
+./scripts/source-acceptance-run.ps1 `
+  -BaseUrl 'https://weknora.example.internal' `
+  -KnowledgeBaseId '<acceptance-kb-id>' `
+  -RepositorySourceMap './artifacts/approved-source-map.json' `
+  -QuestionsFile './docs/acceptance/source-representative-questions.json' `
+  -ApprovalMarkerFile './artifacts/question-bank-approval.json' `
+  -ReportPath './artifacts/source-acceptance-report.json' `
+  -ModelIdentifier '<exact-kb-embedding-model-id>' `
+  -Tokenizer 'cl100k_base' `
+  -ConfiguredInputTokenLimit 8192 `
+  -ProviderDocumentedHardLimit 8192 `
+  -ProviderLimitReference 'provider:model-card#max-input-tokens' `
+  -HashMode 'sha256_utf8_lf' `
+  -HardwareDescription 'acceptance host CPU/RAM and app/database deployment IDs'
+```
+
+`-HashMode` is an assertion/compatibility input for banks without a top-level hash mode. For a repository-backed question bank, the bank's top-level mode is authoritative and the supplied option, if any, must agree. Omit `-ApprovalMarkerFile` only when the question bank itself has an accepted status.
+
+By default the run is read-only and requires each existing publication to match the preview and approved map. `-Publish` is supported only for one legacy `-DataSourceId` run without `-RepositorySourceMap`; it calls the existing manual-sync endpoint, polls the returned log ID with a deadline, and verifies the published commit equals the immediately preceding preview. Mapped representative runs stay read-only. Publish/review a candidate separately, then update the human-approved source map before scoring it. Never point `-Publish` at a production or shared source merely to obtain a report.
+
+Each request is bounded by `-RequestTimeoutSeconds`; the full run has `-RunTimeoutMinutes`. A publish poll has `-SyncTimeoutSeconds` and `-PollIntervalSeconds`. Sync-log lookup paginates 100 entries per page for at most 100 pages and never infers a published SHA from a failed run.
+
+An optional UI/Agent smoke can use the frontend's existing `POST /api/v1/agent-chat/{session_id}` endpoint. Supply `-AgentSessionId`, `-AgentId`, and `-AgentQuestion` together. It makes one model-backed request and persists a turn in that session, so use only a designated acceptance session. The report stores a query hash and response event types, not the question, answer, or streamed source text. This checks the UI's chat API path, not browser rendering.
+
+## Report and unknown measurements
+
+The UTF-8 JSON report uses `schema_version: 1` and includes:
+
+- Explicit KB, datasource IDs, published snapshots and commits; model ID, tokenizer, input limits, evidence hash mode, provider reference, and hardware description.
+- Per-source preview/parser readiness, selected file and byte counts, and a reduced path/blob-SHA/size/status inventory; publish result and app-observed telemetry are separate.
+- For each question: original ID/category, repository/source/snapshot/commit scope, every expected path/line/hash span, top-10 evidence identities/ranges, authorized-read outcome, and `matched` or `unknown`.
+- 1/10/100-file incremental and same-budget text-baseline input/output slots. Without provided measurements these stay `unknown` with null values; they are never silently recorded as zero.
+- Optional Agent/UI smoke status, event types, and query hash without answer text.
+
+An optional `-MeasurementsFile` provides externally collected incremental and text-baseline measurements. It is JSON with `schema_version: 1`, `incremental_runs` keyed by `changed_file_count` 1, 10, and 100, and `text_baseline`. Incremental entries must declare matching `model_identifier`, `tokenizer`, and `context_limit_tokens`; the baseline must use the same model, tokenizer, and `budget_tokens`. Useful outputs are `selected_files`, `selected_bytes`, `phase_duration_ms`, `elapsed_ms`, `peak_memory_bytes`, `estimated_input_tokens`, and `actual_input_tokens`. Estimated and provider-reported token use remain separate. This file records external measurements; it does not prove the runner performed those scenarios. Make all 1/10/100 changes only in an isolated acceptance copy. The runner never modifies a repository to synthesize incremental changes.
+
+This runner does not curate or human-confirm questions, generate/semantically review Wiki cards, synthesize repository changes, execute the fault/Agent regression matrix, or establish representative-repository performance thresholds. It is one repeatable API-evidence tool, not the complete Issue #30 gate. A successful invocation is not a claim that overall CodeWiki release acceptance passed.
+
+## Independent fake-HTTP tests
+
+The process-level tests invoke the real PowerShell runner against an isolated local fake API. They cover pagination, model and parser-readiness checks, report privacy, top-10 and snapshot scope, T06 question/evidence shape, multiple required evidence spans, CRLF-to-LF hash normalization, denied original reads, optional Agent UI streaming, and bounded sync timeout. They do not start Docker, PostgreSQL, GitLab, or a model service.
+
+```powershell
+go test ./scripts -count=1
+```
