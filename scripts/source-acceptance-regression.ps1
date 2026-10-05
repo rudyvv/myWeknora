@@ -16,7 +16,10 @@ param(
     )]
     [string[]]$Scenario,
 
-    [switch]$PlanOnly
+    [switch]$PlanOnly,
+
+    [ValidateRange(1, 1320)]
+    [int]$ProcessTimeoutSeconds = 1320
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,11 +29,14 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $packageTarget = './internal/application/service'
 $goTestTimeoutMinutes = 20
 $processTimeoutMinutes = 22
+$maximumStdoutBytes = 1048576
+$maximumJsonLineBytes = 16384
 
-function New-T22Gate([string]$Name, [string]$EvidencePath) {
+function New-T22Gate([string]$Name, [string]$EvidencePath, [string[]]$RequiredSubtests = @()) {
     [pscustomobject]@{
         name = $Name
         evidence_path = $EvidencePath
+        required_subtests = @($RequiredSubtests)
     }
 }
 
@@ -137,7 +143,7 @@ $matrix = @(
         title = 'Original RAG, Wiki, and hybrid Agent presets use their authorized public tools'
         field_followup = 'The fixture uses a controlled model; live model behavior and the human-approved representative question corpus still require field validation.'
         tests = @(
-            (New-T22Gate 'TestSourceWikiOriginalThreeAgentPresetsUsePublicWikiAndFixedQuestionScope' 'internal/application/service/source_wiki_integration_test.go')
+            (New-T22Gate 'TestSourceWikiOriginalThreeAgentPresetsUsePublicWikiAndFixedQuestionScope' 'internal/application/service/source_wiki_integration_test.go' @('rag-qa', 'wiki-qa', 'hybrid-rag-wiki'))
         )
     }
 )
@@ -165,6 +171,9 @@ $target = [pscustomobject]@{
     count = 1
     max_go_test_minutes = $goTestTimeoutMinutes
     max_process_minutes = $processTimeoutMinutes
+    process_timeout_seconds_effective = $ProcessTimeoutSeconds
+    max_stdout_bytes = $maximumStdoutBytes
+    max_json_line_bytes = $maximumJsonLineBytes
 }
 $fieldFollowups = @(
     [pscustomobject]@{
@@ -194,6 +203,14 @@ function New-ScenarioResult($Case, [bool]$Plan) {
                 name = $gate.name
                 status = 'not_run'
                 evidence_path = $gate.evidence_path
+                subtests = @(
+                    foreach ($subtestName in $gate.required_subtests) {
+                        [pscustomobject]@{
+                            name = $subtestName
+                            status = 'not_run'
+                        }
+                    }
+                )
             }
         }
     )
@@ -209,6 +226,49 @@ function New-ScenarioResult($Case, [bool]$Plan) {
     }
 }
 
+function Stop-T22OwnedProcess([System.Diagnostics.Process]$Process) {
+    try {
+        if (-not $Process.HasExited) { $Process.Kill($true) }
+    }
+    catch { }
+    try { $null = $Process.WaitForExit(5000) } catch { }
+    try {
+        if (-not $Process.HasExited) { $Process.Kill($true) }
+    }
+    catch { }
+}
+
+function Add-T22TerminalEvent(
+    [byte[]]$Buffer,
+    [int]$Length,
+    $Actions,
+    [string[]]$ExpectedNames
+) {
+    if ($Length -le 0) { return }
+    $line = [System.Text.Encoding]::UTF8.GetString($Buffer, 0, $Length).TrimEnd("`r")
+    if ([string]::IsNullOrWhiteSpace($line)) { return }
+    try {
+        $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+    }
+    catch {
+        return
+    }
+    if ($null -eq $event -or $null -eq $event.PSObject) { return }
+
+    # Go package events legitimately omit Test; inspect properties before reading.
+    $testProperty = $event.PSObject.Properties['Test']
+    $actionProperty = $event.PSObject.Properties['Action']
+    if ($null -eq $testProperty -or $null -eq $actionProperty) { return }
+    $testName = [string]$testProperty.Value
+    $action = [string]$actionProperty.Value
+    if ([string]::IsNullOrEmpty($testName) -or
+        $action -notin @('pass', 'fail', 'skip') -or
+        $ExpectedNames -cnotcontains $testName) {
+        return
+    }
+    $Actions[$testName] = $action
+}
+
 $startedAt = [DateTimeOffset]::UtcNow
 $scenarioResults = [System.Collections.Generic.List[object]]::new()
 
@@ -216,6 +276,13 @@ foreach ($case in $selectedCases) {
     $scenarioResult = New-ScenarioResult $case $PlanOnly.IsPresent
     if (-not $PlanOnly) {
         $expectedNames = @($case.tests | ForEach-Object { $_.name })
+        $expectedEventNames = [System.Collections.Generic.List[string]]::new()
+        foreach ($gate in $case.tests) {
+            $null = $expectedEventNames.Add($gate.name)
+            foreach ($subtestName in $gate.required_subtests) {
+                $null = $expectedEventNames.Add("$($gate.name)/$subtestName")
+            }
+        }
         $runExpression = '^(' + ($expectedNames -join '|') + ')$'
         $arguments = @(
             'test',
@@ -233,6 +300,7 @@ foreach ($case in $selectedCases) {
         $startInfo.FileName = 'go'
         $startInfo.WorkingDirectory = $repositoryRoot
         $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         foreach ($argument in $arguments) {
@@ -243,47 +311,102 @@ foreach ($case in $selectedCases) {
         $timer = [System.Diagnostics.Stopwatch]::StartNew()
         $exitCode = $null
         $timedOut = $false
+        $outputLimitExceeded = $false
         $startFailed = $false
         $executionError = $false
         $processStarted = $false
-        $testActions = @{}
+        $testActions = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+        $totalOutputBytes = 0
+        $lineBuffer = [byte[]]::new($maximumJsonLineBytes)
+        $lineLength = 0
+        $readBuffer = [byte[]]::new(4096)
         try {
             $processStarted = $process.Start()
             if (-not $processStarted) {
                 $startFailed = $true
             }
             else {
-                $stdoutTask = $process.StandardOutput.ReadToEndAsync()
                 $stderrTask = $process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null)
-                $waitMilliseconds = [int]([TimeSpan]::FromMinutes($processTimeoutMinutes).TotalMilliseconds)
-                if (-not $process.WaitForExit($waitMilliseconds)) {
-                    $timedOut = $true
-                    try { $process.Kill($true) } catch { }
-                    $process.WaitForExit()
-                }
-                $stdoutText = $stdoutTask.GetAwaiter().GetResult()
-                $null = $stderrTask.GetAwaiter().GetResult()
-                $exitCode = $process.ExitCode
+                $stdoutStream = $process.StandardOutput.BaseStream
+                $processLimit = [TimeSpan]::FromSeconds($ProcessTimeoutSeconds)
 
-                foreach ($line in [regex]::Split($stdoutText, "`r?`n")) {
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    try {
-                        $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+                while ($true) {
+                    if ($timer.Elapsed -ge $processLimit) {
+                        $timedOut = $true
+                        Stop-T22OwnedProcess $process
+                        break
                     }
-                    catch {
-                        continue
+                    $remainingWithSentinel = $maximumStdoutBytes - $totalOutputBytes + 1
+                    $readSize = [Math]::Min($readBuffer.Length, $remainingWithSentinel)
+                    $readTask = $stdoutStream.ReadAsync($readBuffer, 0, $readSize)
+                    while (-not $readTask.Wait(100)) {
+                        if ($timer.Elapsed -ge $processLimit) {
+                            $timedOut = $true
+                            Stop-T22OwnedProcess $process
+                            break
+                        }
                     }
-                    if ($event.Test -and $event.Action -in @('pass', 'fail', 'skip') -and
-                        $expectedNames -contains [string]$event.Test) {
-                        $testActions[[string]$event.Test] = [string]$event.Action
+                    if ($timedOut) { break }
+
+                    $bytesRead = $readTask.GetAwaiter().GetResult()
+                    if ($bytesRead -eq 0) {
+                        if ($lineLength -gt 0) {
+                            Add-T22TerminalEvent $lineBuffer $lineLength $testActions $expectedEventNames.ToArray()
+                            $lineLength = 0
+                        }
+                        break
                     }
+                    $totalOutputBytes += $bytesRead
+                    if ($totalOutputBytes -gt $maximumStdoutBytes) {
+                        $outputLimitExceeded = $true
+                        Stop-T22OwnedProcess $process
+                        break
+                    }
+
+                    for ($index = 0; $index -lt $bytesRead; $index++) {
+                        $byte = $readBuffer[$index]
+                        if ($byte -eq 10) {
+                            Add-T22TerminalEvent $lineBuffer $lineLength $testActions $expectedEventNames.ToArray()
+                            $lineLength = 0
+                            continue
+                        }
+                        if ($lineLength -ge $maximumJsonLineBytes) {
+                            $outputLimitExceeded = $true
+                            Stop-T22OwnedProcess $process
+                            break
+                        }
+                        $lineBuffer[$lineLength] = $byte
+                        $lineLength++
+                    }
+                    if ($outputLimitExceeded) { break }
                 }
-                Remove-Variable stdoutText -ErrorAction SilentlyContinue
+
+                while (-not $timedOut -and -not $outputLimitExceeded -and -not $process.HasExited) {
+                    if ($timer.Elapsed -ge $processLimit) {
+                        $timedOut = $true
+                        Stop-T22OwnedProcess $process
+                        break
+                    }
+                    $null = $process.WaitForExit(100)
+                }
+                if (-not $timedOut -and -not $outputLimitExceeded) {
+                    while (-not $stderrTask.IsCompleted) {
+                        if ($timer.Elapsed -ge $processLimit) {
+                            $timedOut = $true
+                            Stop-T22OwnedProcess $process
+                            break
+                        }
+                        $null = $stderrTask.Wait(100)
+                    }
+                    if ($stderrTask.IsCompleted -and $stderrTask.IsFaulted) { $executionError = $true }
+                }
+                if ($process.HasExited) { $exitCode = $process.ExitCode }
             }
         }
         catch {
             if ($processStarted) {
                 $executionError = $true
+                Stop-T22OwnedProcess $process
             }
             else {
                 $startFailed = $true
@@ -291,21 +414,39 @@ foreach ($case in $selectedCases) {
         }
         finally {
             $timer.Stop()
+            if ($processStarted -and -not $process.HasExited) { Stop-T22OwnedProcess $process }
             $process.Dispose()
         }
 
         $testResults = @(
             foreach ($gate in $case.tests) {
-                $action = $testActions[$gate.name]
+                $action = $null
+                if ($testActions.ContainsKey($gate.name)) { $action = $testActions[$gate.name] }
                 $status = switch ($action) {
                     'pass' { 'passed'; break }
                     'fail' { 'failed'; break }
+                    'skip' { 'skipped'; break }
                     default { 'not_run' }
                 }
+                $subtestResults = @(
+                    foreach ($subtestName in $gate.required_subtests) {
+                        $subtestFullName = "$($gate.name)/$subtestName"
+                        $subtestAction = $null
+                        if ($testActions.ContainsKey($subtestFullName)) { $subtestAction = $testActions[$subtestFullName] }
+                        $subtestStatus = switch ($subtestAction) {
+                            'pass' { 'passed'; break }
+                            'fail' { 'failed'; break }
+                            'skip' { 'skipped'; break }
+                            default { 'not_run' }
+                        }
+                        [pscustomobject]@{ name = $subtestName; status = $subtestStatus }
+                    }
+                )
                 [pscustomobject]@{
                     name = $gate.name
                     status = $status
                     evidence_path = $gate.evidence_path
+                    subtests = $subtestResults
                 }
             }
         )
@@ -313,11 +454,20 @@ foreach ($case in $selectedCases) {
         $scenarioResult.exit_code = $exitCode
         $scenarioResult.elapsed_ms = [int]$timer.ElapsedMilliseconds
 
-        $failedTests = @($testResults | Where-Object { $_.status -eq 'failed' })
-        $unrunTests = @($testResults | Where-Object { $_.status -eq 'not_run' })
+        $allResults = [System.Collections.Generic.List[object]]::new()
+        foreach ($testResult in $testResults) {
+            $null = $allResults.Add($testResult)
+            foreach ($subtestResult in $testResult.subtests) { $null = $allResults.Add($subtestResult) }
+        }
+        $failedTests = @($allResults | Where-Object { $_.status -in @('failed', 'skipped') })
+        $unrunTests = @($allResults | Where-Object { $_.status -eq 'not_run' })
         if ($timedOut) {
             $scenarioResult.status = 'failed'
             $scenarioResult.reason = 'process_timeout'
+        }
+        elseif ($outputLimitExceeded) {
+            $scenarioResult.status = 'failed'
+            $scenarioResult.reason = 'output_limit_exceeded'
         }
         elseif ($startFailed) {
             $scenarioResult.status = 'not_run'
@@ -325,15 +475,15 @@ foreach ($case in $selectedCases) {
         }
         elseif ($executionError -or $exitCode -ne 0 -or $failedTests.Count -gt 0) {
             $scenarioResult.status = 'failed'
-            $scenarioResult.reason = 'runner_or_test_failed'
+            $scenarioResult.reason = if ($failedTests.Count -gt 0) { 'test_failed_or_skipped' } else { 'runner_or_test_failed' }
         }
-        elseif ($unrunTests.Count -eq $testResults.Count) {
+        elseif ($unrunTests.Count -eq $allResults.Count) {
             $scenarioResult.status = 'not_run'
             $scenarioResult.reason = 'expected_tests_not_observed'
         }
         elseif ($unrunTests.Count -gt 0) {
-            $scenarioResult.status = 'failed'
-            $scenarioResult.reason = 'incomplete_expected_test_set'
+            $scenarioResult.status = 'not_run'
+            $scenarioResult.reason = 'incomplete_expected_test_events'
         }
         else {
             $scenarioResult.status = 'passed'
