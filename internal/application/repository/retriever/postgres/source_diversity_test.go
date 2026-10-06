@@ -108,7 +108,7 @@ func TestSourceCandidateDiversityActivationAndPoolBounds(t *testing.T) {
 	}
 }
 
-func TestKeywordSourceQuotaSQLFiltersBoundedPoolBeforePartition(t *testing.T) {
+func TestKeywordSourcePrioritySQLFiltersBoundedPoolBeforePartition(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestKeywordSourceQuotaSQLFiltersBoundedPoolBeforePartition(t *testing.T) {
 		clause.OrderBy{Columns: []clause.OrderByColumn{{Column: clause.Column{Name: "score"}, Desc: true}}},
 	}
 	bounded := buildKeywordCandidateQuery(gormDB, conditions, sourceCandidatePoolSize(50), "paradedb.score(id)")
-	query := applySourceFileVersionQuota(gormDB, bounded, 50)
+	query := applySourceFileVersionPriority(gormDB, bounded, 50)
 	result := query.Find(&[]pgVectorWithScore{})
 	if result.Error != nil {
 		t.Fatal(result.Error)
@@ -149,15 +149,14 @@ func TestKeywordSourceQuotaSQLFiltersBoundedPoolBeforePartition(t *testing.T) {
 	for _, required := range []string{
 		"paradedb.score(id) as score",
 		"source_read_scopes rs",
-		"source_read_scopes rs",
 		"knowledge_tag_relations",
 		"\"embeddings\".\"knowledge_id\" = $3",
 		"source_chunk_references quota_refs",
 		"PARTITION BY quota_refs.snapshot_id, quota_refs.source_file_id, quota_refs.file_version_id",
 		"ORDER BY source_bounded_candidates.score DESC, source_bounded_candidates.chunk_id ASC",
-		"source_file_rank <=",
+		"CASE WHEN source_ranked_candidates.source_file_rank <= 4 THEN 0 ELSE 1 END ASC",
 		"LIMIT $11",
-		"LIMIT $13",
+		"LIMIT $12",
 	} {
 		if !strings.Contains(sql, required) {
 			t.Errorf("generated keyword SQL missing %q:\n%s", required, sql)
@@ -165,9 +164,12 @@ func TestKeywordSourceQuotaSQLFiltersBoundedPoolBeforePartition(t *testing.T) {
 	}
 	poolLimit := strings.Index(sql, "LIMIT $11")
 	quotaJoin := strings.Index(sql, "JOIN source_chunk_references quota_refs")
-	quotaFilter := strings.Index(sql, "source_file_rank <=")
-	if poolLimit < 0 || quotaJoin < poolLimit || quotaFilter < quotaJoin {
-		t.Fatalf("keyword SQL must scope/order/bound candidates before applying the per-file quota:\n%s", sql)
+	priorityOrder := strings.Index(sql, "CASE WHEN source_ranked_candidates.source_file_rank <= 4 THEN 0 ELSE 1 END ASC")
+	if poolLimit < 0 || quotaJoin < poolLimit || priorityOrder < quotaJoin {
+		t.Fatalf("keyword SQL must scope/bound candidates before prioritizing per-file heads:\n%s", sql)
+	}
+	if strings.Contains(sql, "WHERE source_ranked_candidates.source_file_rank") {
+		t.Fatalf("keyword SQL must keep overflow candidates eligible for TopK backfill:\n%s", sql)
 	}
 	for _, filter := range []string{
 		"rl.id='ae79c267-78dd-4c22-9c68-30f952adb38b'",
@@ -185,7 +187,7 @@ func TestKeywordSourceQuotaSQLFiltersBoundedPoolBeforePartition(t *testing.T) {
 	}
 }
 
-func TestSourceFileVersionQuotaSQLDiversifiesAfterScopedCandidatePool(t *testing.T) {
+func TestSourceFileVersionPrioritySQLDiversifiesAfterScopedCandidatePool(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +238,7 @@ func TestSourceFileVersionQuotaSQLDiversifiesAfterScopedCandidatePool(t *testing
 	}
 	bounded := buildKeywordCandidateQuery(db, conditions, sourceCandidatePoolSize(50), "score")
 	var got []diversityResultFixture
-	if err := applySourceFileVersionQuota(db, bounded, 50).Find(&got).Error; err != nil {
+	if err := applySourceFileVersionPriority(db, bounded, 50).Find(&got).Error; err != nil {
 		t.Fatal(err)
 	}
 	counts := make(map[string]int)
@@ -252,15 +254,59 @@ func TestSourceFileVersionQuotaSQLDiversifiesAfterScopedCandidatePool(t *testing
 	if !seen["b-001"] || !seen["c-001"] {
 		t.Fatalf("lower-ranked files inside the bounded pool must survive the dominant file: got %v", seen)
 	}
-	if counts["file-a/version-a"] != sourceFileVersionCandidateQuota {
-		t.Fatalf("dominant file count = %d, want quota %d", counts["file-a/version-a"], sourceFileVersionCandidateQuota)
+	if counts["file-a/version-a"] != 48 {
+		t.Fatalf("dominant file count = %d, want 48 after two alternate files get priority and backfill fills TopK", counts["file-a/version-a"])
 	}
-	if counts["stale-file/stale-version"] != 0 || len(got) != 6 {
-		t.Fatalf("scope-filtered candidates must not consume quota; expected 6 in-scope underfilled hits, got %d (%v)", len(got), counts)
+	if counts["stale-file/stale-version"] != 0 || len(got) != 50 {
+		t.Fatalf("scope-filtered candidates must not consume the pool; expected 50 in-scope hits after backfill, got %d (%v)", len(got), counts)
 	}
 }
 
-func TestSourceFileVersionQuotaSeparatesSamePathAcrossSourcesAndVersions(t *testing.T) {
+func TestSourceFileVersionPriorityReturnsTopKForSingleDominantFile(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&diversityCandidateFixture{}, &diversityReferenceFixture{}); err != nil {
+		t.Fatal(err)
+	}
+	var candidates []diversityCandidateFixture
+	var references []diversityReferenceFixture
+	for i := 0; i < 60; i++ {
+		chunkID := fmt.Sprintf("only-file-%02d", i)
+		candidates = append(candidates, diversityCandidateFixture{
+			ID: chunkID, ChunkID: chunkID, SourceID: "source-a", KnowledgeBaseID: "kb-a", Score: 1 - float64(i)/100,
+		})
+		references = append(references, diversityReferenceFixture{
+			ChunkID: chunkID, SnapshotID: "snapshot-a", SourceFileID: "file-a", FileVersionID: "version-a",
+		})
+	}
+	if err := db.Create(&candidates).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&references).Error; err != nil {
+		t.Fatal(err)
+	}
+	conditions := []clause.Expression{
+		clause.Expr{SQL: "source_id = ? AND knowledge_base_id = ?", Vars: []interface{}{"source-a", "kb-a"}},
+		clause.OrderBy{Columns: []clause.OrderByColumn{{Column: clause.Column{Name: "score"}, Desc: true}}},
+	}
+	bounded := buildKeywordCandidateQuery(db, conditions, sourceCandidatePoolSize(50), "score")
+	var got []diversityResultFixture
+	if err := applySourceFileVersionPriority(db, bounded, 50).Find(&got).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 50 {
+		t.Fatalf("single-file retrieval returned %d candidates, want TopK 50 after bounded-pool backfill", len(got))
+	}
+	for i, hit := range got {
+		if hit.Score != 1-float64(i)/100 {
+			t.Fatalf("single-file hit rank %d score = %g, want original relevance %g", i+1, hit.Score, 1-float64(i)/100)
+		}
+	}
+}
+
+func TestSourceFileVersionPrioritySeparatesSamePathAcrossSourcesAndVersions(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +351,7 @@ func TestSourceFileVersionQuotaSeparatesSamePathAcrossSourcesAndVersions(t *test
 	}
 	bounded := buildKeywordCandidateQuery(db, conditions, sourceCandidatePoolSize(50), "score")
 	var got []diversityResultFixture
-	if err := applySourceFileVersionQuota(db, bounded, 50).Find(&got).Error; err != nil {
+	if err := applySourceFileVersionPriority(db, bounded, 50).Find(&got).Error; err != nil {
 		t.Fatal(err)
 	}
 	counts := make(map[string]int)
@@ -316,27 +362,30 @@ func TestSourceFileVersionQuotaSeparatesSamePathAcrossSourcesAndVersions(t *test
 		}
 		counts[ref.SnapshotID+"/"+ref.SourceFileID+"/"+ref.FileVersionID]++
 	}
-	if len(got) != len(groups)*sourceFileVersionCandidateQuota {
-		t.Fatalf("one path can fill each independent source/version quota: got %d rows, want %d", len(got), len(groups)*sourceFileVersionCandidateQuota)
+	if len(got) != len(groups)*6 {
+		t.Fatalf("same-path source/version groups must each backfill to their six available candidates: got %d rows, want %d", len(got), len(groups)*6)
 	}
 	for _, group := range groups {
 		key := group.snapshot + "/" + group.file + "/" + group.version
-		if counts[key] != sourceFileVersionCandidateQuota {
-			t.Errorf("group %s count = %d, want %d", key, counts[key], sourceFileVersionCandidateQuota)
+		if counts[key] != 6 {
+			t.Errorf("group %s count = %d, want all six candidates after priority/backfill", key, counts[key])
 		}
 	}
 }
 
-func TestVectorSourceQuotaSQLKeepsAuthorizationFiltersAheadOfCandidateLimit(t *testing.T) {
+func TestVectorSourcePrioritySQLKeepsAuthorizationFiltersAheadOfCandidateLimit(t *testing.T) {
 	query := buildSourceDiverseVectorQuery(
 		"WITH source_candidates AS MATERIALIZED (SELECT * FROM embeddings WHERE published_scope AND source_id_scope AND knowledge_base_scope AND tag_scope AND dimension = $2 AND is_enabled = $3)",
 		"source_candidates", "", 1536, 4, 5, 6)
 	scopeEnd := strings.Index(query, ", source_nearest_candidates AS MATERIALIZED")
 	poolLimit := strings.Index(query, "LIMIT $4")
 	quotaJoin := strings.Index(query, "JOIN source_chunk_references quota_refs")
-	quotaFilter := strings.Index(query, "source_file_rank <= 4")
-	if scopeEnd < 0 || poolLimit < 0 || quotaJoin < poolLimit || quotaFilter < quotaJoin {
-		t.Fatalf("vector SQL must apply authorized scopes, then bounded candidate retrieval, then quota:\n%s", query)
+	priorityOrder := strings.Index(query, "CASE WHEN source_file_rank <= 4 THEN 0 ELSE 1 END ASC")
+	if scopeEnd < 0 || poolLimit < 0 || quotaJoin < poolLimit || priorityOrder < quotaJoin {
+		t.Fatalf("vector SQL must apply authorized scopes, then bounded candidate retrieval, then per-file priority:\n%s", query)
+	}
+	if strings.Contains(query, "WHERE source_file_rank <=") {
+		t.Fatalf("vector SQL must keep overflow candidates eligible for TopK backfill:\n%s", query)
 	}
 	for _, required := range []string{
 		"published_scope AND source_id_scope AND knowledge_base_scope AND tag_scope AND dimension = $2 AND is_enabled = $3",

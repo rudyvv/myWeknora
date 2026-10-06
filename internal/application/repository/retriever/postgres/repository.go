@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	sourceFileVersionCandidateQuota = 4
-	minSourceCandidatePoolSize      = 100
-	maxSourceCandidatePoolSize      = 200
+	sourceFileVersionPriorityCount = 4
+	minSourceCandidatePoolSize     = 100
+	maxSourceCandidatePoolSize     = 200
 )
 
 // pgRepository implements PostgreSQL-based retrieval operations
@@ -57,6 +57,8 @@ func shouldDiversifySourceCandidates(sourceVisibility bool, params types.Retriev
 		!source.ParseSourceCodeQuery(params.Query).Enabled
 }
 
+// sourceCandidatePoolSize bounds the candidates available to the diversity
+// stage; chunks ranked outside this pool cannot be recovered by reordering.
 func sourceCandidatePoolSize(topK int) int {
 	if topK <= 0 {
 		return 0
@@ -82,14 +84,16 @@ func sourceFileVersionRankExpression(candidateAlias, referenceAlias, scoreColumn
 	) AS source_file_rank`, referenceAlias, referenceAlias, referenceAlias, candidateAlias, scoreColumn, direction, candidateAlias)
 }
 
-func applySourceFileVersionQuota(db *gorm.DB, boundedCandidates *gorm.DB, topK int) *gorm.DB {
+func applySourceFileVersionPriority(db *gorm.DB, boundedCandidates *gorm.DB, topK int) *gorm.DB {
 	rankedCandidates := db.Table("(?) AS source_bounded_candidates", boundedCandidates).
 		Joins("JOIN source_chunk_references quota_refs ON quota_refs.chunk_id=source_bounded_candidates.chunk_id").
 		Select("source_bounded_candidates.*, " + sourceFileVersionRankExpression("source_bounded_candidates", "quota_refs", "score", true))
 
+	// Prefer the first few hits per immutable file version, but keep every
+	// bounded-pool candidate eligible to fill the remaining TopK slots.
 	return db.Table("(?) AS source_ranked_candidates", rankedCandidates).
 		Select("source_ranked_candidates.id, source_ranked_candidates.content, source_ranked_candidates.source_id, source_ranked_candidates.source_type, source_ranked_candidates.chunk_id, source_ranked_candidates.knowledge_id, source_ranked_candidates.knowledge_base_id, source_ranked_candidates.tag_id, source_ranked_candidates.score").
-		Where("source_ranked_candidates.source_file_rank <= ?", sourceFileVersionCandidateQuota).
+		Order(fmt.Sprintf("CASE WHEN source_ranked_candidates.source_file_rank <= %d THEN 0 ELSE 1 END ASC", sourceFileVersionPriorityCount)).
 		Order("source_ranked_candidates.score DESC, source_ranked_candidates.chunk_id ASC").
 		Limit(topK)
 }
@@ -127,12 +131,12 @@ func buildSourceDiverseVectorQuery(queryPrefix, candidateTable, whereClause stri
 		SELECT id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
 			(1 - distance) AS score
 		FROM source_ranked_candidates
-		WHERE source_file_rank <= %[6]d AND distance <= $%[7]d
-		ORDER BY distance ASC, chunk_id ASC
+		WHERE distance <= $%[7]d
+		ORDER BY CASE WHEN source_file_rank <= %[6]d THEN 0 ELSE 1 END ASC, distance ASC, chunk_id ASC
 		LIMIT $%[8]d
 	`, dimension, candidateTable, whereClause, candidateLimitParam,
 		sourceFileVersionRankExpression("source_nearest_candidates", "quota_refs", "distance", false),
-		sourceFileVersionCandidateQuota, thresholdParam, finalLimitParam)
+		sourceFileVersionPriorityCount, thresholdParam, finalLimitParam)
 }
 
 // NewPostgresRetrieveEngineRepository creates a new PostgreSQL retriever repository
@@ -368,7 +372,7 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	bm25DB := g.db.WithContext(ctx)
 	bm25Query := buildKeywordCandidateQuery(bm25DB, bm25Conds, bm25TopK, "paradedb.score(id)")
 	if diversifySourceCandidates {
-		bm25Query = applySourceFileVersionQuota(bm25DB, bm25Query, int(params.TopK))
+		bm25Query = applySourceFileVersionPriority(bm25DB, bm25Query, int(params.TopK))
 	}
 
 	var bm25Rows []pgVectorWithScore
