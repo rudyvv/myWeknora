@@ -42,6 +42,16 @@ func newSourceRelationFixture(t *testing.T, dbLogger logger.Interface) sourceRel
 	return seedSourceRelationFixture(t, db)
 }
 
+func TestSourceRelationFactBoundsQueryBindsExactlyOneArgumentPerPlaceholder(t *testing.T) {
+	query, args := sourceRelationFactBoundsQuery(7, "kb-one", "source-one", "snapshot-one")
+	if got, want := len(args), strings.Count(query, "?"); got != want {
+		t.Fatalf("source fact bounds query has %d placeholders but %d bound arguments", want, got)
+	}
+	if got, want := len(args), 10; got != want {
+		t.Fatalf("source fact bounds query has %d bound arguments, want %d for three scoped identity checks and snapshot", got, want)
+	}
+}
+
 func seedSourceRelationFixture(t *testing.T, db *gorm.DB) sourceRelationFixture {
 	t.Helper()
 	if err := db.AutoMigrate(&types.SourceSnapshot{}, &types.SourceSnapshotMember{}, &types.SourceFile{}, &types.SourceFileVersion{}, &types.SourceCodeRelation{}); err != nil {

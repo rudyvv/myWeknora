@@ -292,6 +292,23 @@ func (r *sourceSnapshotRepository) DeferWikiDerivation(ctx context.Context, tena
 	})
 }
 
+func sourceRelationFactBoundsQuery(tenant uint64, knowledgeBaseID, sourceID, snapshotID string) (string, []any) {
+	const validIdentity = `sf.id=sm.source_file_id AND sf.tenant_id=? AND sf.knowledge_base_id=? AND sf.data_source_id=? AND
+		sv.id=sm.file_version_id AND sv.source_file_id=sm.source_file_id AND sv.snapshot_id=sm.snapshot_id AND jsonb_typeof(sv.facts)='array'`
+	query := `SELECT COUNT(*) AS member_count,
+		COUNT(*) FILTER (WHERE ` + validIdentity + `) AS valid_count,
+		COUNT(DISTINCT sm.source_file_id) AS distinct_file_count,
+		COUNT(DISTINCT sm.file_version_id) AS distinct_version_count,
+		COALESCE(SUM(CASE WHEN ` + validIdentity + ` THEN jsonb_array_length(sv.facts) ELSE 0 END),0) AS fact_count,
+		COALESCE(SUM(CASE WHEN ` + validIdentity + ` THEN OCTET_LENGTH(sv.facts::text) ELSE 0 END),0) AS fact_bytes
+		FROM source_snapshot_members sm
+		LEFT JOIN source_files sf ON sf.id=sm.source_file_id
+		LEFT JOIN source_file_versions sv ON sv.id=sm.file_version_id AND sv.snapshot_id=sm.snapshot_id
+		WHERE sm.snapshot_id=? AND sm.status='parsed'`
+	args := []any{tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, snapshotID}
+	return query, args
+}
+
 // LoadSourceRelationMembers first proves the complete scoped fact inventory
 // fits the Wiki work budget using PostgreSQL's canonical JSONB text size. It
 // only materializes facts after that proof and reads them with a fixed keyset
@@ -324,20 +341,8 @@ func (r *sourceSnapshotRepository) LoadSourceRelationMembers(ctx context.Context
 			FactCount            int64
 			FactBytes            int64
 		}
-		const validIdentity = `sf.id=sm.source_file_id AND sf.tenant_id=? AND sf.knowledge_base_id=? AND sf.data_source_id=? AND
-			sv.id=sm.file_version_id AND sv.source_file_id=sm.source_file_id AND sv.snapshot_id=sm.snapshot_id AND jsonb_typeof(sv.facts)='array'`
 		var bounds factBounds
-		query := `SELECT COUNT(*) AS member_count,
-			COUNT(*) FILTER (WHERE ` + validIdentity + `) AS valid_count,
-			COUNT(DISTINCT sm.source_file_id) AS distinct_file_count,
-			COUNT(DISTINCT sm.file_version_id) AS distinct_version_count,
-			COALESCE(SUM(CASE WHEN ` + validIdentity + ` THEN jsonb_array_length(sv.facts) ELSE 0 END),0) AS fact_count,
-			COALESCE(SUM(CASE WHEN ` + validIdentity + ` THEN OCTET_LENGTH(sv.facts::text) ELSE 0 END),0) AS fact_bytes
-			FROM source_snapshot_members sm
-			LEFT JOIN source_files sf ON sf.id=sm.source_file_id
-			LEFT JOIN source_file_versions sv ON sv.id=sm.file_version_id AND sv.snapshot_id=sm.snapshot_id
-			WHERE sm.snapshot_id=? AND sm.status='parsed'`
-		args := []any{tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, snapshotID}
+		query, args := sourceRelationFactBoundsQuery(tenant, knowledgeBaseID, sourceID, snapshotID)
 		if err := tx.Raw(query, args...).Scan(&bounds).Error; err != nil {
 			return fmt.Errorf("read source Wiki fact inventory bounds: %w", err)
 		}

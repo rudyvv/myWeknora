@@ -2124,6 +2124,15 @@ func TestSourceLargeJavaMapperAndTextFallbackPublishCompleteBoundedChunks(t *tes
 	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
 	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id=?", f.ds.ID).Take(&publication).Error)
+	for _, fallbackPath := range []string{"src/templates/dashboard.ftl", "src/config/application.yml"} {
+		var facts types.JSON
+		require.NoError(t, f.db.Table("source_snapshot_members sm").Select("sv.facts").
+			Joins("JOIN source_file_versions sv ON sv.id=sm.file_version_id AND sv.snapshot_id=sm.snapshot_id").
+			Where("sm.snapshot_id=? AND sm.path=? AND sm.status='parsed'", publication.SnapshotID, fallbackPath).Scan(&facts).Error)
+		require.JSONEq(t, "[]", string(facts), "zero-fact text fallback must persist a JSON array for %s", fallbackPath)
+	}
 	var model types.Model
 	require.NoError(t, f.db.Where("id=?", f.kb.EmbeddingModelID).Take(&model).Error)
 	profile, err := source.NewIndexProfile(model.Parameters.EmbeddingParameters)
