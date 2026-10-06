@@ -445,6 +445,7 @@ func TestSourceSharedQuestionRevocationAndPurgeOverridePinnedReads(t *testing.T)
 // tools, source parsing, manifest publication and both indexes are real.
 type sourceQuestionModel struct {
 	calls       [][]chat.Message
+	toolCalls   []types.LLMToolCall
 	beforeReply func(int)
 	beforeClose func(int)
 	answerSeen  chan struct{}
@@ -462,13 +463,20 @@ func (m *sourceQuestionModel) ChatStream(ctx context.Context, messages []chat.Me
 		m.beforeReply(step)
 	}
 	response := types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Done: true, FinishReason: "stop", Content: `fixed source question completed <ref id="c1"/>`}
-	tools := []struct{ name, args string }{{agenttools.ToolGrepChunks, `{"query":"getPushSchedule"}`}, {agenttools.ToolGetDocumentInfo, `{"knowledge_ids":["d1"]}`}, {agenttools.ToolListKnowledgeChunks, `{"knowledge_id":"d1","limit":1,"offset":0}`}}
-	if step < len(tools) {
+	toolCalls := m.toolCalls
+	if toolCalls == nil {
+		toolCalls = []types.LLMToolCall{
+			{ID: "source-tool-0", Function: types.FunctionCall{Name: agenttools.ToolGrepChunks, Arguments: `{"query":"getPushSchedule"}`}},
+			{ID: "source-tool-1", Function: types.FunctionCall{Name: agenttools.ToolGetDocumentInfo, Arguments: `{"knowledge_ids":["d1"]}`}},
+			{ID: "source-tool-2", Function: types.FunctionCall{Name: agenttools.ToolListKnowledgeChunks, Arguments: `{"knowledge_id":"d1","limit":1,"offset":0}`}},
+		}
+	}
+	if step < len(toolCalls) {
 		response.Content = ""
 		response.FinishReason = "tool_calls"
-		response.ToolCalls = []types.LLMToolCall{{ID: fmt.Sprintf("source-tool-%d", step), Function: types.FunctionCall{Name: tools[step].name, Arguments: tools[step].args}}}
+		response.ToolCalls = []types.LLMToolCall{toolCalls[step]}
 	}
-	if step == 3 && m.beforeClose != nil {
+	if step == len(toolCalls) && m.beforeClose != nil {
 		response.Done = false
 		response.Content = `fixed source question completed <ref id="c`
 	}

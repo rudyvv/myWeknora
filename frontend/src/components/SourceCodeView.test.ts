@@ -160,6 +160,75 @@ test('published source is escaped, read-only, and links the selected symbol to t
   } finally { app.unmount(); host.remove() }
 })
 
+test('approved supplemental TypeScript and Python fixtures render through pinned read-only source views', async () => {
+  const path = fileURLToPath(new URL('./SourceCodeView.vue', import.meta.url))
+  const badgePath = fileURLToPath(new URL('./SourceRegionBadge.vue', import.meta.url))
+  const badgeModule = compileSFC(badgePath)
+  const approved: Array<{
+    id: string; versionID: string; path: string; fixture: string; marker: string
+    symbol: { name: string; qualified_name: string; start_line: number; end_line: number }
+  }> = [
+    {
+      id: 'approved-ts', versionID: 'approved-ts-version', path: 'sourceparser/tests/fixtures/reservations.ts',
+      fixture: '../../../sourceparser/tests/fixtures/reservations.ts', marker: 'return request.body;',
+      symbol: { name: 'reserve', qualified_name: 'sourceparser/tests/fixtures/reservations.ts.Reservations.Scheduler.reserve', start_line: 7, end_line: 12 },
+    },
+    {
+      id: 'approved-python', versionID: 'approved-python-version', path: 'sourceparser/tests/test_python_http_contract.py',
+      fixture: '../../../sourceparser/tests/test_python_http_contract.py', marker: '@router.get("/预约")',
+      symbol: { name: 'test_module_class_methods_decorators_async_unicode_and_crlf_keep_parent_ranges', qualified_name: 'sourceparser/tests/test_python_http_contract.py.PythonHTTPContract.test_module_class_methods_decorators_async_unicode_and_crlf_keep_parent_ranges', start_line: 76, end_line: 99 },
+    },
+  ]
+  const requests: Array<[string, string | undefined, string | undefined]> = []
+  const views = new Map<string, any>()
+  for (const fixture of approved) {
+    const content = readFileSync(fileURLToPath(new URL(fixture.fixture, import.meta.url)), 'utf8')
+    views.set(fixture.id, {
+      knowledge_id: fixture.id, snapshot_id: 'approved-published-snapshot', file_version_id: fixture.versionID,
+      project_id: '123', commit_sha: 'b'.repeat(40), repository_url: 'https://gitlab.local/team/repo',
+      path: fixture.path, encoding: 'utf-8', quality: 'structural', parser_version: 'approved-fixture', content,
+      symbols: [{ kind: 'method', name: fixture.symbol.name, qualified_name: fixture.symbol.qualified_name,
+        range: { start_line: fixture.symbol.start_line, end_line: fixture.symbol.end_line } }],
+      facts: [], diagnostics: [], relations: [], relations_truncated: false, relations_next_cursor: '',
+    })
+  }
+  const sourceModule = compileSFC(path, (name: string) => {
+    if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence read') } }
+    if (name === '@/api/knowledge-base') return { async getSourceFile(id: string, versionID?: string, cursor?: string) {
+      requests.push([id, versionID, cursor])
+      const view = views.get(id)
+      if (!view || (versionID && versionID !== view.file_version_id)) throw new Error('source file version is not readable')
+      return { data: view }
+    } }
+    if (name === '@/components/SourceRegionBadge.vue') return badgeModule
+    return testRequire(name)
+  })
+  const host = document.createElement('div')
+  document.body.append(host)
+  const props = reactive({ knowledgeId: approved[0].id, fileVersionId: approved[0].versionID })
+  const app = createApp({ render: () => h(sourceModule.default, props) })
+  app.mount(host)
+  try {
+    for (const [index, fixture] of approved.entries()) {
+      if (index > 0) {
+        props.knowledgeId = fixture.id
+        props.fileVersionId = fixture.versionID
+      }
+      for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
+      assert.deepEqual(requests[index], [fixture.id, fixture.versionID, undefined])
+      assert.ok(host.textContent?.includes(fixture.path))
+      assert.ok(host.textContent?.includes(fixture.marker))
+      assert.ok(host.textContent?.includes(fixture.symbol.qualified_name))
+      assert.equal(host.querySelector('textarea,[contenteditable="true"]'), null)
+      const symbol = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.includes(fixture.symbol.qualified_name))
+      assert.ok(symbol)
+      symbol.click()
+      await nextTick()
+      assert.ok(host.querySelector(`[data-line="${fixture.symbol.start_line}"]`)?.classList.contains('selected'))
+    }
+  } finally { app.unmount(); host.remove() }
+})
+
 test('non-structural source quality is not mislabeled as a syntax error', async () => {
   const path = fileURLToPath(new URL('./SourceCodeView.vue', import.meta.url))
   const badgeModule = compileSFC(fileURLToPath(new URL('./SourceRegionBadge.vue', import.meta.url)))

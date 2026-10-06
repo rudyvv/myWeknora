@@ -1777,6 +1777,186 @@ func TestSourcePythonSnapshotPublishesIndexesAndReadView(t *testing.T) {
 	require.Equal(t, "syntax_error", pinnedDegraded.Quality)
 }
 
+func TestApprovedSupplementTSPythonFixturesStayOnTheirAuthorizedPublishedSnapshot(t *testing.T) {
+	const (
+		tsPath       = "sourceparser/tests/fixtures/reservations.ts"
+		pythonPath   = "sourceparser/tests/test_python_http_contract.py"
+		tsSHA256     = "a53d6a4ecce551ad06276e23cd24ea2559560246238117088833b2844d570d48"
+		pythonSHA256 = "f47b372410c47bd617adce3f2d4702243eb0a05279bf5dcba3070b69b1cf5f81"
+		pythonTest   = "test_module_class_methods_decorators_async_unicode_and_crlf_keep_parent_ranges"
+	)
+
+	root := filepath.Join("..", "..", "..")
+	tsBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(tsPath)))
+	require.NoError(t, err)
+	pythonBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(pythonPath)))
+	require.NoError(t, err)
+	for _, approved := range []struct {
+		path string
+		body []byte
+		sha  string
+	}{
+		{path: tsPath, body: tsBytes, sha: tsSHA256},
+		{path: pythonPath, body: pythonBytes, sha: pythonSHA256},
+	} {
+		normalized := strings.ReplaceAll(string(approved.body), "\r\n", "\n")
+		digest := sha256.Sum256([]byte(normalized))
+		require.Equal(t, approved.sha, fmt.Sprintf("%x", digest), "approved fixture bytes changed: %s", approved.path)
+	}
+
+	files := map[string][]byte{tsPath: tsBytes, pythonPath: pythonBytes}
+	f := newApprovedSupplementSourceFixture(t, files)
+	// Embeddings stay at the existing local fixture boundary; no provider model is called.
+	f.embeddingForText = func(string) []float32 { return []float32{1, 0, 0} }
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync, "the selected approved TypeScript and Python fixtures must be admitted by parser health")
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: 1, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
+	require.EqualValues(t, 2, f.parseCount.Load(), "both original approved files must pass through parser HTTP")
+	parseResult, err := finished.ParseResult()
+	require.NoError(t, err)
+	require.NotNil(t, parseResult.Source.Snapshot)
+	require.True(t, parseResult.Source.Snapshot.ManifestComplete)
+	require.Equal(t, 2, parseResult.Source.Snapshot.FileCount, "only the two approved evidence files are selected")
+	require.Equal(t, f.sha, parseResult.Source.Snapshot.CommitSHA)
+
+	targets := types.SearchTargets{&types.SearchTarget{
+		Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID,
+		TenantID: 1, SourceIDs: []string{f.ds.ID},
+	}}
+	pinned, release, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, targets)
+	require.NoError(t, err)
+	defer release()
+
+	cases := []struct {
+		path, query, symbol, qualified string
+		original                       []byte
+		startLine, startByte           int
+	}{
+		{
+			path: tsPath, query: "reserve", symbol: "reserve",
+			qualified: "sourceparser/tests/fixtures/reservations.ts.Reservations.Scheduler.reserve",
+			original:  tsBytes, startLine: 7, startByte: 243,
+		},
+		{
+			path: pythonPath, query: pythonTest, symbol: pythonTest,
+			qualified: "sourceparser/tests/test_python_http_contract.py.PythonHTTPContract." + pythonTest,
+			original:  pythonBytes, startLine: 76,
+		},
+	}
+	hitsByPath := make(map[string]*types.SearchResult, len(cases))
+	evidenceByPath := make(map[string]types.SourceEvidence, len(cases))
+	for _, tc := range cases {
+		results, searchErr := f.kbs.HybridSearch(pinned, f.kb.ID, types.SearchParams{
+			QueryText: tc.query, MatchCount: 20, SourceIDs: []string{f.ds.ID},
+			DisableVectorMatch: true, SkipContextEnrichment: true,
+		})
+		require.NoError(t, searchErr)
+		for _, candidate := range results {
+			if candidate.Metadata["source_path"] == tc.path {
+				hitsByPath[tc.path] = candidate
+				break
+			}
+		}
+		hit := hitsByPath[tc.path]
+		require.NotNil(t, hit, "approved evidence path must be found through the published keyword index: %s", tc.path)
+		var envelope struct {
+			Source types.SourceEvidence `json:"source"`
+		}
+		require.NoError(t, json.Unmarshal(hit.ChunkMetadata, &envelope))
+		evidenceByPath[tc.path] = envelope.Source
+		require.Equal(t, tc.path, envelope.Source.Path)
+		require.Equal(t, parseResult.Source.Snapshot.ID, envelope.Source.SnapshotID)
+		require.Equal(t, f.sha, envelope.Source.CommitSHA)
+		require.NotEmpty(t, envelope.Source.FileVersionID)
+		require.Equal(t, "structural", envelope.Source.Quality)
+
+		view, readErr := f.knowledge.GetSourceFile(pinned, hit.KnowledgeID, envelope.Source.FileVersionID)
+		require.NoError(t, readErr)
+		require.Equal(t, envelope.Source.SnapshotID, view.SnapshotID, "the public file view must stay associated with search evidence")
+		require.Equal(t, envelope.Source.FileVersionID, view.FileVersionID)
+		require.Equal(t, f.sha, view.CommitSHA)
+		require.Equal(t, tc.path, view.Path)
+		require.Equal(t, string(tc.original), view.Content, "published public read must preserve the original fixture bytes")
+		var symbols []types.SourceSymbol
+		require.NoError(t, json.Unmarshal(view.Symbols, &symbols))
+		var found *types.SourceSymbol
+		for i := range symbols {
+			if symbols[i].Name == tc.symbol {
+				found = &symbols[i]
+				break
+			}
+		}
+		require.NotNil(t, found, "approved evidence symbol must be present in the fixed file version")
+		require.Equal(t, tc.qualified, found.QualifiedName)
+		require.Equal(t, tc.startLine, found.Range.StartLine)
+		if tc.symbol == "reserve" {
+			require.Equal(t, tc.startByte, found.Range.StartByte)
+			require.NotEmpty(t, found.Annotations)
+			require.Equal(t, "@trace", found.Annotations[0].Text)
+			require.Contains(t, found.Signature, "async reserve(")
+			require.Contains(t, view.Content, "return request.body;")
+		} else {
+			require.Contains(t, found.Signature, pythonTest)
+			require.Contains(t, view.Content, "async def reserve(self, 名称: str) -> str:")
+			require.Contains(t, view.Content, "@router.get(\"/预约\")")
+		}
+
+		args, encodeErr := json.Marshal(map[string]any{"knowledge_id": hit.KnowledgeID, "query": tc.symbol})
+		require.NoError(t, encodeErr)
+		toolResult, toolErr := agenttools.NewWikiReadSourceDocTool(f.knowledge, f.chunks, targets).Execute(pinned, args)
+		require.NoError(t, toolErr)
+		require.True(t, toolResult.Success, toolResult.Error)
+		require.Contains(t, toolResult.Output, tc.path)
+		require.Contains(t, toolResult.Output, tc.symbol)
+	}
+
+	tsHit := hitsByPath[tsPath]
+	pythonHit := hitsByPath[pythonPath]
+	tsOnlyTargets := types.SearchTargets{
+		{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: f.kb.ID, TenantID: 1,
+			SourceIDs: []string{f.ds.ID}, KnowledgeIDs: []string{tsHit.KnowledgeID}},
+	}
+	tsOnly, releaseTSOnly, err := f.kbs.(interfaces.SourceReadService).BeginSourceRead(f.ctx, tsOnlyTargets)
+	require.NoError(t, err)
+	defer releaseTSOnly()
+	_, err = f.knowledge.GetSourceFile(tsOnly, pythonHit.KnowledgeID, evidenceByPath[pythonPath].FileVersionID)
+	require.Error(t, err, "a question scoped to the TS file must not read the separately approved Python file")
+	pythonArgs, err := json.Marshal(map[string]any{"knowledge_id": pythonHit.KnowledgeID, "limit": 5, "offset": 0})
+	require.NoError(t, err)
+	deniedRead, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, tsOnlyTargets).Execute(tsOnly, pythonArgs)
+	require.Error(t, err, "the Agent read tool must enforce the same per-file scope")
+	require.False(t, deniedRead.Success)
+
+	agentModel := &sourceQuestionModel{toolCalls: []types.LLMToolCall{
+		{ID: "approved-ts-grep", Function: types.FunctionCall{Name: agenttools.ToolGrepChunks, Arguments: `{"query":"reserve"}`}},
+		{ID: "approved-python-grep", Function: types.FunctionCall{Name: agenttools.ToolGrepChunks, Arguments: `{"query":"` + pythonTest + `"}`}},
+		{ID: "approved-python-list", Function: types.FunctionCall{Name: agenttools.ToolListKnowledgeChunks, Arguments: string(pythonArgs)}},
+	}}
+	agent, err := sourceFixtureAgent(t, f, agentModel, targets)
+	require.NoError(t, err)
+	state, err := agent.Execute(pinned, "approved-source-question", "approved-source-answer", "Read the approved TypeScript and Python source evidence", nil)
+	require.NoError(t, err)
+	require.Contains(t, state.FinalAnswer, "fixed source question completed")
+	require.Len(t, agentModel.calls, 4, "the Agent uses only the deterministic fixture model")
+	var toolContext strings.Builder
+	for _, message := range agentModel.calls[3] {
+		if message.Role == "tool" {
+			toolContext.WriteString(message.Content)
+		}
+	}
+	require.Contains(t, toolContext.String(), tsPath)
+	require.Contains(t, toolContext.String(), pythonPath)
+	require.Contains(t, toolContext.String(), f.sha)
+}
+
 func TestSourceLargeJavaMapperAndTextFallbackPublishCompleteBoundedChunks(t *testing.T) {
 	var java strings.Builder
 	java.WriteString("package stress;\r\npublic class HugeService {\r\n  public String buildLargeMarker() {\r\n")
@@ -2873,6 +3053,16 @@ type interfacesKnowledgeBaseService interface {
 }
 
 func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSourceFixture {
+	return newSourceFixture(t, true, []string{"src"}, extraFiles...)
+}
+
+func newApprovedSupplementSourceFixture(t *testing.T, files map[string][]byte) *javaSourceFixture {
+	// Sync uses the local Git/GitLab fixture; parser HTTP, database publication,
+	// indexes, source reads, and Agent tools remain the real integration seams.
+	return newSourceFixture(t, false, []string{"sourceparser/tests"}, files)
+}
+
+func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []string, extraFiles ...map[string][]byte) *javaSourceFixture {
 	t.Helper()
 	f := &javaSourceFixture{}
 	dsn := os.Getenv("SOURCE_TEST_POSTGRES_DSN")
@@ -3086,9 +3276,11 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	git("config", "core.autocrlf", "false")
 	git("config", "user.email", "fixture@example.invalid")
 	git("config", "user.name", "Source integration")
-	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "src"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "Service.java"), []byte("package demo;\r\n// 中文\r\npublic class Service {\r\n @Deprecated\r\n public String getPushSchedule(String 名称) {\r\n  return \"预约\";\r\n }\r\n}\r\n"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("outside chosen Java scope\n"), 0644))
+	if includeDefaultJava {
+		require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "src"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "Service.java"), []byte("package demo;\r\n// 中文\r\npublic class Service {\r\n @Deprecated\r\n public String getPushSchedule(String 名称) {\r\n  return \"预约\";\r\n }\r\n}\r\n"), 0644))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("outside selected source scope\n"), 0644))
 	for _, files := range extraFiles {
 		for name, content := range files {
 			target := filepath.Join(repoDir, filepath.FromSlash(name))
@@ -3097,7 +3289,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 		}
 	}
 	git("add", ".")
-	git("commit", "-m", "Java source fixture")
+	git("commit", "-m", "source fixture")
 	sha := git("rev-parse", "HEAD")
 	f.advanceFiles = func(changes map[string][]byte) string {
 		for name, content := range changes {
@@ -3172,7 +3364,7 @@ func newJavaSourceFixture(t *testing.T, extraFiles ...map[string][]byte) *javaSo
 	}))
 	t.Cleanup(gitlabServer.Close)
 	config, err := json.Marshal(map[string]any{"type": "gitlab", "credentials": map[string]any{"base_url": gitlabServer.URL, "access_token": "fixture-token"},
-		"settings": map[string]any{"content_mode": "source", "projects": []any{map[string]any{"project_id": "123", "ref": "main", "paths": []string{"src"}}}}})
+		"settings": map[string]any{"content_mode": "source", "projects": []any{map[string]any{"project_id": "123", "ref": "main", "paths": selectedPaths}}}})
 	require.NoError(t, err)
 	ds := &types.DataSource{ID: uuid.NewString(), TenantID: 1, KnowledgeBaseID: kb.ID, Name: "Java fixture", Type: "gitlab", Status: types.DataSourceStatusActive, Config: types.JSON(config)}
 	dsRepo := repository.NewDataSourceRepository(db)
