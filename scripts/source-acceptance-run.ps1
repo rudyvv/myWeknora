@@ -34,6 +34,8 @@ $script:requestHeaders = $null
 $script:baseUri = $null
 $script:httpClient = $null
 $script:accessToken = $null
+$script:apiKey = $null
+$script:authMode = $null
 $script:runStopwatch = $null
 $script:validatedSourceMetadataCache = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
 $script:validatedSourceMetadataCacheBytes = 0
@@ -380,8 +382,13 @@ function Invoke-AcceptanceHttp([string] $Method, [string] $Path, $Body = $null, 
     $remaining = [TimeSpan]::FromMinutes($RunTimeoutMinutes) - $script:runStopwatch.Elapsed
     if ($remaining.TotalSeconds -le 0) { Stop-Acceptance 'run_timeout' 'The acceptance run exceeded its overall deadline.' }
     $timeoutSeconds = [Math]::Max(1, [Math]::Min($RequestTimeoutSeconds, [int][Math]::Ceiling($remaining.TotalSeconds)))
+    if ($script:authMode -notin @('api_key', 'bearer')) { Stop-Acceptance 'authentication_not_configured' 'The acceptance runner has no supported authentication mode configured.' }
     $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::new($Method), $uri)
-    $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $script:accessToken)
+    if ($script:authMode -eq 'api_key') {
+        $request.Headers.Add('X-API-Key', $script:apiKey)
+    } else {
+        $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $script:accessToken)
+    }
     $request.Headers.Accept.ParseAdd($Accept)
     if ($null -ne $Body) {
         $encodedBody = [System.Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 80 -Compress))
@@ -847,7 +854,19 @@ try {
     }
     $script:report.model.provider_limit_reference = $ProviderLimitReference
     $token = [Environment]::GetEnvironmentVariable('WEKNORA_ACCESS_TOKEN', 'Process')
-    if ([string]::IsNullOrWhiteSpace($token)) { Stop-Acceptance 'access_token_missing' 'Set WEKNORA_ACCESS_TOKEN in the current process environment; the token is never read from a file or command argument.' }
+    $apiKeyValue = [Environment]::GetEnvironmentVariable('WEKNORA_API_KEY', 'Process')
+    $hasToken = -not [string]::IsNullOrWhiteSpace($token)
+    $hasApiKey = -not [string]::IsNullOrWhiteSpace($apiKeyValue)
+    if ($hasToken -and $hasApiKey) { Stop-Acceptance 'authentication_ambiguous' 'Set exactly one of WEKNORA_ACCESS_TOKEN or WEKNORA_API_KEY in the current process environment; credentials are never read from a file or command argument.' }
+    if (-not $hasToken -and -not $hasApiKey) { Stop-Acceptance 'access_token_missing' 'Set WEKNORA_ACCESS_TOKEN or WEKNORA_API_KEY in the current process environment; credentials are never read from a file or command argument.' }
+    if ($hasApiKey) {
+        if ($apiKeyValue -match '[\r\n]') { Stop-Acceptance 'api_key_invalid' 'WEKNORA_API_KEY must be a single-line process environment value.' }
+        $script:authMode = 'api_key'
+        $script:apiKey = $apiKeyValue
+    } else {
+        $script:authMode = 'bearer'
+        $script:accessToken = $token
+    }
     $parsedBase = $null
     if (-not [Uri]::TryCreate($BaseUrl, [UriKind]::Absolute, [ref]$parsedBase) -or
         $parsedBase.Scheme -notin @('https', 'http') -or $parsedBase.UserInfo -or $parsedBase.Query -or $parsedBase.Fragment -or
@@ -859,8 +878,8 @@ try {
     }
     $root = $parsedBase.GetLeftPart([UriPartial]::Authority)
     $script:baseUri = [Uri]::new($root.TrimEnd('/') + '/api/v1/')
-    $script:accessToken = $token
     $token = $null
+    $apiKeyValue = $null
     $clientHandler = [System.Net.Http.HttpClientHandler]::new()
     $clientHandler.AllowAutoRedirect = $false
     $clientHandler.UseCookies = $false
@@ -1259,5 +1278,7 @@ try {
         $script:httpClient = $null
     }
     $script:accessToken = $null
+    $script:apiKey = $null
+    $script:authMode = $null
     $script:requestHeaders = $null
 }

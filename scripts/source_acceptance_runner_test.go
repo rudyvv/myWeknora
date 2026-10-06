@@ -17,8 +17,10 @@ import (
 )
 
 const acceptanceTestToken = "test-token-never-print"
+const acceptanceTestAPIKey = "test-api-key-never-print"
 
 type acceptanceFixture struct {
+	apiKey            string
 	wrongSnapshot     bool
 	denySourceRead    bool
 	syncTimeout       bool
@@ -36,10 +38,18 @@ type acceptanceFixture struct {
 	searchCalls       int
 	sourceReadCalls   int
 	agentCalls        int
+	requestCalls      int
 }
 
 func (f *acceptanceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if got := r.Header.Get("Authorization"); got != "Bearer "+acceptanceTestToken {
+	f.requestCalls++
+	if f.apiKey != "" {
+		apiKeys := r.Header.Values("X-API-Key")
+		if len(apiKeys) != 1 || apiKeys[0] != f.apiKey || r.Header.Get("Authorization") != "" {
+			http.Error(w, `{"error":"invalid test credentials"}`, http.StatusUnauthorized)
+			return
+		}
+	} else if got := r.Header.Get("Authorization"); got != "Bearer "+acceptanceTestToken || len(r.Header.Values("X-API-Key")) != 0 {
 		http.Error(w, `{"error":"invalid test credentials"}`, http.StatusUnauthorized)
 		return
 	}
@@ -328,6 +338,41 @@ func TestSourceAcceptanceRunnerChecksParserPublicationScopeAndAuthorizedEvidence
 	}
 	if len(fixture.logOffsets) != 2 || fixture.logOffsets[0] != 0 || fixture.logOffsets[1] != 100 {
 		t.Fatalf("published-run lookup did not paginate logs: offsets=%v", fixture.logOffsets)
+	}
+}
+
+func TestSourceAcceptanceRunnerUsesAPIKeyForAuthorizedSourceReads(t *testing.T) {
+	fixture := &acceptanceFixture{apiKey: acceptanceTestAPIKey}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+
+	result, report := runSourceAcceptanceWithCredentials(t, server.URL, "", acceptanceTestAPIKey,
+		"-AgentSessionId", "session-1", "-AgentId", "agent-1", "-AgentQuestion", "Where is getPushSchedule implemented?")
+	if result.ExitCode != 0 {
+		t.Fatalf("API-key runner failed: exit=%d requests=%d stdout=%s stderr=%s", result.ExitCode, fixture.requestCalls, result.Stdout, result.Stderr)
+	}
+	if fixture.searchCalls != 30 || fixture.sourceReadCalls != 300 {
+		t.Fatalf("API-key auth did not cover the normal search and authorized source-read chain: searches=%d source_reads=%d", fixture.searchCalls, fixture.sourceReadCalls)
+	}
+	if strings.Contains(result.Stdout+result.Stderr+report, acceptanceTestAPIKey) {
+		t.Fatal("runner exposed the process API key")
+	}
+}
+
+func TestSourceAcceptanceRunnerRejectsAmbiguousCredentialsBeforeRequest(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+
+	result, report := runSourceAcceptanceWithCredentials(t, server.URL, acceptanceTestToken, acceptanceTestAPIKey)
+	if result.ExitCode != 1 || !strings.Contains(report, `"authentication_ambiguous"`) {
+		t.Fatalf("runner did not fail closed for both credentials: exit=%d report=%s", result.ExitCode, report)
+	}
+	if fixture.requestCalls != 0 {
+		t.Fatalf("ambiguous credentials must be rejected before any HTTP request, got %d requests", fixture.requestCalls)
+	}
+	if strings.Contains(result.Stdout+result.Stderr+report, acceptanceTestToken) || strings.Contains(result.Stdout+result.Stderr+report, acceptanceTestAPIKey) {
+		t.Fatal("runner exposed one of the process credentials while rejecting ambiguous auth")
 	}
 }
 
@@ -1088,6 +1133,14 @@ func writeAcceptanceRawJSON(t *testing.T, filename, value string) string {
 }
 
 func runSourceAcceptanceWithQuestions(t *testing.T, baseURL, token string, questions map[string]any, sourceMap any, extra ...string) (commandResult, string) {
+	return runSourceAcceptanceWithCredentialsAndQuestions(t, baseURL, token, "", questions, sourceMap, extra...)
+}
+
+func runSourceAcceptanceWithCredentials(t *testing.T, baseURL, accessToken, apiKey string, extra ...string) (commandResult, string) {
+	return runSourceAcceptanceWithCredentialsAndQuestions(t, baseURL, accessToken, apiKey, legacyQuestionManifest("snapshot-1"), nil, extra...)
+}
+
+func runSourceAcceptanceWithCredentialsAndQuestions(t *testing.T, baseURL, accessToken, apiKey string, questions map[string]any, sourceMap any, extra ...string) (commandResult, string) {
 	t.Helper()
 	pwsh, err := exec.LookPath("pwsh")
 	if err != nil {
@@ -1122,13 +1175,20 @@ func runSourceAcceptanceWithQuestions(t *testing.T, baseURL, token string, quest
 	}
 	args = append(args, extra...)
 	cmd := exec.Command(pwsh, args...)
-	env := make([]string, 0, len(os.Environ())+1)
+	env := make([]string, 0, len(os.Environ())+2)
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(strings.ToUpper(entry), "WEKNORA_ACCESS_TOKEN=") {
+		upperEntry := strings.ToUpper(entry)
+		if !strings.HasPrefix(upperEntry, "WEKNORA_ACCESS_TOKEN=") && !strings.HasPrefix(upperEntry, "WEKNORA_API_KEY=") {
 			env = append(env, entry)
 		}
 	}
-	cmd.Env = append(env, "WEKNORA_ACCESS_TOKEN="+token)
+	if accessToken != "" {
+		env = append(env, "WEKNORA_ACCESS_TOKEN="+accessToken)
+	}
+	if apiKey != "" {
+		env = append(env, "WEKNORA_API_KEY="+apiKey)
+	}
+	cmd.Env = env
 	stdout, err := cmd.Output()
 	result := commandResult{Stdout: string(stdout)}
 	if err != nil {
