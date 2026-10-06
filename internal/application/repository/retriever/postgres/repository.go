@@ -19,6 +19,12 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+const (
+	sourceFileVersionCandidateQuota = 4
+	minSourceCandidatePoolSize      = 100
+	maxSourceCandidatePoolSize      = 200
+)
+
 // pgRepository implements PostgreSQL-based retrieval operations
 type pgRepository struct {
 	db               *gorm.DB // Database connection
@@ -43,6 +49,90 @@ func sourceRepositoryFilterSQL(marks string) string {
 		JOIN source_files sf ON sf.id=sc.source_file_id
 		WHERE sc.chunk_id=embeddings.chunk_id AND sf.knowledge_base_id=embeddings.knowledge_base_id
 		AND sf.data_source_id IN (` + marks + `))`
+}
+
+func shouldDiversifySourceCandidates(sourceVisibility bool, params types.RetrieveParams) bool {
+	return sourceVisibility && len(params.SourceIDs) > 0 && strings.TrimSpace(params.Query) != "" &&
+		params.TopK > 0 && params.TopK <= maxSourceCandidatePoolSize &&
+		!source.ParseSourceCodeQuery(params.Query).Enabled
+}
+
+func sourceCandidatePoolSize(topK int) int {
+	if topK <= 0 {
+		return 0
+	}
+	if topK >= maxSourceCandidatePoolSize/2 {
+		return maxSourceCandidatePoolSize
+	}
+	poolSize := topK * 2
+	if poolSize < minSourceCandidatePoolSize {
+		return minSourceCandidatePoolSize
+	}
+	return poolSize
+}
+
+func sourceFileVersionRankExpression(candidateAlias, referenceAlias, scoreColumn string, descending bool) string {
+	direction := "ASC"
+	if descending {
+		direction = "DESC"
+	}
+	return fmt.Sprintf(`ROW_NUMBER() OVER (
+		PARTITION BY %s.snapshot_id, %s.source_file_id, %s.file_version_id
+		ORDER BY %s.%s %s, %s.chunk_id ASC
+	) AS source_file_rank`, referenceAlias, referenceAlias, referenceAlias, candidateAlias, scoreColumn, direction, candidateAlias)
+}
+
+func applySourceFileVersionQuota(db *gorm.DB, boundedCandidates *gorm.DB, topK int) *gorm.DB {
+	rankedCandidates := db.Table("(?) AS source_bounded_candidates", boundedCandidates).
+		Joins("JOIN source_chunk_references quota_refs ON quota_refs.chunk_id=source_bounded_candidates.chunk_id").
+		Select("source_bounded_candidates.*, " + sourceFileVersionRankExpression("source_bounded_candidates", "quota_refs", "score", true))
+
+	return db.Table("(?) AS source_ranked_candidates", rankedCandidates).
+		Select("source_ranked_candidates.id, source_ranked_candidates.content, source_ranked_candidates.source_id, source_ranked_candidates.source_type, source_ranked_candidates.chunk_id, source_ranked_candidates.knowledge_id, source_ranked_candidates.knowledge_base_id, source_ranked_candidates.tag_id, source_ranked_candidates.score").
+		Where("source_ranked_candidates.source_file_rank <= ?", sourceFileVersionCandidateQuota).
+		Order("source_ranked_candidates.score DESC, source_ranked_candidates.chunk_id ASC").
+		Limit(topK)
+}
+
+func buildKeywordCandidateQuery(db *gorm.DB, conditions []clause.Expression, candidateLimit int, scoreExpression string) *gorm.DB {
+	return db.Table("embeddings").Clauses(conditions...).Select([]string{
+		scoreExpression + " as score",
+		"id",
+		"content",
+		"source_id",
+		"source_type",
+		"chunk_id",
+		"knowledge_id",
+		"knowledge_base_id",
+		"tag_id",
+	}).Limit(candidateLimit)
+}
+
+func buildSourceDiverseVectorQuery(queryPrefix, candidateTable, whereClause string, dimension, candidateLimitParam, thresholdParam, finalLimitParam int) string {
+	return queryPrefix + fmt.Sprintf(`
+		, source_nearest_candidates AS MATERIALIZED (
+			SELECT
+				id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
+				embedding::halfvec(%[1]d) <=> $1::halfvec(%[1]d) AS distance
+			FROM %[2]s
+			%[3]s
+			ORDER BY embedding::halfvec(%[1]d) <=> $1::halfvec(%[1]d), chunk_id ASC
+			LIMIT $%[4]d
+		), source_ranked_candidates AS (
+			SELECT source_nearest_candidates.*,
+				%[5]s
+			FROM source_nearest_candidates
+			JOIN source_chunk_references quota_refs ON quota_refs.chunk_id=source_nearest_candidates.chunk_id
+		)
+		SELECT id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
+			(1 - distance) AS score
+		FROM source_ranked_candidates
+		WHERE source_file_rank <= %[6]d AND distance <= $%[7]d
+		ORDER BY distance ASC, chunk_id ASC
+		LIMIT $%[8]d
+	`, dimension, candidateTable, whereClause, candidateLimitParam,
+		sourceFileVersionRankExpression("source_nearest_candidates", "quota_refs", "distance", false),
+		sourceFileVersionCandidateQuota, thresholdParam, finalLimitParam)
 }
 
 // NewPostgresRetrieveEngineRepository creates a new PostgreSQL retriever repository
@@ -266,21 +356,23 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 		{Column: clause.Column{Name: "score"}, Desc: true},
 	}})
 
+	codeQuery := source.SourceCodeQuery{}
+	if g.sourceVisibility {
+		codeQuery = source.ParseSourceCodeQuery(params.Query)
+	}
+	diversifySourceCandidates := shouldDiversifySourceCandidates(g.sourceVisibility, params)
+	bm25TopK := int(params.TopK)
+	if diversifySourceCandidates {
+		bm25TopK = sourceCandidatePoolSize(bm25TopK)
+	}
+	bm25DB := g.db.WithContext(ctx)
+	bm25Query := buildKeywordCandidateQuery(bm25DB, bm25Conds, bm25TopK, "paradedb.score(id)")
+	if diversifySourceCandidates {
+		bm25Query = applySourceFileVersionQuota(bm25DB, bm25Query, int(params.TopK))
+	}
+
 	var bm25Rows []pgVectorWithScore
-	err := g.db.WithContext(ctx).Clauses(bm25Conds...).Debug().
-		Select([]string{
-			"paradedb.score(id) as score",
-			"id",
-			"content",
-			"source_id",
-			"source_type",
-			"chunk_id",
-			"knowledge_id",
-			"knowledge_base_id",
-			"tag_id",
-		}).
-		Limit(int(params.TopK)).
-		Find(&bm25Rows).Error
+	err := bm25Query.Debug().Find(&bm25Rows).Error
 
 	if err == gorm.ErrRecordNotFound {
 		logger.GetLogger(ctx).Warnf("[Postgres] No records found for keywords query: %s", params.Query)
@@ -291,10 +383,8 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 		return nil, err
 	}
 
-	codeQuery := source.SourceCodeQuery{}
 	var exactRows, normalizedRows []pgVectorWithScore
 	if g.sourceVisibility {
-		codeQuery = source.ParseSourceCodeQuery(params.Query)
 		if codeQuery.Enabled {
 			exactRows, err = g.retrieveSourceCodeCandidates(ctx, filters, "full_identifiers", pq.Array(codeQuery.ExactIdentifiers), params.Query, params.TopK)
 			if err != nil {
@@ -529,6 +619,10 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	if expandedTopK < params.TopK {
 		expandedTopK = params.TopK // Ensure subquery limit is at least final limit
 	}
+	diversifySourceCandidates := shouldDiversifySourceCandidates(g.sourceVisibility, params)
+	if diversifySourceCandidates {
+		expandedTopK = sourceCandidatePoolSize(int(params.TopK))
+	}
 
 	// Optimized query: Use subquery to calculate distance once.
 	//
@@ -571,6 +665,10 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 		ORDER BY distance ASC
 		LIMIT $%[5]d
 	`, dimension, whereClause, subqueryLimitParam, thresholdParam, finalLimitParam, candidateTable)
+	if diversifySourceCandidates {
+		querySQL = buildSourceDiverseVectorQuery(
+			queryPrefix, candidateTable, whereClause, dimension, subqueryLimitParam, thresholdParam, finalLimitParam)
+	}
 
 	allVars = append(allVars, expandedTopK)       // LIMIT in subquery
 	allVars = append(allVars, 1-params.Threshold) // Distance threshold
