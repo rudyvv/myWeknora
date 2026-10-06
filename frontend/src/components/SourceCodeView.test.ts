@@ -6,7 +6,8 @@ import test from 'node:test'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import { JSDOM } from 'jsdom'
 import ts from 'typescript'
-import { sourceFactLabel, sourceQualityLabel, sourceRelationKindLabel } from '../utils/sourceQuality'
+import { sourceFactLabel, sourceQualityLabel, sourceRelationKindLabel } from '../utils/sourceQuality.ts'
+import * as referenceSources from '../utils/referenceSources.ts'
 
 const dom = new JSDOM('<html><body></body></html>', { url: 'http://localhost/' })
 for (const key of ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'SVGElement', 'Node']) {
@@ -16,6 +17,7 @@ const require = createRequire(import.meta.url)
 const { createApp, h, nextTick, reactive } = require('vue') as typeof import('vue')
 function testRequire(name: string) {
   if (name === '@/utils/sourceQuality') return { sourceFactLabel, sourceQualityLabel, sourceRelationKindLabel }
+  if (name === '@/utils/referenceSources') return referenceSources
   return require(name)
 }
 
@@ -254,6 +256,54 @@ test('non-structural source quality is not mislabeled as a syntax error', async 
     assert.ok(host.textContent?.includes('文本回退'))
     assert.ok(host.textContent?.includes('mapper_namespace_missing'))
     assert.ok(!host.textContent?.includes('语法错误'))
+  } finally { app.unmount(); host.remove() }
+})
+
+test('source evidence view fails closed when fetched immutable metadata disagrees', async () => {
+  const path = fileURLToPath(new URL('./SourceCodeView.vue', import.meta.url))
+  const badgeModule = compileSFC(fileURLToPath(new URL('./SourceRegionBadge.vue', import.meta.url)))
+  const requests: Array<[string, string | undefined]> = []
+  const sourceModule = compileSFC(path, (name: string) => {
+    if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence read') } }
+    if (name === '@/api/knowledge-base') return { async getSourceFile(id: string, versionID?: string) {
+      requests.push([id, versionID])
+      return { data: {
+        knowledge_id: id,
+        data_source_id: 'source-1',
+        snapshot_id: 'a-different-snapshot',
+        file_version_id: versionID,
+        project_id: 'project-1',
+        commit_sha: 'a'.repeat(40),
+        path: 'src/service.ts',
+        repository_url: 'https://gitlab.example/group/repo',
+        content: 'must not be rendered',
+        symbols: [], facts: [], diagnostics: [], relations: [], relations_truncated: false,
+      } }
+    } }
+    if (name === '@/components/SourceRegionBadge.vue') return badgeModule
+    return testRequire(name)
+  })
+  const host = document.createElement('div')
+  document.body.append(host)
+  const app = createApp({ render: () => h(sourceModule.default, {
+    knowledgeId: 'file-1',
+    fileVersionId: 'version-1',
+    evidenceRange: { start_byte: 0, end_byte: 10, start_line: 1, end_line: 1 },
+    expectedSourceEvidence: {
+      data_source_id: 'source-1',
+      snapshot_id: 'snapshot-1',
+      file_version_id: 'version-1',
+      project_id: 'project-1',
+      commit_sha: 'a'.repeat(40),
+      path: 'src/service.ts',
+    },
+  }) })
+  app.mount(host)
+  try {
+    for (let i = 0; i < 4; i++) { await nextTick(); await new Promise<void>(resolve => setImmediate(resolve)) }
+    assert.deepEqual(requests, [['file-1', 'version-1']])
+    assert.ok(host.querySelector('[role="alert"]'))
+    assert.ok(!host.textContent?.includes('must not be rendered'))
   } finally { app.unmount(); host.remove() }
 })
 

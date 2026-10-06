@@ -3,6 +3,8 @@
  * TypeScript interfaces for all tool result types
  */
 
+import type { SourceEvidence } from '@/utils/referenceSources'
+
 // Relevance levels — values match the backend API response.
 // Display labels are resolved via i18n in SearchResults.vue and GraphQueryResults.vue.
 export type RelevanceLevel = 'High Relevance' | 'Medium Relevance' | 'Low Relevance' | 'Weak Relevance';
@@ -272,6 +274,7 @@ export interface GrepChunkResult {
     title_match?: boolean;
     match_snippet?: string;
     score?: number;
+    source_evidence?: SourceEvidence;
 }
 
 // Grep results data

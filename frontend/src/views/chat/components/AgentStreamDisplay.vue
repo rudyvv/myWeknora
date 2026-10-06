@@ -627,6 +627,7 @@ import { getAttachmentParsingSummaryHtml } from '@/utils/attachmentParsingDispla
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
 import { useChatReferencesDrawer } from '@/composables/useChatReferencesDrawer';
 import type { KnowledgeReferenceLike, ReferenceHighlightTarget } from '@/utils/referenceSources';
+import { getAgentDrawerReferences, getKnowledgeSearchToolReferences } from '@/utils/agentDrawerReferences';
 import { resolveCitationChunkId } from '@/utils/citationMarkdown';
 import { getWikiPage, type WikiPage } from '@/api/wiki';
 import { MessagePlugin } from 'tdesign-vue-next';
@@ -1096,18 +1097,16 @@ const referencesDrawer = useChatReferencesDrawer();
 const getReferencesForDrawer = (
   refsOverride?: KnowledgeReferenceLike[] | null,
 ): KnowledgeReferenceLike[] => {
-  const messageReferences = refsOverride?.length
-    ? refsOverride
-    : props.session?.knowledge_references;
-  if (messageReferences?.length) return messageReferences;
-
   // Agent answers can already contain citation tags before the aggregated
   // knowledge_references event is emitted (and some restored conversations do
   // not have that aggregate at all). The completed retrieval tool events still
   // carry the same source data, so use them to keep citation clicks in the
   // references drawer instead of falling through to KB-page navigation.
-  return (props.session?.agentEventStream || []).flatMap((event) =>
-    getToolReferenceItems(event),
+  return getAgentDrawerReferences(
+    refsOverride,
+    props.session?.knowledge_references,
+    props.session?.agentEventStream,
+    getToolReferenceItems,
   );
 };
 
@@ -1125,52 +1124,12 @@ const openReferencesDrawer = (
   return true
 }
 
-const mergeDocumentReferences = (refs: KnowledgeReferenceLike[]): KnowledgeReferenceLike[] => {
-  const merged = new Map<string, KnowledgeReferenceLike & { contentParts?: string[] }>();
-
-  for (const ref of refs) {
-    if (ref.chunk_type === 'web_search') continue;
-    const key = ref.knowledge_id || ref.knowledge_title || ref.id;
-    if (!key) continue;
-
-    const existing = merged.get(key);
-    const content = String(ref.content || '').trim();
-    if (!existing) {
-      merged.set(key, {
-        ...ref,
-        id: ref.knowledge_id || ref.id || key,
-        content,
-        contentParts: content ? [content] : [],
-      });
-      continue;
-    }
-
-    if (content && !existing.contentParts?.includes(content)) {
-      existing.contentParts = [...(existing.contentParts || []), content];
-      existing.content = existing.contentParts.slice(0, 3).join('\n\n');
-    }
-  }
-
-  return Array.from(merged.values()).map(({ contentParts, ...ref }) => ref);
-};
-
 const cleanToolOutputContent = (output: unknown): string => {
   const raw = typeof output === 'string' ? output : '';
   return raw
     .replace(/<\/?knowledge_chunks[^>]*>/gi, '')
     .replace(/<\/?chunk[^>]*>/gi, '')
     .trim();
-};
-
-const getToolKnowledgeBaseId = (toolData: any): string | undefined => {
-  if (typeof toolData?.knowledge_base_id === 'string' && toolData.knowledge_base_id) {
-    return toolData.knowledge_base_id;
-  }
-  const kbIds = Array.isArray(toolData?.knowledge_base_ids) ? toolData.knowledge_base_ids : [];
-  if (kbIds.length === 1 && typeof kbIds[0] === 'string' && kbIds[0]) {
-    return kbIds[0];
-  }
-  return undefined;
 };
 
 const formatToolResultContent = (value: unknown): string => {
@@ -1290,6 +1249,10 @@ function getToolReferenceItems(event: any): KnowledgeReferenceLike[] {
   const toolName = event.tool_name;
   const toolData = event.tool_data;
 
+  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+    return getKnowledgeSearchToolReferences(event);
+  }
+
   if (isMcpTool(toolName)) {
     const output = formatToolResultContent(event.output) || formatToolResultContent(toolData);
     return buildToolResultReference(event, output);
@@ -1361,22 +1324,6 @@ function getToolReferenceItems(event: any): KnowledgeReferenceLike[] {
       }));
   }
 
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
-    const results = Array.isArray(toolData.results) ? toolData.results : [];
-    const fallbackKnowledgeBaseId = getToolKnowledgeBaseId(toolData);
-    return mergeDocumentReferences(results
-      .filter((item: any) => item?.chunk_id || item?.knowledge_id)
-      .map((item: any, index: number) => ({
-        id: item.chunk_id || `${item.knowledge_id}-${item.result_index ?? index + 1}`,
-        knowledge_id: item.knowledge_id,
-        knowledge_title: item.faq_standard_question || item.knowledge_title,
-        knowledge_base_id: item.knowledge_base_id || fallbackKnowledgeBaseId,
-        chunk_index: item.result_index ?? index + 1,
-        chunk_type: item.chunk_type,
-        content: item.content || '',
-      })));
-  }
-
   if (toolName === 'grep_chunks') {
     const chunkResults = Array.isArray(toolData.chunk_results) ? toolData.chunk_results : [];
     if (chunkResults.length) {
@@ -1385,6 +1332,9 @@ function getToolReferenceItems(event: any): KnowledgeReferenceLike[] {
         .map((group, index) => ({
           id: group.knowledge_id || group.key,
           chunk_ids: group.chunks.map((chunk) => chunk.chunk_id).filter(Boolean),
+          source_evidence: group.chunks
+            .map((chunk) => chunk.source_evidence)
+            .filter((evidence): evidence is NonNullable<typeof evidence> => Boolean(evidence)),
           knowledge_id: group.knowledge_id,
           knowledge_title: group.title,
           knowledge_base_id: group.knowledge_base_id,
@@ -1395,7 +1345,7 @@ function getToolReferenceItems(event: any): KnowledgeReferenceLike[] {
     }
 
     const knowledgeResults = Array.isArray(toolData.knowledge_results) ? toolData.knowledge_results : [];
-    return mergeDocumentReferences(knowledgeResults
+    return knowledgeResults
       .filter((item: any) => item?.knowledge_id)
       .map((item: any, index: number) => ({
         id: item.knowledge_id,
@@ -1404,23 +1354,25 @@ function getToolReferenceItems(event: any): KnowledgeReferenceLike[] {
         knowledge_base_id: item.knowledge_base_id,
         chunk_index: index + 1,
         content: item.match_snippet || '',
-      })));
+        ...(item.source_evidence ? { source_evidence: item.source_evidence } : {}),
+      }));
   }
 
   if (toolName === 'list_knowledge_chunks' || toolName === 'wiki_read_source_doc') {
     const chunks = Array.isArray(toolData.chunks) ? toolData.chunks : [];
     if (chunks.length) {
-      return mergeDocumentReferences(chunks
+      return chunks
         .filter((item: any) => item?.content)
         .map((item: any, index: number) => ({
           id: item.chunk_id || item.id || `${toolData.knowledge_id || 'doc'}-${index + 1}`,
+          ...(item.source_evidence ? { source_evidence: item.source_evidence } : {}),
           knowledge_id: item.knowledge_id || toolData.knowledge_id,
           knowledge_title: toolData.faq_question || toolData.knowledge_title || toolData.knowledge_id,
           knowledge_base_id: item.knowledge_base_id || toolData.knowledge_base_id,
           chunk_index: item.chunk_index ?? item.index ?? index + 1,
           chunk_type: item.chunk_type || (toolData.faq_question ? 'faq' : undefined),
           content: item.content || '',
-        })));
+        }));
     }
 
     const output = cleanToolOutputContent(event.output);

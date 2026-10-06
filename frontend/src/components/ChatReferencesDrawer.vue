@@ -118,6 +118,25 @@
                   </div>
                 </template>
               </component>
+              <div v-if="item.kind === 'document' && getNavigableSourceEvidence(item).length" class="reference-item__source-evidence">
+                <template v-for="evidence in getNavigableSourceEvidence(item)" :key="sourceActionKey(item, evidence)">
+                  <button
+                    type="button"
+                    class="reference-item__source-action"
+                    :aria-expanded="activeSourceEvidenceKey === sourceActionKey(item, evidence)"
+                    @click.stop="toggleSourceEvidence(item, evidence)"
+                  >
+                    {{ evidence.path }} · L{{ evidence.range.start_line }}–{{ evidence.range.end_line }}
+                  </button>
+                  <SourceCodeView
+                    v-if="activeSourceEvidenceKey === sourceActionKey(item, evidence) && item.knowledgeId"
+                    :knowledge-id="item.knowledgeId"
+                    :file-version-id="evidence.file_version_id"
+                    :evidence-range="evidence.range"
+                    :expected-source-evidence="evidence"
+                  />
+                </template>
+              </div>
             </article>
           </section>
         </div>
@@ -138,11 +157,15 @@
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
+import SourceCodeView from '@/components/SourceCodeView.vue'
 import { useChatReferencesDrawer } from '@/composables/useChatReferencesDrawer'
 import {
   buildReferenceSections,
   formatReferenceSnippet,
+  isNavigableSourceEvidence,
   resolveReferenceHighlightKey,
+  sourceEvidenceKey,
+  type SourceEvidence,
   type ReferenceListItem,
 } from '@/utils/referenceSources'
 
@@ -158,6 +181,7 @@ const drawer = useChatReferencesDrawer()
 const listElement = ref<HTMLElement | null>(null)
 const itemElements = new Map<string, HTMLElement>()
 const expandedKeys = reactive(new Set<string>())
+const activeSourceEvidenceKey = ref('')
 const pointerDownSelectionText = ref('')
 const panelEntered = ref(false)
 
@@ -259,6 +283,22 @@ function toggleDocumentSnippet(item: ReferenceListItem, event?: MouseEvent) {
   expandedKeys.add(item.key)
 }
 
+function getNavigableSourceEvidence(item: ReferenceListItem): SourceEvidence[] {
+  if (!item.knowledgeId) return []
+  return (item.sourceEvidence || []).filter((evidence) =>
+    isNavigableSourceEvidence(item.knowledgeId, evidence),
+  )
+}
+
+function sourceActionKey(item: ReferenceListItem, evidence: SourceEvidence) {
+  return `${item.key}:${sourceEvidenceKey(evidence)}`
+}
+
+function toggleSourceEvidence(item: ReferenceListItem, evidence: SourceEvidence) {
+  const key = sourceActionKey(item, evidence)
+  activeSourceEvidenceKey.value = activeSourceEvidenceKey.value === key ? '' : key
+}
+
 function getDocumentHref(item: ReferenceListItem) {
   if (!item.knowledgeBaseId) return ''
   const query: Record<string, string> = {}
@@ -321,6 +361,7 @@ watch(visible, (open) => {
   if (!open) {
     panelEntered.value = false
     expandedKeys.clear()
+    activeSourceEvidenceKey.value = ''
     return
   }
 })
@@ -569,6 +610,32 @@ watch(visible, (open) => {
   word-break: break-word;
   max-height: 360px;
   overflow-y: auto;
+}
+
+.reference-item__source-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.reference-item__source-action {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 6px;
+  background: var(--td-bg-color-container);
+  color: var(--td-brand-color);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.reference-item__source-action:hover {
+  background: var(--td-bg-color-secondarycontainer);
 }
 
 .references-panel-enter-active {

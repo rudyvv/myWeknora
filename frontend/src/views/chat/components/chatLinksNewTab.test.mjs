@@ -33,7 +33,7 @@ test('wiki drawer navigation and citation fallbacks open in a new tab', () => {
 test('agent citations recover drawer references from retrieval tool events', () => {
   assert.match(
     agentStream,
-    /const getReferencesForDrawer = \([\s\S]*?props\.session\?\.knowledge_references[\s\S]*?props\.session\?\.agentEventStream[\s\S]*?getToolReferenceItems\(event\)/,
+    /const getReferencesForDrawer = \([\s\S]*?return getAgentDrawerReferences\([\s\S]*?props\.session\?\.knowledge_references[\s\S]*?props\.session\?\.agentEventStream[\s\S]*?getToolReferenceItems,/,
   )
   assert.match(
     agentStream,
@@ -46,6 +46,10 @@ test('agent citations recover drawer references from retrieval tool events', () 
   assert.equal(
     agentStream.match(/knowledgeReferences: getReferencesForDrawer\(\)|getReferencesForDrawer\(\),/g)?.length,
     3,
+  )
+  assert.match(
+    referenceDrawer,
+    /<SourceCodeView[\s\S]*?:knowledge-id="item\.knowledgeId"[\s\S]*?:file-version-id="evidence\.file_version_id"[\s\S]*?:evidence-range="evidence\.range"[\s\S]*?:expected-source-evidence="evidence"/,
   )
   assert.match(
     referenceDrawer,

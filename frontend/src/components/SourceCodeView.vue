@@ -4,8 +4,15 @@ import { readSourceWikiEvidence } from '@/api/wiki'
 import { getSourceFile, type SourceCodeRelation, type SourceFact, type SourceFileView, type SourceRange } from '@/api/knowledge-base'
 import SourceRegionBadge from '@/components/SourceRegionBadge.vue'
 import { sourceFactLabel, sourceQualityLabel, sourceRelationKindLabel } from '@/utils/sourceQuality'
+import { sourceEvidenceMatchesFile, type SourceEvidence } from '@/utils/referenceSources'
 
-const props = defineProps<{ knowledgeId: string; fileVersionId?: string; wikiEvidence?: { kbId: string; slug: string; id: string; version: number; commitSHA: string }; evidenceRange?: SourceRange }>()
+const props = defineProps<{
+  knowledgeId: string
+  fileVersionId?: string
+  wikiEvidence?: { kbId: string; slug: string; id: string; version: number; commitSHA: string }
+  evidenceRange?: SourceRange
+  expectedSourceEvidence?: Pick<SourceEvidence, 'data_source_id' | 'snapshot_id' | 'file_version_id' | 'project_id' | 'commit_sha' | 'path'>
+}>()
 const file = ref<SourceFileView | null>(null)
 const loading = ref(false)
 const relationsLoading = ref(false)
@@ -136,7 +143,7 @@ async function loadMoreRelations() {
     if (generation === requestGeneration) relationsLoading.value = false
   }
 }
-watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvidence], async ([id, versionID]) => {
+watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvidence, () => props.expectedSourceEvidence], async ([id, versionID]) => {
   const generation = ++requestGeneration
   file.value = null
   relationsLoading.value = false
@@ -152,9 +159,12 @@ watch([() => props.knowledgeId, () => props.fileVersionId, () => props.wikiEvide
   try {
     const response: any = props.wikiEvidence ? await readSourceWikiEvidence(props.wikiEvidence.kbId, props.wikiEvidence.slug, props.wikiEvidence.id, props.wikiEvidence.version) : await getSourceFile(id as string, versionID as string | undefined)
     if (generation === requestGeneration) {
-      if (versionID && response.data.file_version_id !== versionID) failed.value = true
-      else if (props.wikiEvidence && response.data.commit_sha !== props.wikiEvidence.commitSHA) failed.value = true
-      else { file.value = response.data; if (props.evidenceRange) selectSymbol(props.evidenceRange) }
+      const sourceFile = response.data as SourceFileView & { data_source_id?: string }
+      const expectedEvidence = props.expectedSourceEvidence
+      const evidenceMismatch = expectedEvidence && !sourceEvidenceMatchesFile(expectedEvidence, sourceFile)
+      if ((versionID && sourceFile.file_version_id !== versionID) || evidenceMismatch) failed.value = true
+      else if (props.wikiEvidence && sourceFile.commit_sha !== props.wikiEvidence.commitSHA) failed.value = true
+      else { file.value = sourceFile; if (props.evidenceRange) selectSymbol(props.evidenceRange) }
     }
   } catch { if (generation === requestGeneration) failed.value = true }
   finally { if (generation === requestGeneration) loading.value = false }

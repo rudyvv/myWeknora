@@ -1,4 +1,5 @@
 import type { GrepChunkResult, GrepKnowledgeResult } from '@/types/tool-results'
+import type { SourceEvidence } from '@/utils/referenceSources'
 
 export type GrepGroupedRow = {
   key: string
@@ -9,7 +10,7 @@ export type GrepGroupedRow = {
   chunk_hit_count: number
   title_match: boolean
   match_snippet: string
-  chunks: { content: string; chunk_id: string; knowledge_id: string }[]
+  chunks: { content: string; chunk_id: string; knowledge_id: string; source_evidence?: SourceEvidence }[]
 }
 
 /** Collapse per-chunk grep hits into one row per document; FAQ entries stay separate. */
@@ -47,6 +48,7 @@ export function groupGrepChunkResults(chunkRows: GrepChunkResult[]): GrepGrouped
         content: snippet,
         chunk_id: result.faq_id || result.chunk_id,
         knowledge_id: result.knowledge_id,
+        ...(result.source_evidence ? { source_evidence: result.source_evidence } : {}),
       })
     }
   }

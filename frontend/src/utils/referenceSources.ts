@@ -1,5 +1,97 @@
 export type ReferenceItemKind = 'web' | 'document' | 'tool'
 
+export type SourceEvidenceRange = {
+  start_byte: number
+  end_byte: number
+  start_line: number
+  end_line: number
+}
+
+export type SourceEvidence = {
+  data_source_id: string
+  snapshot_id: string
+  file_version_id: string
+  project_id: string
+  commit_sha: string
+  path: string
+  range: SourceEvidenceRange
+  symbols: string[] | null
+  quality: string
+  gitlab_url: string
+  context: Array<{ text: string; range: SourceEvidenceRange }> | null
+  region?: {
+    kind: string
+    language?: string
+    quality: string
+    external_source?: string
+    external_status?: string
+    resolved_path?: string
+  }
+  diagnostics?: Array<{ code: string; range: SourceEvidenceRange }>
+}
+
+export type SourceEvidenceIdentity = Pick<
+  SourceEvidence,
+  'data_source_id' | 'snapshot_id' | 'file_version_id' | 'project_id' | 'commit_sha' | 'path'
+>
+
+export function sourceEvidenceMatchesFile(
+  evidence: SourceEvidenceIdentity,
+  sourceFile: Partial<SourceEvidenceIdentity>,
+): boolean {
+  return sourceFile.data_source_id === evidence.data_source_id &&
+    sourceFile.snapshot_id === evidence.snapshot_id &&
+    sourceFile.file_version_id === evidence.file_version_id &&
+    sourceFile.project_id === evidence.project_id &&
+    sourceFile.commit_sha === evidence.commit_sha &&
+    sourceFile.path === evidence.path
+}
+
+function sourceEvidenceList(value: SourceEvidence | SourceEvidence[] | undefined): SourceEvidence[] {
+  if (Array.isArray(value)) return value.filter((item) => item && typeof item === 'object')
+  return value && typeof value === 'object' ? [value] : []
+}
+
+export function sourceEvidenceKey(evidence: SourceEvidence): string {
+  const range = evidence.range
+  return JSON.stringify([
+    evidence.data_source_id,
+    evidence.snapshot_id,
+    evidence.file_version_id,
+    evidence.commit_sha,
+    evidence.path,
+    range?.start_byte,
+    range?.end_byte,
+    range?.start_line,
+    range?.end_line,
+  ])
+}
+
+export function isNavigableSourceEvidence(
+  knowledgeId: string | undefined,
+  evidence: SourceEvidence,
+): boolean {
+  if (!evidence || typeof evidence !== 'object') return false
+  const range = evidence?.range
+  return Boolean(
+    knowledgeId?.trim() &&
+    evidence.data_source_id?.trim() &&
+    evidence.snapshot_id?.trim() &&
+    evidence.file_version_id?.trim() &&
+    evidence.project_id?.trim() &&
+    /^[a-f0-9]{40,64}$/i.test(evidence.commit_sha || '') &&
+    evidence.path?.trim() &&
+    evidence.quality?.trim() &&
+    typeof evidence.gitlab_url === 'string' &&
+    (evidence.symbols == null || Array.isArray(evidence.symbols)) &&
+    (evidence.context == null || Array.isArray(evidence.context)) &&
+    Number.isSafeInteger(range?.start_byte) && range.start_byte >= 0 &&
+    Number.isSafeInteger(range?.end_byte) && range.end_byte > range.start_byte &&
+    Number.isSafeInteger(range?.start_line) && range.start_line > 0 &&
+    Number.isSafeInteger(range?.end_line) && range.end_line >= range.start_line,
+  )
+}
+
 export type KnowledgeReferenceLike = {
   id?: string
   chunk_ids?: string[]
@@ -11,6 +103,7 @@ export type KnowledgeReferenceLike = {
   chunk_type?: string
   content?: string
   metadata?: Record<string, string>
+  source_evidence?: SourceEvidence | SourceEvidence[]
 }
 
 export type ReferenceListItem = {
@@ -27,6 +120,7 @@ export type ReferenceListItem = {
   knowledgeId?: string
   knowledgeBaseId?: string
   content?: string
+  sourceEvidence?: SourceEvidence[]
 }
 
 export type ReferenceDrawerSection = {
@@ -174,6 +268,7 @@ function buildDocumentItem(item: KnowledgeReferenceLike, index: number): Referen
     chunkIds: item.chunk_ids,
     knowledgeId: item.knowledge_id,
     knowledgeBaseId: item.knowledge_base_id,
+    sourceEvidence: sourceEvidenceList(item.source_evidence),
     snippet: truncateText(item.content || '', 220) || undefined,
     content: item.content,
   }
@@ -226,6 +321,13 @@ function mergeDocumentReferences(refs: KnowledgeReferenceLike[]): KnowledgeRefer
     if (!existing.knowledge_title && item.knowledge_title) existing.knowledge_title = item.knowledge_title
     if (!existing.knowledge_filename && item.knowledge_filename) existing.knowledge_filename = item.knowledge_filename
     if (!existing.knowledge_base_id && item.knowledge_base_id) existing.knowledge_base_id = item.knowledge_base_id
+    const evidenceByKey = new Map(
+      sourceEvidenceList(existing.source_evidence).map((evidence) => [sourceEvidenceKey(evidence), evidence]),
+    )
+    for (const evidence of sourceEvidenceList(item.source_evidence)) {
+      evidenceByKey.set(sourceEvidenceKey(evidence), evidence)
+    }
+    if (evidenceByKey.size) existing.source_evidence = Array.from(evidenceByKey.values())
     for (const chunkId of chunkIds) {
       if (!existing.chunk_ids?.includes(chunkId)) {
         existing.chunk_ids = [...(existing.chunk_ids || []), chunkId]

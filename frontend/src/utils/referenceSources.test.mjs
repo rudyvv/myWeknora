@@ -54,6 +54,31 @@ test('buildReferenceList aggregates chunks from the same document', () => {
   assert.match(items[0].content || '', /shipping rules/)
 })
 
+test('buildReferenceList preserves distinct fixed-version source evidence when grouping chunks', () => {
+  const evidence = (version, line) => ({
+    data_source_id: 'source-1',
+    snapshot_id: `snapshot-${version}`,
+    file_version_id: `version-${version}`,
+    project_id: 'project-1',
+    commit_sha: `${version}`.repeat(40),
+    path: 'src/service.ts',
+    range: { start_byte: line, end_byte: line + 8, start_line: line, end_line: line },
+    symbols: [],
+    quality: 'structural',
+    gitlab_url: '',
+    context: [],
+  })
+  const first = evidence('a', 2)
+  const second = evidence('b', 5)
+
+  const [item] = buildReferenceList([
+    { id: 'chunk-1', knowledge_id: 'file-1', knowledge_title: 'Service', source_evidence: first },
+    { id: 'chunk-2', knowledge_id: 'file-1', knowledge_title: 'Service', source_evidence: second },
+  ])
+
+  assert.deepEqual(item.sourceEvidence, [first, second])
+})
+
 test('buildReferenceSections keeps tool results in their own section', () => {
   const sections = buildReferenceSections([
     {
