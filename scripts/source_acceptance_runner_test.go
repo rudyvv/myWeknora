@@ -354,6 +354,9 @@ func TestSourceAcceptanceRunnerUsesAPIKeyForAuthorizedSourceReads(t *testing.T) 
 	if fixture.searchCalls != 30 || fixture.sourceReadCalls != 300 {
 		t.Fatalf("API-key auth did not cover the normal search and authorized source-read chain: searches=%d source_reads=%d", fixture.searchCalls, fixture.sourceReadCalls)
 	}
+	if fixture.agentCalls != 1 {
+		t.Fatalf("API-key auth did not complete the agent request: agent_calls=%d", fixture.agentCalls)
+	}
 	if strings.Contains(result.Stdout+result.Stderr+report, acceptanceTestAPIKey) {
 		t.Fatal("runner exposed the process API key")
 	}
