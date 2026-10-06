@@ -4,6 +4,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -41,6 +42,65 @@ func TestSourceRepeatedCompleteSnapshotReusesParsingAndVectors(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, hits, 1)
 		require.Equal(t, current.Source.Snapshot.ID, hits[0].Metadata["source_snapshot_id"])
+	}
+}
+
+func TestSourceIncrementalOneTenAndHundredChangedFilesReuseUnchangedWork(t *testing.T) {
+	// The source fixture owns a temporary Git repository; these synthetic commits
+	// never modify the representative or any user repository.
+	baselineFiles := make(map[string][]byte, 100)
+	for index := 0; index < 100; index++ {
+		path := fmt.Sprintf("src/Batch%03d.java", index)
+		content := fmt.Sprintf("package demo;\npublic class Batch%03d { public int revision() { return %d; } }\n", index, index)
+		baselineFiles[path] = []byte(content)
+	}
+	f := newJavaSourceFixture(t, baselineFiles)
+	syncSourceFixture(t, f)
+	previous := latestIncrementalRun(t, f)
+	require.Equal(t, "published", previous.Snapshot.State)
+	require.True(t, previous.Snapshot.ManifestComplete)
+	require.Equal(t, 101, previous.Snapshot.FileCount, "the baseline is 100 change targets plus one stable source file")
+
+	for tier, changedFiles := range []int{1, 10, 100} {
+		parseCallsBefore := f.parseCount.Load()
+		embeddingCallsBefore := f.embedCount.Load()
+		changes := make(map[string][]byte, changedFiles)
+		revision := (tier + 1) * 1000
+		for index := 0; index < changedFiles; index++ {
+			path := fmt.Sprintf("src/Batch%03d.java", index)
+			content := fmt.Sprintf("package demo;\npublic class Batch%03d { public int revision() { return %d; } }\n", index, revision+index)
+			changes[path] = []byte(content)
+		}
+		targetSHA := f.advanceFiles(changes)
+		syncSourceFixture(t, f)
+		current := latestIncrementalRun(t, f)
+		snapshot := current.Snapshot
+
+		require.Equal(t, "published", snapshot.State, "%d-file change tier", changedFiles)
+		require.True(t, snapshot.ManifestComplete, "%d-file change tier", changedFiles)
+		require.Equal(t, targetSHA, snapshot.CommitSHA, "%d-file change tier", changedFiles)
+		require.NotEqual(t, previous.Snapshot.CommitSHA, snapshot.CommitSHA, "%d-file tier advances to a distinct commit", changedFiles)
+		require.Equal(t, previous.Snapshot.CommitSHA, snapshot.PreviousCommitSHA, "%d-file change tier", changedFiles)
+		require.Equal(t, 101, snapshot.FileCount, "%d-file change tier", changedFiles)
+		require.Equal(t, changedFiles, snapshot.ChangedCount, "%d-file change tier", changedFiles)
+		require.Zero(t, snapshot.AddedCount, "%d-file tier must contain no additions", changedFiles)
+		require.Zero(t, snapshot.DeletedCount, "%d-file tier must contain no deletions", changedFiles)
+		require.Zero(t, snapshot.RenamedCount, "%d-file tier must contain no renames", changedFiles)
+
+		require.Equal(t, changedFiles, snapshot.ParsedCount, "%d-file tier parses only changed files", changedFiles)
+		require.Equal(t, 101-changedFiles, snapshot.ReusedFileCount, "%d-file tier reuses every unchanged parser artifact", changedFiles)
+		require.Equal(t, int64(changedFiles), f.parseCount.Load()-parseCallsBefore, "%d-file tier parser HTTP calls", changedFiles)
+		require.Positive(t, snapshot.EmbeddedChunkCount, "%d-file tier dispatches embedding work", changedFiles)
+		require.Positive(t, snapshot.ReusedVectorCount, "%d-file tier reuses unchanged embeddings", changedFiles)
+		require.Greater(t, f.embedCount.Load(), embeddingCallsBefore, "%d-file tier reaches the local embedding boundary", changedFiles)
+		require.NotNil(t, current.Telemetry)
+		require.Equal(t, targetSHA, current.Telemetry.PublishedCommitSHA, "%d-file tier telemetry pins the published commit", changedFiles)
+		require.NotNil(t, current.Telemetry.ModelUsage)
+		require.NotNil(t, current.Telemetry.ModelUsage.EmbeddingCalls)
+		require.Equal(t, f.embedCount.Load()-embeddingCallsBefore, *current.Telemetry.ModelUsage.EmbeddingCalls,
+			"%d-file tier telemetry matches observed local embedding HTTP attempts", changedFiles)
+
+		previous = current
 	}
 }
 
