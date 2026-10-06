@@ -130,133 +130,156 @@ func (s *DataSourceService) currentSourceEmbeddingVersion(ctx context.Context, k
 	return source.EmbeddingVersion(configured, model.GetDimensions()), nil
 }
 
-func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase, snapshot *types.SourceSnapshot, indexes []*types.IndexInfo, indexProfile source.IndexProfile, usage *sourceEmbeddingUsage) (int, error) {
+type sourceIndexBatchStager struct {
+	service      *DataSourceService
+	ds           *types.DataSource
+	snapshot     *types.SourceSnapshot
+	config       *types.Model
+	model        embedding.Embedder
+	indexProfile source.IndexProfile
+	dimension    int
+}
+
+func (s *DataSourceService) newSourceIndexBatchStager(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase,
+	snapshot *types.SourceSnapshot, indexProfile source.IndexProfile, usage *sourceEmbeddingUsage) (*sourceIndexBatchStager, error) {
 	config, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if config == nil {
-		return 0, fmt.Errorf("source embedding model no longer exists")
+		return nil, fmt.Errorf("source embedding model no longer exists")
 	}
 	configuredProfile, err := source.NewIndexProfile(config.Parameters.EmbeddingParameters)
 	if err != nil || configuredProfile.Identity != indexProfile.Identity {
-		return 0, fmt.Errorf("source embedding token profile changed during initialization")
+		return nil, fmt.Errorf("source embedding token profile changed during initialization")
 	}
 	model, err := s.sourceModelService.GetEmbeddingModelForTenant(ctx, kb.EmbeddingModelID, kb.TenantID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	dimension := model.GetDimensions()
 	if dimension <= 0 {
-		return 0, fmt.Errorf("source embedding model dimension is invalid")
+		return nil, fmt.Errorf("source embedding model dimension is invalid")
 	}
 	current, err := s.sourceModels.GetByID(ctx, kb.TenantID, kb.EmbeddingModelID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if current == nil || source.EmbeddingVersion(current, dimension) != source.EmbeddingVersion(config, dimension) {
-		return 0, fmt.Errorf("source embedding configuration changed during initialization")
+		return nil, fmt.Errorf("source embedding configuration changed during initialization")
 	}
 	currentProfile, err := source.NewIndexProfile(current.Parameters.EmbeddingParameters)
 	if err != nil || currentProfile.Identity != indexProfile.Identity {
-		return 0, fmt.Errorf("source embedding token profile changed during initialization")
+		return nil, fmt.Errorf("source embedding token profile changed during initialization")
 	}
 	snapshot.EmbeddingVersion = source.EmbeddingVersion(config, dimension)
 	if usage != nil {
 		usage.estimateAvailable.Store(true)
 	}
-	for offset := 0; offset < len(indexes); offset += 32 {
-		end := offset + 32
-		if end > len(indexes) {
-			end = len(indexes)
+	return &sourceIndexBatchStager{service: s, ds: ds, snapshot: snapshot, config: config, model: model,
+		indexProfile: indexProfile, dimension: dimension}, nil
+}
+
+func (stager *sourceIndexBatchStager) stage(ctx context.Context, batch []*types.IndexInfo, usage *sourceEmbeddingUsage) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	keys := make([]string, len(batch))
+	for i, index := range batch {
+		keys[i] = source.ArtifactKey(stager.snapshot.EmbeddingVersion, index.Content)
+	}
+	cached, err := stager.service.sourceSnapshots.GetEmbeddingArtifacts(ctx, stager.ds.TenantID, stager.ds.ID, keys)
+	if err != nil {
+		return err
+	}
+	pendingKeys, texts := []string{}, []string{}
+	seen := map[string]bool{}
+	for i, index := range batch {
+		if _, ok := cached[keys[i]]; !ok && !seen[keys[i]] {
+			pendingKeys = append(pendingKeys, keys[i])
+			texts = append(texts, index.Content)
+			seen[keys[i]] = true
 		}
-		batch := indexes[offset:end]
-		keys := make([]string, len(batch))
-		for i, index := range batch {
-			keys[i] = source.ArtifactKey(snapshot.EmbeddingVersion, index.Content)
+	}
+	newVectors := map[string][]float32{}
+	if len(texts) > 0 {
+		if usage != nil {
+			usage.providerCallExpected = true
 		}
-		cached, err := s.sourceSnapshots.GetEmbeddingArtifacts(ctx, ds.TenantID, ds.ID, keys)
-		if err != nil {
-			return 0, err
-		}
-		pendingKeys, texts := []string{}, []string{}
-		seen := map[string]bool{}
-		for i, index := range batch {
-			if _, ok := cached[keys[i]]; !ok && !seen[keys[i]] {
-				pendingKeys = append(pendingKeys, keys[i])
-				texts = append(texts, index.Content)
-				seen[keys[i]] = true
-			}
-		}
-		newVectors := map[string][]float32{}
-		if len(texts) > 0 {
-			if usage != nil {
-				usage.providerCallExpected = true
-			}
-			embedCtx := ctx
-			if usage != nil {
-				embedCtx = embedding.WithHTTPAttemptObserver(ctx, texts, func(attemptTexts []string) {
-					usage.attempts.Add(1)
-					var attemptTokenEstimate int64
-					for _, attemptText := range attemptTexts {
-						tokens, tokenErr := indexProfile.CountTokens(attemptText)
-						if tokenErr != nil {
-							usage.estimateAvailable.Store(false)
-							return
-						}
-						attemptTokenEstimate += int64(tokens)
+		embedCtx := ctx
+		if usage != nil {
+			embedCtx = embedding.WithHTTPAttemptObserver(ctx, texts, func(attemptTexts []string) {
+				usage.attempts.Add(1)
+				var attemptTokenEstimate int64
+				for _, attemptText := range attemptTexts {
+					tokens, tokenErr := stager.indexProfile.CountTokens(attemptText)
+					if tokenErr != nil {
+						usage.estimateAvailable.Store(false)
+						return
 					}
-					usage.estimatedTokens.Add(attemptTokenEstimate)
-				})
-			}
-			vectors, err := sourceBatchEmbed(embedCtx, config.Parameters.Provider, model, texts)
-			if err != nil {
-				return 0, fmt.Errorf("source embedding request failed")
-			}
-			if len(vectors) != len(texts) {
-				return 0, fmt.Errorf("source embedding result is incomplete")
-			}
-			for i, vector := range vectors {
-				newVectors[pendingKeys[i]] = vector
-			}
-		}
-		mapped := map[string][]float32{}
-		for i, index := range batch {
-			vector, reused := cached[keys[i]]
-			if !reused {
-				vector = newVectors[keys[i]]
-			}
-			if len(vector) != dimension {
-				return 0, fmt.Errorf("source embedding dimension mismatch")
-			}
-			var norm float64
-			for _, v := range vector {
-				if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-					return 0, fmt.Errorf("source embedding contains non-finite values")
+					attemptTokenEstimate += int64(tokens)
 				}
-				norm += float64(v) * float64(v)
-			}
-			if norm == 0 {
-				return 0, fmt.Errorf("source embedding has zero norm")
-			}
-			mapped[index.SourceID] = vector
-			if reused {
-				snapshot.ReusedVectorCount++
-			} else {
-				snapshot.EmbeddedChunkCount++
-			}
+				usage.estimatedTokens.Add(attemptTokenEstimate)
+			})
 		}
-		// Persist provider results before staging index rows so a worker restart
-		// after indexing can reuse the same vectors without another model call.
-		if err := s.sourceSnapshots.SaveEmbeddingArtifacts(ctx, ds.TenantID, ds.ID, newVectors); err != nil {
-			return 0, err
+		vectors, err := sourceBatchEmbed(embedCtx, stager.config.Parameters.Provider, stager.model, texts)
+		if err != nil {
+			return fmt.Errorf("source embedding request failed")
 		}
-		if err := s.sourceSnapshots.StageIndexes(ctx, batch, mapped); err != nil {
+		if len(vectors) != len(texts) {
+			return fmt.Errorf("source embedding result is incomplete")
+		}
+		for i, vector := range vectors {
+			newVectors[pendingKeys[i]] = vector
+		}
+	}
+	mapped := map[string][]float32{}
+	for i, index := range batch {
+		vector, reused := cached[keys[i]]
+		if !reused {
+			vector = newVectors[keys[i]]
+		}
+		if len(vector) != stager.dimension {
+			return fmt.Errorf("source embedding dimension mismatch")
+		}
+		var norm float64
+		for _, value := range vector {
+			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+				return fmt.Errorf("source embedding contains non-finite values")
+			}
+			norm += float64(value) * float64(value)
+		}
+		if norm == 0 {
+			return fmt.Errorf("source embedding has zero norm")
+		}
+		mapped[index.SourceID] = vector
+		if reused {
+			stager.snapshot.ReusedVectorCount++
+		} else {
+			stager.snapshot.EmbeddedChunkCount++
+		}
+	}
+	// Persist provider results before staging index rows so a worker restart
+	// after indexing can reuse the same vectors without another model call.
+	if err := stager.service.sourceSnapshots.SaveEmbeddingArtifacts(ctx, stager.ds.TenantID, stager.ds.ID, newVectors); err != nil {
+		return err
+	}
+	return stager.service.sourceSnapshots.StageIndexes(ctx, batch, mapped)
+}
+
+func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.DataSource, kb *types.KnowledgeBase, snapshot *types.SourceSnapshot, indexes []*types.IndexInfo, indexProfile source.IndexProfile, usage *sourceEmbeddingUsage) (int, error) {
+	stager, err := s.newSourceIndexBatchStager(ctx, ds, kb, snapshot, indexProfile, usage)
+	if err != nil {
+		return 0, err
+	}
+	for offset := 0; offset < len(indexes); offset += 32 {
+		end := min(offset+32, len(indexes))
+		if err := stager.stage(ctx, indexes[offset:end], usage); err != nil {
 			return 0, err
 		}
 	}
 	if usage != nil {
 		usage.completed = true
 	}
-	return dimension, nil
+	return stager.dimension, nil
 }

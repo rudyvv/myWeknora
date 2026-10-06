@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,7 +67,8 @@ func (r *sourceSnapshotRepository) CheckReady(ctx context.Context) error {
 		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_full_gin') AND
 		EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='source_chunk_search_terms_terms_gin') AND
 		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_file_versions' AND column_name='facts') AND
-		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged')`, source.SourceSearchTermsVersion).Scan(&ready).Error
+		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='relations_staged') AND
+		EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_snapshots' AND column_name='wiki_derivation_state')`, source.SourceSearchTermsVersion).Scan(&ready).Error
 	if err != nil {
 		return err
 	}
@@ -160,6 +162,9 @@ func (r *sourceSnapshotRepository) StageFile(ctx context.Context, file *types.So
 
 func (r *sourceSnapshotRepository) StageRelations(ctx context.Context, tenant uint64, sourceID, snapshotID string, relations []types.SourceCodeRelation) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
 		var snapshot types.SourceSnapshot
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND data_source_id=? AND state!='published' AND manifest_complete=true", snapshotID, tenant, sourceID).First(&snapshot).Error; err != nil {
 			return fmt.Errorf("source relation snapshot is unavailable")
@@ -240,9 +245,161 @@ func (r *sourceSnapshotRepository) StageRelations(ctx context.Context, tenant ui
 				return err
 			}
 		}
-		return tx.Model(&types.SourceSnapshot{}).Where("id=? AND state!='published'", snapshotID).
-			Updates(map[string]any{"relation_count": len(relations), "relations_staged": true}).Error
+		result := tx.Model(&types.SourceSnapshot{}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND data_source_id=? AND state!='published'",
+			snapshotID, tenant, snapshot.KnowledgeBaseID, sourceID).
+			Updates(map[string]any{"relation_count": len(relations), "relations_staged": true, "wiki_derivation_state": "complete"})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("source relation snapshot changed before completion")
+		}
+		return nil
 	})
+}
+
+func (r *sourceSnapshotRepository) DeferWikiDerivation(ctx context.Context, tenant uint64, knowledgeBaseID, sourceID, snapshotID string) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
+		var snapshot types.SourceSnapshot
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND data_source_id=? AND state!='published' AND manifest_complete=true",
+			snapshotID, tenant, knowledgeBaseID, sourceID).Take(&snapshot).Error; err != nil {
+			return fmt.Errorf("source Wiki derivation snapshot is unavailable")
+		}
+		if err := tx.Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenant, sourceID, snapshotID).
+			Delete(&types.SourceCodeRelation{}).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&types.SourceSnapshot{}).Where("id=? AND tenant_id=? AND knowledge_base_id=? AND data_source_id=? AND state!='published'",
+			snapshotID, tenant, knowledgeBaseID, sourceID).
+			Updates(map[string]any{"wiki_derivation_state": "deferred_capacity", "relations_staged": false, "relation_count": 0})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("source Wiki derivation snapshot changed before deferral")
+		}
+		var relationCount int64
+		if err := tx.Model(&types.SourceCodeRelation{}).Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenant, sourceID, snapshotID).Count(&relationCount).Error; err != nil {
+			return err
+		}
+		if relationCount != 0 {
+			return fmt.Errorf("source Wiki derivation deferral left staged relations")
+		}
+		return nil
+	})
+}
+
+// LoadSourceRelationMembers first proves the complete scoped fact inventory
+// fits the Wiki work budget using PostgreSQL's canonical JSONB text size. It
+// only materializes facts after that proof and reads them with a fixed keyset
+// cursor, keeping each database page bounded.
+func (r *sourceSnapshotRepository) LoadSourceRelationMembers(ctx context.Context, tenant uint64, knowledgeBaseID, sourceID, snapshotID string,
+	maxFacts, maxCanonicalBytes int64) ([]types.SourceSnapshotRelationMember, bool, error) {
+	if maxFacts > types.SourceWikiImpactMaxFacts || maxFacts < 0 {
+		maxFacts = types.SourceWikiImpactMaxFacts
+	}
+	if maxCanonicalBytes > types.SourceWikiImpactMaxFactBytes || maxCanonicalBytes < 0 {
+		maxCanonicalBytes = types.SourceWikiImpactMaxFactBytes
+	}
+	var members []types.SourceSnapshotRelationMember
+	capacityExceeded := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := assertSourceLeaseTx(tx, ctx); err != nil {
+			return err
+		}
+		var snapshot types.SourceSnapshot
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Where(
+			"id=? AND tenant_id=? AND knowledge_base_id=? AND data_source_id=? AND state!='published' AND manifest_complete=true",
+			snapshotID, tenant, knowledgeBaseID, sourceID).Take(&snapshot).Error; err != nil {
+			return fmt.Errorf("source relation fact snapshot is unavailable")
+		}
+		type factBounds struct {
+			MemberCount          int64
+			ValidCount           int64
+			DistinctFileCount    int64
+			DistinctVersionCount int64
+			FactCount            int64
+			FactBytes            int64
+		}
+		const validIdentity = `sf.id=sm.source_file_id AND sf.tenant_id=? AND sf.knowledge_base_id=? AND sf.data_source_id=? AND
+			sv.id=sm.file_version_id AND sv.source_file_id=sm.source_file_id AND sv.snapshot_id=sm.snapshot_id AND jsonb_typeof(sv.facts)='array'`
+		var bounds factBounds
+		query := `SELECT COUNT(*) AS member_count,
+			COUNT(*) FILTER (WHERE ` + validIdentity + `) AS valid_count,
+			COUNT(DISTINCT sm.source_file_id) AS distinct_file_count,
+			COUNT(DISTINCT sm.file_version_id) AS distinct_version_count,
+			COALESCE(SUM(CASE WHEN ` + validIdentity + ` THEN jsonb_array_length(sv.facts) ELSE 0 END),0) AS fact_count,
+			COALESCE(SUM(CASE WHEN ` + validIdentity + ` THEN OCTET_LENGTH(sv.facts::text) ELSE 0 END),0) AS fact_bytes
+			FROM source_snapshot_members sm
+			LEFT JOIN source_files sf ON sf.id=sm.source_file_id
+			LEFT JOIN source_file_versions sv ON sv.id=sm.file_version_id AND sv.snapshot_id=sm.snapshot_id
+			WHERE sm.snapshot_id=? AND sm.status='parsed'`
+		args := []any{tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, tenant, knowledgeBaseID, sourceID, snapshotID}
+		if err := tx.Raw(query, args...).Scan(&bounds).Error; err != nil {
+			return fmt.Errorf("read source Wiki fact inventory bounds: %w", err)
+		}
+		if bounds.MemberCount != int64(snapshot.FileCount) || bounds.ValidCount != bounds.MemberCount ||
+			bounds.DistinctFileCount != bounds.MemberCount || bounds.DistinctVersionCount != bounds.MemberCount {
+			return fmt.Errorf("source relation fact inventory is incomplete or outside its snapshot")
+		}
+		if bounds.FactCount > maxFacts || bounds.FactBytes > maxCanonicalBytes {
+			capacityExceeded = true
+			return nil
+		}
+		members = make([]types.SourceSnapshotRelationMember, 0, bounds.MemberCount)
+		seenFileIDs, seenVersionIDs := map[string]struct{}{}, map[string]struct{}{}
+		lastPath := ""
+		const pageSize = 128
+		for {
+			type factMemberRow struct {
+				Path          string
+				SourceFileID  string
+				FileVersionID string
+				Facts         types.JSON
+			}
+			var rows []factMemberRow
+			if err := tx.Table("source_snapshot_members sm").
+				Joins("JOIN source_files sf ON sf.id=sm.source_file_id AND sf.tenant_id=? AND sf.knowledge_base_id=? AND sf.data_source_id=?", tenant, knowledgeBaseID, sourceID).
+				Joins("JOIN source_file_versions sv ON sv.id=sm.file_version_id AND sv.source_file_id=sm.source_file_id AND sv.snapshot_id=sm.snapshot_id AND jsonb_typeof(sv.facts)='array'").
+				Select("sm.path, sm.source_file_id, sm.file_version_id, sv.facts").
+				Where("sm.snapshot_id=? AND sm.status='parsed' AND sm.path>?", snapshotID, lastPath).
+				Order("sm.path ASC").Limit(pageSize).Find(&rows).Error; err != nil {
+				return fmt.Errorf("load bounded source Wiki fact page: %w", err)
+			}
+			if len(rows) == 0 {
+				break
+			}
+			for _, row := range rows {
+				if row.Path == "" || row.SourceFileID == "" || row.FileVersionID == "" {
+					return fmt.Errorf("source relation fact member identity is incomplete")
+				}
+				if _, exists := seenFileIDs[row.SourceFileID]; exists {
+					return fmt.Errorf("source relation fact inventory contains a duplicate file identity")
+				}
+				if _, exists := seenVersionIDs[row.FileVersionID]; exists {
+					return fmt.Errorf("source relation fact inventory contains a duplicate version identity")
+				}
+				var facts []types.ParsedSourceFact
+				if len(row.Facts) == 0 || json.Unmarshal(row.Facts, &facts) != nil || facts == nil {
+					return fmt.Errorf("source relation parser facts are invalid")
+				}
+				seenFileIDs[row.SourceFileID], seenVersionIDs[row.FileVersionID] = struct{}{}, struct{}{}
+				members = append(members, types.SourceSnapshotRelationMember{Path: row.Path, FileID: row.SourceFileID, VersionID: row.FileVersionID, Facts: facts})
+				lastPath = row.Path
+			}
+		}
+		if int64(len(members)) != bounds.MemberCount {
+			return fmt.Errorf("source relation fact pagination did not cover the parsed snapshot")
+		}
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return nil, false, err
+	}
+	return members, capacityExceeded, nil
 }
 
 func (r *sourceSnapshotRepository) StageIndexes(ctx context.Context, indexes []*types.IndexInfo, vectors map[string][]float32) error {
@@ -322,11 +479,24 @@ func (r *sourceSnapshotRepository) Publish(ctx context.Context, snapshot *types.
 			snapshot.ID, snapshot.ID, snapshot.ID, snapshot.ID, dimension, source.SourceSearchTermsVersion, snapshot.ID, snapshot.TenantID, snapshot.DataSourceID, snapshot.ID).Scan(&counts).Error; err != nil {
 			return err
 		}
-		var relationStaged bool
-		if err := tx.Model(&types.SourceSnapshot{}).Select("relations_staged").Where("id=?", snapshot.ID).Scan(&relationStaged).Error; err != nil {
+		var derivation struct {
+			State         string `gorm:"column:wiki_derivation_state"`
+			RelationCount int    `gorm:"column:relation_count"`
+			Staged        bool   `gorm:"column:relations_staged"`
+		}
+		if err := tx.Model(&types.SourceSnapshot{}).Select("wiki_derivation_state,relation_count,relations_staged").Where(
+			"id=? AND tenant_id=? AND knowledge_base_id=? AND data_source_id=?", snapshot.ID, snapshot.TenantID, snapshot.KnowledgeBaseID, snapshot.DataSourceID).
+			Scan(&derivation).Error; err != nil {
 			return err
 		}
-		if !relationStaged || counts.Relations != int64(snapshot.RelationCount) || counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks || counts.SearchTerms != counts.Chunks {
+		relationsReady := false
+		switch derivation.State {
+		case "complete":
+			relationsReady = derivation.Staged && derivation.RelationCount == snapshot.RelationCount && counts.Relations == int64(derivation.RelationCount)
+		case "deferred_capacity":
+			relationsReady = !derivation.Staged && derivation.RelationCount == 0 && counts.Relations == 0 && snapshot.RelationCount == 0 && !snapshot.RelationsStaged
+		}
+		if !relationsReady || counts.Members != int64(snapshot.MemberCount) || counts.Files != int64(snapshot.FileCount) || counts.Chunks != int64(snapshot.ChunkCount) || counts.Embeddings != counts.Chunks || counts.SearchTerms != counts.Chunks {
 			return fmt.Errorf("source membership or dual index preparation is incomplete")
 		}
 		// BM25 readiness is checked on the actual transaction's index database.

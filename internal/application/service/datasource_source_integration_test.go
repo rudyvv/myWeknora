@@ -136,6 +136,80 @@ func TestManualSourceSyncRemainsPendingWhenQueueEnqueueFails(t *testing.T) {
 	requireSourceRunPhase(t, f, log.ID, "queued")
 }
 
+func TestSourceWikiFactCapacityDefersOnlyDerivation(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	f.service.sourceWikiLimits = sourceWikiDerivationLimits{
+		maxFacts: types.SourceWikiImpactMaxFacts, maxCanonicalBytes: 1,
+	}
+	syncSourceFixture(t, f)
+
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id=?", f.ds.ID).Take(&publication).Error)
+	var snapshot types.SourceSnapshot
+	require.NoError(t, f.db.Where("id=?", publication.SnapshotID).Take(&snapshot).Error)
+	require.Equal(t, "published", snapshot.State)
+	require.Equal(t, "deferred_capacity", snapshot.WikiDerivationState)
+	require.False(t, snapshot.RelationsStaged)
+	require.Zero(t, snapshot.RelationCount)
+	require.Greater(t, snapshot.ChunkCount, 0)
+	var relationCount int64
+	require.NoError(t, f.db.Model(&types.SourceCodeRelation{}).Where("tenant_id=? AND data_source_id=? AND snapshot_id=?",
+		f.ds.TenantID, f.ds.ID, snapshot.ID).Count(&relationCount).Error)
+	require.Zero(t, relationCount, "capacity deferral must not leave relation rows")
+
+	var file types.SourceFile
+	require.NoError(t, f.db.Where("data_source_id=? AND path=?", f.ds.ID, "src/Service.java").Take(&file).Error)
+	view, err := f.knowledge.GetSourceFile(f.ctx, file.ID)
+	require.NoError(t, err)
+	require.Contains(t, view.Content, "getPushSchedule", "raw source remains published")
+	var version types.SourceFileVersion
+	require.NoError(t, f.db.Where("snapshot_id=? AND source_file_id=?", snapshot.ID, file.ID).Take(&version).Error)
+	require.Contains(t, string(version.Content), "预约", "the exact source bytes remain available")
+	var facts []types.ParsedSourceFact
+	require.NoError(t, json.Unmarshal(version.Facts, &facts))
+	require.NotEmpty(t, facts, "parser-authored facts remain persisted despite Wiki deferral")
+
+	var indexCounts struct{ Chunks, Embeddings, SearchTerms int64 }
+	require.NoError(t, f.db.Raw(`SELECT
+		(SELECT count(*) FROM source_chunk_references WHERE snapshot_id=?) AS chunks,
+		(SELECT count(*) FROM embeddings e JOIN source_chunk_references cr ON cr.chunk_id=e.chunk_id WHERE cr.snapshot_id=?) AS embeddings,
+		(SELECT count(*) FROM source_chunk_references cr JOIN source_chunk_search_terms st ON st.chunk_id=cr.chunk_id WHERE cr.snapshot_id=?) AS search_terms`,
+		snapshot.ID, snapshot.ID, snapshot.ID).Scan(&indexCounts).Error)
+	require.Greater(t, indexCounts.Chunks, int64(0))
+	require.Equal(t, indexCounts.Chunks, indexCounts.Embeddings)
+	require.Equal(t, indexCounts.Chunks, indexCounts.SearchTerms)
+	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "getPushSchedule", MatchCount: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits, "deferred Wiki derivation must not disable source search")
+	var outboxCount int64
+	require.NoError(t, f.db.Table("source_publication_outbox").Where("snapshot_id=? AND event_type='source.wiki.update'", snapshot.ID).Count(&outboxCount).Error)
+	require.EqualValues(t, 1, outboxCount, "Wiki invalidation still runs for deferred source snapshots")
+
+	_, err = repository.LoadSourceWikiSkeletonSnapshot(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, snapshot.ID)
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationDeferred)
+	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` })
+	_, err = generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationDeferred)
+	preflight := generator.(interface {
+		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
+	})
+	_, err = preflight.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationDeferred)
+	attempt := &types.SourceWikiAttempt{TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: snapshot.ID, TopicKind: "system"}
+	_, _, _, err = sourceWikiContributionInventory(f.db, attempt)
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationDeferred)
+	drainSourceWikiReviewUpdateLane(t, f, generator)
+	var plan types.SourceWikiUpdatePlan
+	require.NoError(t, f.db.Where("source_id=? AND snapshot_id=?", f.ds.ID, snapshot.ID).Take(&plan).Error)
+	require.True(t, plan.SourceWideStale)
+	require.Equal(t, "wiki_derivation_deferred_capacity", plan.ReasonCode)
+	var unsafeItems int64
+	require.NoError(t, f.db.Model(&types.SourceWikiUpdatePlanItem{}).Where("plan_id=? AND action IN ?", plan.ID, []string{"carry_forward", "remove"}).Count(&unsafeItems).Error)
+	require.Zero(t, unsafeItems, "deferred snapshots cannot carry old cards forward or remove them without a complete proof")
+}
+
 func TestSourceSchedulerRecoversPendingManualTriggerAfterRestart(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	f.service.taskEnqueuer = sourceTestTaskEnqueuer{err: errors.New("queue unavailable")}
@@ -3223,6 +3297,9 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 	relationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000107_source_code_relations.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(relationMigration)).Error)
+	derivationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000120_source_wiki_derivation_state.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(derivationMigration)).Error)
 	coordinationMigration, err := os.ReadFile(filepath.Join(root, "migrations", "versioned", "000108_source_sync_coordination.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(coordinationMigration)).Error)

@@ -14,12 +14,7 @@ import (
 
 // SourceRelationMember contains only verified facts from one complete Git
 // manifest and the file/version IDs staged for that same snapshot.
-type SourceRelationMember struct {
-	Path      string
-	FileID    string
-	VersionID string
-	Facts     []types.ParsedSourceFact
-}
+type SourceRelationMember = types.SourceSnapshotRelationMember
 
 type factOwner struct {
 	member SourceRelationMember

@@ -17,13 +17,15 @@ import (
 )
 
 var (
-	ErrSourceWikiBatchNotFound        = errors.New("source Wiki batch not found")
-	ErrSourceWikiBatchDeadline        = errors.New("source Wiki batch deadline exceeded")
-	ErrSourceWikiBatchBudgetExhausted = errors.New("source Wiki batch budget exhausted")
-	ErrSourceWikiBatchInvalidState    = errors.New("invalid source Wiki batch state")
-	ErrSourceWikiBatchAlreadyActive   = errors.New("a source Wiki batch is already active")
-	ErrSourceWikiBatchQACursorChanged = errors.New("source Wiki batch QA cursor changed")
-	ErrSourceWikiBatchQATimeout       = errors.New("source Wiki batch QA deadline exceeded")
+	ErrSourceWikiBatchNotFound         = errors.New("source Wiki batch not found")
+	ErrSourceWikiBatchDeadline         = errors.New("source Wiki batch deadline exceeded")
+	ErrSourceWikiBatchBudgetExhausted  = errors.New("source Wiki batch budget exhausted")
+	ErrSourceWikiBatchInvalidState     = errors.New("invalid source Wiki batch state")
+	ErrSourceWikiBatchAlreadyActive    = errors.New("a source Wiki batch is already active")
+	ErrSourceWikiBatchQACursorChanged  = errors.New("source Wiki batch QA cursor changed")
+	ErrSourceWikiBatchQATimeout        = errors.New("source Wiki batch QA deadline exceeded")
+	ErrSourceWikiDerivationDeferred    = errors.New("source Wiki derivation deferred by capacity")
+	ErrSourceWikiDerivationUnavailable = errors.New("source Wiki derivation is unavailable")
 )
 
 // SourceWikiBatchLedger owns the durable batch parent, stable topic coverage,
@@ -982,6 +984,12 @@ func LoadSourceWikiSkeletonSnapshot(ctx context.Context, db *gorm.DB, tenantID u
 		snapshotID, sourceID, tenantID, knowledgeBaseID).Take(&publishedSnapshot).Error; err != nil {
 		return nil, fmt.Errorf("source Wiki skeleton snapshot is not a complete published snapshot")
 	}
+	if publishedSnapshot.WikiDerivationState == "deferred_capacity" {
+		return nil, fmt.Errorf("%w: the published source snapshot is available for search but not Wiki generation", ErrSourceWikiDerivationDeferred)
+	}
+	if publishedSnapshot.WikiDerivationState != "complete" || !publishedSnapshot.RelationsStaged {
+		return nil, fmt.Errorf("%w: source Wiki derivation is not complete", ErrSourceWikiDerivationUnavailable)
+	}
 	var publication types.SourcePublication
 	if err := db.WithContext(ctx).Where("snapshot_id = ? AND data_source_id = ? AND tenant_id = ? AND knowledge_base_id = ?",
 		snapshotID, sourceID, tenantID, knowledgeBaseID).Take(&publication).Error; err != nil {
@@ -1066,6 +1074,9 @@ func LoadSourceWikiSkeletonSnapshot(ctx context.Context, db *gorm.DB, tenantID u
 	}
 	if len(relations) > types.SourceWikiSkeletonMaxRelations {
 		return nil, fmt.Errorf("source relations exceed the %d-edge skeleton scan bound", types.SourceWikiSkeletonMaxRelations)
+	}
+	if len(relations) != publishedSnapshot.RelationCount {
+		return nil, fmt.Errorf("%w: source relation inventory does not match its published count", ErrSourceWikiDerivationUnavailable)
 	}
 	snapshot.Relations = relations
 	snapshot.Complete = len(snapshot.Members) == len(rows) && len(snapshot.Files) == len(rows)

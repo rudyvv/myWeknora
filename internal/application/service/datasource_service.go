@@ -46,6 +46,7 @@ type DataSourceService struct {
 	sourceModelService interfaces.ModelService
 	sourceResources    *source.ResourceController
 	sourceWikiCoverage interfaces.SourceWikiBatchReadService
+	sourceWikiLimits   sourceWikiDerivationLimits
 }
 
 // NewDataSourceService creates a new data source service
@@ -89,6 +90,9 @@ func NewDataSourceService(
 		sourceModelService: sourceModelService,
 		sourceResources:    sourceResources,
 		sourceWikiCoverage: sourceWikiCoverage,
+		sourceWikiLimits: sourceWikiDerivationLimits{
+			maxFacts: types.SourceWikiImpactMaxFacts, maxCanonicalBytes: types.SourceWikiImpactMaxFactBytes,
+		},
 	}
 }
 

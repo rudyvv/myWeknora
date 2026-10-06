@@ -19,6 +19,11 @@ import (
 	"github.com/hibiken/asynq"
 )
 
+type sourceWikiDerivationLimits struct {
+	maxFacts          int64
+	maxCanonicalBytes int64
+}
+
 func (s *DataSourceService) checkSourceSyncReady(ctx context.Context, kb *types.KnowledgeBase, config *types.DataSourceConfig) (source.IndexProfile, error) {
 	if kb == nil || s.sourceSnapshots == nil || s.sourceModelService == nil {
 		return source.IndexProfile{}, datasource.ErrSourcePipelineUnavailable
@@ -337,11 +342,33 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 	}
 	parsingStarted = time.Now()
 	telemetry.QualityCounts = make(map[string]int64)
-	var indexes []*types.IndexInfo
-	var indexTextBytes int64
-	relationMembers := make([]source.SourceRelationMember, 0, snapshot.FileCount)
-	var totalFacts int
-	var factBytes int64
+	snapshot.ChunkCount = 0
+	embeddingUsage := sourceEmbeddingUsage{}
+	indexStager, err := s.newSourceIndexBatchStager(ctx, ds, kb, snapshot, indexProfile, &embeddingUsage)
+	if err != nil {
+		return err
+	}
+	indexBatch := make([]*types.IndexInfo, 0, 32)
+	flushIndexBatch := func() error {
+		if len(indexBatch) == 0 {
+			return nil
+		}
+		indexingStarted = time.Now()
+		stageErr := indexStager.stage(ctx, indexBatch, &embeddingUsage)
+		finishSourceTelemetryPhase(telemetry, "indexing", &indexingStarted)
+		if stageErr != nil {
+			return stageErr
+		}
+		indexBatch = indexBatch[:0]
+		return nil
+	}
+	appendIndex := func(index *types.IndexInfo) error {
+		indexBatch = append(indexBatch, index)
+		if len(indexBatch) == cap(indexBatch) {
+			return flushIndexBatch()
+		}
+		return nil
+	}
 	for i := range result.Source.Members {
 		member := &result.Source.Members[i]
 		if member.Status != "included" && member.Status != "parsed" {
@@ -375,14 +402,9 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 			return err
 		}
 		telemetry.CountQuality(parsed.Quality)
-		factData, err := json.Marshal(parsed.Facts)
+		_, err = json.Marshal(parsed.Facts)
 		if err != nil {
 			return fmt.Errorf("source parser facts could not be bounded")
-		}
-		totalFacts += len(parsed.Facts)
-		factBytes += int64(len(factData))
-		if totalFacts > types.SourceWikiImpactMaxFacts || factBytes > types.SourceWikiImpactMaxFactBytes {
-			return source.ErrResourceLimitExceeded
 		}
 		if member.Status == "parsed" {
 			reader, ok := s.sourceSnapshots.(interface {
@@ -399,15 +421,13 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 				return fmt.Errorf("persisted source stage has incomplete chunks for %s", member.Path)
 			}
 			for index, part := range parsed.Chunks {
-				indexTextBytes += int64(len(source.SourceIndexText(member.Path, part)))
-				if len(indexes) >= types.SourceWikiSkeletonMaxRelations || indexTextBytes > types.SourceWikiImpactMaxFactBytes {
-					return source.ErrResourceLimitExceeded
-				}
-				indexes = append(indexes, &types.IndexInfo{SourceID: chunkIDs[index], ChunkID: chunkIDs[index], SourceType: types.ChunkSourceType,
+				if err := appendIndex(&types.IndexInfo{SourceID: chunkIDs[index], ChunkID: chunkIDs[index], SourceType: types.ChunkSourceType,
 					KnowledgeID: member.SourceFileID, KnowledgeBaseID: kb.ID, KnowledgeType: types.KnowledgeTypeSource,
-					Content: source.SourceIndexText(member.Path, part), IsEnabled: false})
+					Content: source.SourceIndexText(member.Path, part), IsEnabled: false}); err != nil {
+					return err
+				}
 			}
-			relationMembers = append(relationMembers, source.SourceRelationMember{Path: member.Path, FileID: member.SourceFileID, VersionID: member.FileVersionID, Facts: parsed.Facts})
+			snapshot.ChunkCount += len(parsed.Chunks)
 			continue
 		}
 		fileID := member.SourceFileID
@@ -417,49 +437,64 @@ func (s *DataSourceService) processSourceSync(ctx context.Context, ds *types.Dat
 		diagnostics, _ := json.Marshal(parsed.Diagnostics)
 		fileVersion := &types.SourceFileVersion{ID: uuid.NewString(), SourceFileID: fileID, SnapshotID: snapshot.ID, BlobSHA: member.BlobSHA, SHA256: parsed.SHA256, Content: raw, Encoding: parsed.Encoding, ParserVersion: parsed.ParserVersion, Quality: parsed.Quality, Symbols: types.JSON(symbols), Facts: types.JSON(facts), Diagnostics: types.JSON(diagnostics)}
 		chunks := make([]*types.Chunk, len(parsed.Chunks))
+		fileIndexes := make([]*types.IndexInfo, len(parsed.Chunks))
 		for index, part := range parsed.Chunks {
 			indexText := source.SourceIndexText(member.Path, part)
-			indexTextBytes += int64(len(indexText))
-			if len(indexes) >= types.SourceWikiSkeletonMaxRelations || indexTextBytes > types.SourceWikiImpactMaxFactBytes {
-				return source.ErrResourceLimitExceeded
-			}
 			evidence := types.SourceEvidence{DataSourceID: ds.ID, SnapshotID: snapshot.ID, FileVersionID: fileVersion.ID, ProjectID: snapshot.ProjectID, CommitSHA: snapshot.CommitSHA, Path: member.Path, Range: part.Range, Symbols: part.Symbols, Quality: part.Quality, Context: part.Context, Region: part.Region, Diagnostics: part.Diagnostics, GitLabURL: source.GitLabBlobURL(snapshot.RepositoryURL, snapshot.CommitSHA, member.Path, part.Range)}
 			metadata, _ := json.Marshal(map[string]any{"source": evidence})
 			chunk := &types.Chunk{ID: uuid.NewString(), TenantID: ds.TenantID, KnowledgeBaseID: kb.ID, KnowledgeID: fileID, Content: part.Content, SourceContent: part.Content, ChunkIndex: index, ChunkType: types.ChunkTypeText, IsEnabled: false, IndexStatus: "pending", StartAt: utf8.RuneCount(raw[:part.Range.StartByte]), EndAt: utf8.RuneCount(raw[:part.Range.EndByte]), Metadata: types.JSON(metadata)}
 			chunks[index] = chunk
-			indexes = append(indexes, &types.IndexInfo{SourceID: chunk.ID, ChunkID: chunk.ID, SourceType: types.ChunkSourceType, KnowledgeID: fileID, KnowledgeBaseID: kb.ID, KnowledgeType: types.KnowledgeTypeSource, Content: indexText, IsEnabled: false})
+			fileIndexes[index] = &types.IndexInfo{SourceID: chunk.ID, ChunkID: chunk.ID, SourceType: types.ChunkSourceType, KnowledgeID: fileID, KnowledgeBaseID: kb.ID, KnowledgeType: types.KnowledgeTypeSource, Content: indexText, IsEnabled: false}
 		}
 		if err := s.sourceSnapshots.StageFile(ctx, file, fileVersion, chunks); err != nil {
 			return err
 		}
-		relationMembers = append(relationMembers, source.SourceRelationMember{Path: member.Path, FileID: fileID, VersionID: fileVersion.ID, Facts: parsed.Facts})
+		for _, index := range fileIndexes {
+			if err := appendIndex(index); err != nil {
+				return err
+			}
+		}
 		member.SourceFileID, member.FileVersionID, member.Status = fileID, fileVersion.ID, "parsed"
+		snapshot.ChunkCount += len(chunks)
 	}
-	relations := source.CorrelateSourceFacts(ds.TenantID, ds.ID, snapshot.ID, relationMembers)
-	if len(relations) > types.SourceWikiSkeletonMaxRelations {
-		return source.ErrResourceLimitExceeded
-	}
-	if err := s.sourceSnapshots.StageRelations(ctx, ds.TenantID, ds.ID, snapshot.ID, relations); err != nil {
+	if err := flushIndexBatch(); err != nil {
 		return err
+	}
+	embeddingUsage.completed = true
+	relationMembers, capacityExceeded, err := s.sourceSnapshots.LoadSourceRelationMembers(ctx, ds.TenantID, kb.ID, ds.ID, snapshot.ID,
+		s.sourceWikiLimits.maxFacts, s.sourceWikiLimits.maxCanonicalBytes)
+	if err != nil {
+		return err
+	}
+	if capacityExceeded {
+		if err := s.sourceSnapshots.DeferWikiDerivation(ctx, ds.TenantID, kb.ID, ds.ID, snapshot.ID); err != nil {
+			return err
+		}
+		snapshot.WikiDerivationState, snapshot.RelationCount, snapshot.RelationsStaged = "deferred_capacity", 0, false
+	} else {
+		relations := source.CorrelateSourceFacts(ds.TenantID, ds.ID, snapshot.ID, relationMembers)
+		if len(relations) > types.SourceWikiSkeletonMaxRelations {
+			if err := s.sourceSnapshots.DeferWikiDerivation(ctx, ds.TenantID, kb.ID, ds.ID, snapshot.ID); err != nil {
+				return err
+			}
+			snapshot.WikiDerivationState, snapshot.RelationCount, snapshot.RelationsStaged = "deferred_capacity", 0, false
+		} else {
+			if err := s.sourceSnapshots.StageRelations(ctx, ds.TenantID, ds.ID, snapshot.ID, relations); err != nil {
+				return err
+			}
+			snapshot.WikiDerivationState, snapshot.RelationCount, snapshot.RelationsStaged = "complete", len(relations), true
+		}
 	}
 	if err := blobStage.Close(); err != nil {
 		incrementSourceTelemetryCounter(&telemetry.CleanupResidueCount)
 		return err
 	}
 	finishSourceTelemetryPhase(telemetry, "parsing", &parsingStarted)
-	snapshot.RelationCount, snapshot.RelationsStaged = len(relations), true
-	snapshot.ChunkCount = len(indexes)
+	recordSourceEmbeddingUsage(telemetry, &embeddingUsage)
 	if err := progress("indexing"); err != nil {
 		return err
 	}
-	indexingStarted = time.Now()
-	embeddingUsage := sourceEmbeddingUsage{}
-	dimension, err := s.stageSourceIndexes(ctx, ds, kb, snapshot, indexes, indexProfile, &embeddingUsage)
-	recordSourceEmbeddingUsage(telemetry, &embeddingUsage)
-	finishSourceTelemetryPhase(telemetry, "indexing", &indexingStarted)
-	if err != nil {
-		return err
-	}
+	dimension := indexStager.dimension
 	if usage, usageErr := s.sourceSnapshots.GetSourceResourceUsage(ctx, ds.TenantID, ds.ID); usageErr == nil {
 		telemetry.Storage = ensureSourceStorage(telemetry.Storage)
 		telemetry.Storage["original"] = sourceStorageMetric(usage.OriginalBytes, resourcePolicy.OriginalBytesPerSource, types.SourceStorageMeasurementLogicalPayload)

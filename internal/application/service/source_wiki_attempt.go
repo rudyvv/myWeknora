@@ -111,6 +111,9 @@ func (s *sourceWikiService) generateTopic(ctx context.Context, req types.SourceW
 		return nil, err
 	}
 	defer release()
+	if _, _, err = loadCurrentSourceWikiPublication(ctx, s.db, kb, req.SourceID); err != nil {
+		return nil, err
+	}
 
 	ledger := repository.NewSourceWikiAttemptLedger(s.db)
 	attempt, err := s.loadOrCreateSourceWikiAttempt(ctx, ledger, kb, req, module)

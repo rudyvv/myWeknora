@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
 )
@@ -20,10 +21,16 @@ func sourceWikiContributionInventory(tx *gorm.DB, attempt *types.SourceWikiAttem
 		return nil, nil, false, fmt.Errorf("source Wiki contribution inventory requires a fixed topic snapshot")
 	}
 	var snapshot types.SourceSnapshot
-	if err := tx.Select("id,manifest_complete,member_count,relations_staged,relation_count").
+	if err := tx.Select("id,manifest_complete,member_count,relations_staged,relation_count,wiki_derivation_state").
 		Where("id=? AND data_source_id=? AND tenant_id=? AND knowledge_base_id=?", attempt.SnapshotID, attempt.SourceID, attempt.TenantID, attempt.KnowledgeBaseID).
 		Take(&snapshot).Error; err != nil {
 		return nil, nil, false, err
+	}
+	if snapshot.WikiDerivationState == "deferred_capacity" {
+		return nil, nil, false, fmt.Errorf("%w: source Wiki contributions cannot be generated for this snapshot", repository.ErrSourceWikiDerivationDeferred)
+	}
+	if snapshot.WikiDerivationState != "complete" || !snapshot.RelationsStaged {
+		return nil, nil, false, fmt.Errorf("%w: source Wiki contributions require complete derivation", repository.ErrSourceWikiDerivationUnavailable)
 	}
 	var memberCount int64
 	if err := tx.Model(&types.SourceSnapshotMember{}).Where("snapshot_id=?", attempt.SnapshotID).Count(&memberCount).Error; err != nil {

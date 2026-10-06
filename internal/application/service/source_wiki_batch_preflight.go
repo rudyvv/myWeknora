@@ -210,6 +210,12 @@ func loadCurrentSourceWikiPublication(ctx context.Context, db *gorm.DB, kb *type
 		}
 		return nil, nil, err
 	}
+	if snapshot.WikiDerivationState == "deferred_capacity" {
+		return nil, nil, fmt.Errorf("%w: this source snapshot remains searchable, but Wiki generation was deferred by capacity", repository.ErrSourceWikiDerivationDeferred)
+	}
+	if snapshot.WikiDerivationState != "complete" || !snapshot.RelationsStaged {
+		return nil, nil, fmt.Errorf("%w: the published source has no complete Wiki derivation", repository.ErrSourceWikiDerivationUnavailable)
+	}
 	return &publication, &snapshot, nil
 }
 

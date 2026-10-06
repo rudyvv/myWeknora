@@ -178,11 +178,19 @@ type SourceSnapshot struct {
 	ChunkCount                int        `json:"chunk_count"`
 	RelationCount             int        `json:"relation_count"`
 	RelationsStaged           bool       `json:"relations_staged"`
+	WikiDerivationState       string     `json:"wiki_derivation_state" gorm:"type:varchar(32);not null;default:pending"`
 	Error                     string     `json:"error,omitempty"`
 	CreatedAt                 time.Time  `json:"created_at"`
 	PublishedAt               *time.Time `json:"published_at,omitempty"`
 	LastSuccessfulPublishedAt *time.Time `json:"last_successful_published_at,omitempty" gorm:"-"`
 	PreviousPublishedAt       *time.Time `json:"previous_published_at,omitempty" gorm:"-"`
+}
+
+type SourceSnapshotRelationMember struct {
+	Path      string
+	FileID    string
+	VersionID string
+	Facts     []ParsedSourceFact
 }
 
 type SourceSnapshotMember struct {

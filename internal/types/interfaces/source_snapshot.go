@@ -23,6 +23,8 @@ type SourceSnapshotRepository interface {
 	UpdateProgress(context.Context, *types.SourceSnapshot, []types.SourceSnapshotMember) error
 	StageFile(context.Context, *types.SourceFile, *types.SourceFileVersion, []*types.Chunk) error
 	StageRelations(context.Context, uint64, string, string, []types.SourceCodeRelation) error
+	DeferWikiDerivation(context.Context, uint64, string, string, string) error
+	LoadSourceRelationMembers(context.Context, uint64, string, string, string, int64, int64) ([]types.SourceSnapshotRelationMember, bool, error)
 	StageIndexes(context.Context, []*types.IndexInfo, map[string][]float32) error
 	Publish(context.Context, *types.SourceSnapshot, *types.DataSource, *types.KnowledgeBase, int) error
 	EnsurePublishedSourceWikiUpdate(context.Context, *types.DataSource, *types.SourceSnapshot) error

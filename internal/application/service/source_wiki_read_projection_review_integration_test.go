@@ -284,6 +284,57 @@ func TestSourceWikiAnswerLeaseKeepsExactCardAcrossPublicationAndRegeneration(t *
 	t22RequireWikiSearchEmpty(t, staleSearch, staleSearchErr, firstPage)
 }
 
+func TestDeferredWikiSnapshotKeepsOldAnswerLeaseButNoNewWikiRead(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	firstRun := latestIncrementalRun(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, t22SourceWikiResponse("T22_DEFERRED_OLD"))
+	first, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ready", first.Status)
+	firstPage, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, first.Slug)
+	require.NoError(t, err)
+
+	oldCtx, releaseOld, err := t22BeginWikiAnswerRead(wiki, f.ctx, t22WikiTargets(f, f.ds.ID))
+	require.NoError(t, err)
+	defer releaseOld()
+	pinnedBefore, err := wiki.GetPageBySlug(oldCtx, f.kb.ID, first.Slug)
+	require.NoError(t, err)
+	require.Equal(t, firstPage.Content, pinnedBefore.Content)
+
+	f.service.sourceWikiLimits = sourceWikiDerivationLimits{maxFacts: types.SourceWikiImpactMaxFacts, maxCanonicalBytes: 1}
+	f.advanceJava("package demo; public class Service { public String getPushSchedule() { return \"deferred schedule\"; } }\n")
+	syncSourceFixture(t, f)
+	deferredRun := latestIncrementalRun(t, f)
+	require.Equal(t, "deferred_capacity", deferredRun.Snapshot.WikiDerivationState)
+	drainSourceWikiReviewUpdateLane(t, f, generator)
+
+	pinnedAfter, err := wiki.GetPageBySlug(oldCtx, f.kb.ID, first.Slug)
+	require.NoError(t, err, "an already leased question retains its exact old card projection")
+	require.Equal(t, firstPage.Version, pinnedAfter.Version)
+	require.Equal(t, firstPage.Content, pinnedAfter.Content)
+	require.Equal(t, "ready", pinnedAfter.SourceProvenance.State)
+	require.Contains(t, pinnedAfter.Content, "T22_DEFERRED_OLD_BODY")
+	oldHits, err := f.kbs.HybridSearch(oldCtx, f.kb.ID, types.SearchParams{
+		QueryText: "getPushSchedule", MatchCount: 10, SourceIDs: []string{f.ds.ID},
+	})
+	require.NoError(t, err, "the old question lease retains its published code snapshot")
+	require.NotEmpty(t, oldHits)
+	var oldEvidence struct {
+		Source types.SourceEvidence `json:"source"`
+	}
+	require.NoError(t, json.Unmarshal(oldHits[0].ChunkMetadata, &oldEvidence))
+	require.Equal(t, firstRun.Snapshot.ID, oldEvidence.Source.SnapshotID)
+
+	newCtx, releaseNew, err := t22BeginWikiAnswerRead(wiki, f.ctx, t22WikiTargets(f, f.ds.ID))
+	require.NoError(t, err)
+	defer releaseNew()
+	_, err = wiki.GetPageBySlug(newCtx, f.kb.ID, first.Slug)
+	t22RequireWikiReadDenied(t, nil, err, firstPage)
+}
+
 func TestSourceWikiAnswerLeaseExcludesLaterValidatedCard(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	syncSourceFixture(t, f)

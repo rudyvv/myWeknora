@@ -109,6 +109,18 @@ func (s *sourceWikiService) ProcessPublishedSourceWikiUpdate(ctx context.Context
 		TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID,
 		SourceID: payload.DataSourceID, SnapshotID: payload.SnapshotID, Complete: false,
 	}
+	var nextSnapshotState struct {
+		WikiDerivationState string `gorm:"column:wiki_derivation_state"`
+	}
+	if err := s.db.WithContext(ctx).Table("source_snapshots").Select("wiki_derivation_state").
+		Where("id=? AND tenant_id=? AND knowledge_base_id=? AND data_source_id=? AND state='published' AND manifest_complete=TRUE",
+			payload.SnapshotID, payload.TenantID, payload.KnowledgeBaseID, payload.DataSourceID).Take(&nextSnapshotState).Error; err != nil {
+		return fmt.Errorf("load published source Wiki derivation state: %w", err)
+	}
+	if nextSnapshotState.WikiDerivationState == "deferred_capacity" {
+		impact.FallbackReason = "wiki_derivation_deferred_capacity"
+		return s.persistSourceWikiImpactFallback(ctx, payload, durable, impact, impact.FallbackReason)
+	}
 	if durable.PreviousSnapshotID != "" && durable.PreviousSnapshotID != payload.SnapshotID {
 		previous, previousLoaded, err := repository.LoadSourceWikiImpactSnapshot(s.db.WithContext(ctx), payload.TenantID,
 			payload.KnowledgeBaseID, payload.DataSourceID, durable.PreviousSnapshotID, types.SourceWikiImpactPublishedComplete)
@@ -897,6 +909,9 @@ func (s *sourceWikiService) persistSourceWikiImpactPlan(ctx context.Context, pay
 		reasonCode, reason := "incremental_impact_planned", "The complete source impact plan was persisted; affected topics remain stale until regenerated."
 		if sourceWide {
 			reasonCode, reason = impact.FallbackReason, "The bounded impact scan was incomplete; all source Wiki answers remain stale."
+			if impact.FallbackReason == "wiki_derivation_deferred_capacity" {
+				reason = "Wiki derivation was deferred by capacity; all source Wiki answers remain stale until a derivable source snapshot is published."
+			}
 		}
 		result := tx.Model(&plan).Where("id=? AND status IN ?", plan.ID, []string{"pending", "running"}).Updates(map[string]any{
 			"plan_digest": digestHex, "status": "completed", "source_wide_stale": sourceWide,

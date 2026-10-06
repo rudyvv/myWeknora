@@ -248,6 +248,25 @@ func (s *sourceWikiService) collectTopicEvidence(ctx context.Context, kbID strin
 	if attempt == nil || attempt.SourceID == "" || attempt.SnapshotID == "" {
 		return nil, fmt.Errorf("topic evidence requires its fixed source snapshot")
 	}
+	tenantID := attempt.TenantID
+	if tenantID == 0 {
+		var knowledgeBase types.KnowledgeBase
+		if err := s.db.WithContext(ctx).Where("id=?", kbID).Take(&knowledgeBase).Error; err != nil {
+			return nil, fmt.Errorf("topic evidence knowledge base is unavailable: %w", err)
+		}
+		tenantID = knowledgeBase.TenantID
+	}
+	var sourceSnapshot types.SourceSnapshot
+	if err := s.db.WithContext(ctx).Where("id=? AND tenant_id=? AND data_source_id=? AND knowledge_base_id=? AND state='published' AND manifest_complete=TRUE",
+		attempt.SnapshotID, tenantID, attempt.SourceID, kbID).Take(&sourceSnapshot).Error; err != nil {
+		return nil, fmt.Errorf("topic evidence source snapshot is unavailable: %w", err)
+	}
+	if sourceSnapshot.WikiDerivationState == "deferred_capacity" {
+		return nil, fmt.Errorf("%w: source cards are unavailable for this snapshot", repository.ErrSourceWikiDerivationDeferred)
+	}
+	if sourceSnapshot.WikiDerivationState != "complete" || !sourceSnapshot.RelationsStaged {
+		return nil, fmt.Errorf("%w: source card evidence requires complete Wiki derivation", repository.ErrSourceWikiDerivationUnavailable)
+	}
 	var members []types.SourceSnapshotMember
 	var flowTargets map[sourceWikiFlowEvidenceTarget][]types.SourceRange
 	q := s.db.WithContext(ctx).Table("source_snapshot_members sm").Select("sm.*").
