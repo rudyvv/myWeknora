@@ -586,7 +586,16 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 	}
 	for _, request := range requests {
 		fact := request.fact
-		if fact.RoutePath == "" || fact.Dynamic {
+		if fact.RoutePath == "" || fact.HTTPMethod == "" {
+			continue
+		}
+		fromKey := strings.ToUpper(fact.HTTPMethod) + " " + fact.RoutePath
+		requestOnlyRoute := func(reason string) types.SourceCodeRelation {
+			return sourceFactRelation(tenant, sourceID, snapshotID, "http_route", request.member, fact,
+				fromKey, nil, "", "uncertain", reason)
+		}
+		if fact.Dynamic {
+			relations = append(relations, requestOnlyRoute("No statically validated backend route relationship was found for this request"))
 			continue
 		}
 		requestRoutes := []sourceRequestRoute{{path: normalizeSourceRoute(fact.RoutePath)}}
@@ -635,6 +644,7 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			requestRoutes = uniqueRequestRoutes(requestRoutes)
 		}
 		if len(requestRoutes) == 0 {
+			relations = append(relations, requestOnlyRoute("No statically validated backend route relationship was found for this request"))
 			continue
 		}
 		var candidates []sourceRouteEndpoint
@@ -653,9 +663,13 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			}
 		}
 		candidates = uniqueRouteEndpoints(candidates)
+		if len(candidates) == 0 {
+			relations = append(relations, requestOnlyRoute("No statically validated backend route relationship was found for this request"))
+			continue
+		}
 		if len(candidates) == 1 && !candidates[0].uncertain {
 			relation := sourceFactRelation(tenant, sourceID, snapshotID, "http_route",
-				request.member, fact, strings.ToUpper(fact.HTTPMethod)+" "+fact.RoutePath,
+				request.member, fact, fromKey,
 				&candidates[0].owner, springEndpointKey(candidates[0].owner.fact, candidates[0].path), "certain", "")
 			setSourceRelationFactRefs(&relation, candidates[0].supportingFacts)
 			relations = append(relations, relation)
@@ -669,7 +683,7 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 				reason = "legacy .do route suffix matching is not verified by source configuration"
 			}
 			relation := sourceFactRelation(tenant, sourceID, snapshotID, "http_route", request.member, fact,
-				strings.ToUpper(fact.HTTPMethod)+" "+fact.RoutePath, nil, "", "uncertain", reason)
+				fromKey, nil, "", "uncertain", reason)
 			relation.ToKey = springEndpointKey(candidates[0].owner.fact, candidates[0].path)
 			var supportingFacts []types.SourceRelationFactRef
 			for _, candidate := range candidates {

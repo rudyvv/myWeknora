@@ -358,10 +358,11 @@ func (s *sourceWikiService) processSourceWikiBatchQA(ctx context.Context, ledger
 		if topic.Status != "draft" && !(topic.Status == "ready" && topic.LastReadySnapshotID == batch.SnapshotID) {
 			return false, ledger.UpdateProgress(ctx, batch.ID, "batch_qa", "failed", batch.CurrentTopicKey, "one or more initial cards failed generation", batch.Cursor, time.Now())
 		}
-		card, err := s.sourceWikiBatchQACard(qaCtx, batch, topic)
+		card, err := s.sourceWikiBatchConsistencyCard(qaCtx, batch, topic)
 		if err != nil {
 			return false, err
 		}
+		card["topic_key"] = topic.TopicKey
 		qaCards = append(qaCards, card)
 	}
 	encodedInput, err := json.Marshal(sourceWikiBatchQAInput{Cards: qaCards})
@@ -641,10 +642,7 @@ func (s *sourceWikiService) sourceWikiBatchConsistencyCard(ctx context.Context, 
 			for _, item := range checkpoint.Evidence {
 				evidence = append(evidence, map[string]any{"record": item.Evidence, "text": item.Text})
 			}
-			return map[string]any{"identity": identity, "draft": draft, "evidence": evidence, "relations": checkpointRelations, "flow_diagram": map[string]any{
-				"markdown": flowDiagram.Markdown, "evidence_ids": flowDiagram.EvidenceIDs,
-				"uncertain": flowDiagram.Uncertain,
-			}}, nil
+			return sourceWikiBatchCandidateCard(identity, draft, evidence, checkpointRelations, flowDiagram), nil
 		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
@@ -849,55 +847,15 @@ type sourceWikiBatchQAReplyCard struct {
 	Reason    string
 }
 
-func (s *sourceWikiService) sourceWikiBatchQACard(ctx context.Context, batch *types.SourceWikiBatch, topic types.SourceWikiCoverageTopic) (map[string]any, error) {
-	card := map[string]any{"topic_key": topic.TopicKey, "topic_kind": topic.Kind, "title": topic.Title, "uncertain": topic.Uncertain}
-	if topic.AttemptID != nil {
-		var attempt types.SourceWikiAttempt
-		if err := s.db.WithContext(ctx).Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND batch_id = ?", *topic.AttemptID, batch.TenantID, batch.KnowledgeBaseID, batch.ID).Take(&attempt).Error; err == nil {
-			var draftText string
-			if json.Unmarshal(attempt.Draft, &draftText) != nil {
-				draftText = string(attempt.Draft)
-			}
-			var draft sourceWikiDraft
-			if err := sourceWikiJSON(draftText, &draft); err != nil {
-				return nil, fmt.Errorf("batch card draft is invalid")
-			}
-			sections := make([]map[string]any, 0, min(len(draft.Sections), 8))
-			for _, section := range draft.Sections {
-				if len(sections) == 8 {
-					break
-				}
-				sections = append(sections, map[string]any{"text": sourceWikiTextPrefix(section.Text, 220), "uncertain": section.Uncertain})
-			}
-			card["summary"], card["sections"] = sourceWikiTextPrefix(draft.Summary, 360), sections
-			var checkpoint sourceWikiAttemptCheckpoint
-			if json.Unmarshal(attempt.Checkpoint, &checkpoint) == nil {
-				evidence := make([]map[string]string, 0, min(len(checkpoint.Evidence), 6))
-				for _, item := range checkpoint.Evidence {
-					if len(evidence) == 6 {
-						break
-					}
-					evidence = append(evidence, map[string]string{"path": item.Evidence.Path, "excerpt": sourceWikiTextPrefix(item.Text, 160)})
-				}
-				card["evidence"] = evidence
-			}
-			return card, nil
-		}
+func sourceWikiBatchCandidateCard(identity map[string]any, draft sourceWikiDraft, evidence []map[string]any,
+	relations []types.SourceCodeRelation, flowDiagram SourceWikiFlowDiagram) map[string]any {
+	return map[string]any{
+		"identity": identity, "draft": draft, "evidence": evidence, "relations": relations,
+		"flow_diagram": map[string]any{
+			"markdown": flowDiagram.Markdown, "evidence_ids": flowDiagram.EvidenceIDs,
+			"uncertain": flowDiagram.Uncertain,
+		},
 	}
-	page, err := s.wiki.GetPageBySlug(ctx, batch.KnowledgeBaseID, topic.WikiSlug)
-	if err != nil {
-		return nil, err
-	}
-	card["summary"] = sourceWikiTextPrefix(page.Summary+" "+page.Content, 1800)
-	return card, nil
-}
-
-func sourceWikiTextPrefix(value string, limit int) string {
-	runes := []rune(strings.TrimSpace(value))
-	if len(runes) > limit {
-		runes = runes[:limit]
-	}
-	return string(runes)
 }
 
 func waitSourceWikiBatch(ctx context.Context, duration time.Duration) bool {

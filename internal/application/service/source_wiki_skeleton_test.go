@@ -3,8 +3,10 @@ package service
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/require"
 )
@@ -109,7 +111,7 @@ func TestSourceWikiSkeletonDoesNotPromoteUncertainRouteIntoCertainFlow(t *testin
 	require.NotEqual(t, "certain", flow.Relations[0].Determinacy)
 }
 
-func TestSourceWikiSkeletonKeepsUnmatchedEntrypointAsExplicitlyUncertain(t *testing.T) {
+func TestSourceWikiSkeletonDoesNotInventRelationForUnregisteredEntrypoint(t *testing.T) {
 	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
 		SourceID: "source-a", SnapshotID: "snapshot-2",
 		Files: []sourceWikiSkeletonFile{{Path: "web/orders.ts", Facts: []types.ParsedSourceFact{{
@@ -122,6 +124,80 @@ func TestSourceWikiSkeletonKeepsUnmatchedEntrypointAsExplicitlyUncertain(t *test
 	require.True(t, flow.Uncertain, "client route alone is not an end-to-end validated backend flow")
 	require.Contains(t, flow.UncertaintyReasons, "No statically validated backend route relationship was found for this request")
 	require.Empty(t, flow.Relations)
+}
+
+func TestSourceWikiRequestOnlyFlowRetainsExactEvidenceAndUncertainDiagram(t *testing.T) {
+	request := types.ParsedSourceFact{
+		Kind: "api_request", Name: "loadOrders", RoutePath: "/orders", HTTPMethod: "GET", Quality: "structural",
+		Range: types.SourceRange{StartByte: 20, EndByte: 38, StartLine: 2, EndLine: 2},
+	}
+	member := source.SourceRelationMember{Path: "web/orders.ts", FileID: "orders-file", VersionID: "orders-v1", Facts: []types.ParsedSourceFact{request}}
+	relations := source.CorrelateSourceFacts(7, "source-a", "snapshot-a", []source.SourceRelationMember{member})
+	require.Len(t, relations, 1)
+	resolver := source.NewSourceRelationFactRefResolver(source.SourceRelationFactSnapshot{
+		TenantID: 7, DataSourceID: "source-a", SnapshotID: "snapshot-a", Complete: true,
+		Members: []source.SourceRelationMember{member},
+	})
+	resolvedRelations, err := sourceWikiResolveRelationFactRefs(resolver, relations)
+	require.NoError(t, err, "the request-only anchor must be accepted only after exact snapshot replay")
+
+	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
+		SourceID: "source-a", SnapshotID: "snapshot-a",
+		Files:     []sourceWikiSkeletonFile{{Path: member.Path, Facts: member.Facts}},
+		Relations: resolvedRelations,
+	}, 40)
+	require.Len(t, plan.Topics, 2)
+	flow := plan.Topics[1]
+	require.Equal(t, "flow/GET /orders", flow.TopicKey)
+	require.True(t, flow.Uncertain)
+	require.Contains(t, flow.UncertaintyReasons, "No statically validated backend route relationship was found for this request")
+	require.Len(t, flow.Relations, 1)
+	require.Equal(t, "uncertain", flow.Relations[0].Determinacy)
+	require.Empty(t, flow.Relations[0].ToFileID, "a request-only anchor must not claim a backend file")
+	require.Empty(t, flow.Relations[0].ToKey, "a request-only anchor must not name a backend candidate")
+
+	targets, err := sourceWikiFlowEvidenceRanges(flow.Relations, "source-a", "snapshot-a")
+	require.NoError(t, err)
+	require.Equal(t, []types.SourceRange{request.Range}, targets[sourceWikiFlowEvidenceTarget{FileID: member.FileID, VersionID: member.VersionID, Path: member.Path}])
+
+	evidence := []types.SourceWikiEvidence{{ID: "e-request", KnowledgeID: member.FileID,
+		SourceEvidence: types.SourceEvidence{DataSourceID: "source-a", SnapshotID: "snapshot-a", FileVersionID: member.VersionID, Path: member.Path, Range: request.Range}}}
+	diagram, err := BuildSourceWikiFlowDiagram(flow.Relations, evidence)
+	require.NoError(t, err)
+	require.True(t, diagram.Uncertain)
+	require.Equal(t, []string{"e-request"}, diagram.EvidenceIDs)
+	require.Contains(t, diagram.Markdown, "-.->|uncertain HTTP route|")
+	require.Contains(t, diagram.Markdown, "unresolved endpoint")
+	require.NoError(t, sourceWikiValidateDiagramFactEvidence(flow.Relations, evidence, diagram))
+}
+
+func TestSourceWikiBatchCandidateCardRetainsCompleteDraftAndEvidence(t *testing.T) {
+	draft := sourceWikiDraft{Summary: strings.Repeat("s", 400), Sections: make([]sourceWikiSection, 9)}
+	for i := range draft.Sections {
+		draft.Sections[i] = sourceWikiSection{Text: fmt.Sprintf("section-%d:%s", i, strings.Repeat("x", 240)), EvidenceIDs: []string{fmt.Sprintf("e%03d", i)}}
+	}
+	evidence := make([]map[string]any, 7)
+	for i := range evidence {
+		evidence[i] = map[string]any{"record": types.SourceWikiEvidence{ID: fmt.Sprintf("e%03d", i)}, "text": fmt.Sprintf("evidence-%d:%s", i, strings.Repeat("y", 220))}
+	}
+	identity := map[string]any{"topic_key": "module/orders"}
+	relations := []types.SourceCodeRelation{{Kind: "method_call", FromKey: "A#orders -> service"}}
+	diagram := SourceWikiFlowDiagram{Markdown: "full flow diagram", EvidenceIDs: []string{"e000", "e006"}, Uncertain: true}
+
+	card := sourceWikiBatchCandidateCard(identity, draft, evidence, relations, diagram)
+	gotDraft, ok := card["draft"].(sourceWikiDraft)
+	require.True(t, ok)
+	require.Equal(t, draft.Summary, gotDraft.Summary)
+	require.Equal(t, draft.Sections, gotDraft.Sections, "group QA must see sections beyond the former eight-section clip in full")
+	gotEvidence, ok := card["evidence"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, gotEvidence, len(evidence), "group QA must see every verified evidence item")
+	for i, item := range gotEvidence {
+		require.Equal(t, evidence[i]["text"], item["text"], "evidence excerpts must not be clipped")
+	}
+	require.Equal(t, identity, card["identity"])
+	require.Equal(t, relations, card["relations"])
+	require.Equal(t, diagram.Markdown, card["flow_diagram"].(map[string]any)["markdown"])
 }
 
 func TestSourceWikiSkeletonIntegrityCheckRejectsCorruptCoverageAccounting(t *testing.T) {

@@ -1,6 +1,7 @@
 package source
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -162,8 +163,45 @@ func TestCorrelateFrontendPrefixAndProxyOnlyProducesUncertainRouteCandidate(t *t
 	mismatched := append([]SourceRelationMember(nil), members...)
 	mismatched[2].Facts = []types.ParsedSourceFact{mismatchedProxy}
 	mismatched[3].Facts = []types.ParsedSourceFact{controllerType, handler}
-	if relation := findRoute(mismatched); relation != nil {
-		t.Fatalf("request bypassed mismatched prefix rewrite evidence: %#v", relation)
+	if relation := findRoute(mismatched); relation == nil || relation.Determinacy != "uncertain" ||
+		relation.ToFileID != "" || relation.ToPath != "" || relation.ToKey != "" ||
+		relation.ResolutionReason != "No statically validated backend route relationship was found for this request" {
+		t.Fatalf("mismatched prefix rewrite did not remain a request-only uncertain anchor: %#v", relation)
+	}
+}
+
+func TestCorrelateUnmatchedFrontendRequestPreservesUncertainRequestOnlyAnchor(t *testing.T) {
+	request := relationFact("api_request", "loadOrders", "", 24, 43)
+	request.RoutePath, request.HTTPMethod = "/orders", "GET"
+	member := SourceRelationMember{Path: "web/orders.ts", FileID: "orders-file", VersionID: "orders-v1", Facts: []types.ParsedSourceFact{request}}
+
+	var route *types.SourceCodeRelation
+	for _, relation := range CorrelateSourceFacts(7, "source-a", "snapshot-a", []SourceRelationMember{member}) {
+		if relation.Kind == "http_route" {
+			route = &relation
+			break
+		}
+	}
+	if route == nil {
+		t.Fatal("unmatched parsed API request did not preserve a request-only route anchor")
+	}
+	if route.Determinacy != "uncertain" || route.Quality != "structural" || route.FromFileID != member.FileID ||
+		route.FromVersionID != member.VersionID || route.FromPath != member.Path || route.ToFileID != "" ||
+		route.ToVersionID != "" || route.ToPath != "" || route.ToKey != "" ||
+		route.ResolutionReason != "No statically validated backend route relationship was found for this request" {
+		t.Fatalf("unmatched request anchor invented or overstated a backend relation: %#v", route)
+	}
+	var gotRange types.SourceRange
+	if err := json.Unmarshal(route.FromRange, &gotRange); err != nil || gotRange != request.Range {
+		t.Fatalf("request-only anchor lost the exact parsed source range: range=%#v err=%v", gotRange, err)
+	}
+
+	resolver := NewSourceRelationFactRefResolver(SourceRelationFactSnapshot{
+		TenantID: 7, DataSourceID: "source-a", SnapshotID: "snapshot-a", Complete: true, Members: []SourceRelationMember{member},
+	})
+	resolution := resolver.Resolve(*route)
+	if resolution.Status != SourceRelationFactRefsReplayed || len(resolution.Refs) != 0 {
+		t.Fatalf("request-only anchor was not registered against the exact complete snapshot: %#v", resolution)
 	}
 }
 

@@ -530,6 +530,122 @@ func TestSourceWikiBatchPreflightPinsPublishedInputsWithoutCreatingOrDispatching
 	require.Zero(t, providerCalls.Load())
 }
 
+func TestSourceWikiBatchLocalQAReceivesCompleteCandidateAndEvidenceFromDatabaseCheckpoint(t *testing.T) {
+	extraFiles := make(map[string][]byte, 9)
+	for i := 0; i < 9; i++ {
+		filePath := fmt.Sprintf("src/module/orders/File%02d.java", i)
+		content := fmt.Sprintf("package orders;\n// %s\npublic class File%02d {}\n", strings.Repeat("raw source marker ", 20), i)
+		extraFiles[filePath] = []byte(content)
+	}
+	f := newJavaSourceFixture(t, extraFiles)
+	syncSourceFixture(t, f)
+	captured := make(chan []byte, 1)
+	qaOverride := func(w http.ResponseWriter, r *http.Request, _ bool) {
+		var request struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if json.NewDecoder(r.Body).Decode(&request) == nil && len(request.Messages) > 1 {
+			captured <- []byte(request.Messages[len(request.Messages)-1].Content)
+		} else {
+			captured <- nil
+		}
+		reply := `{"supported":true,"reason":"","cards":[{"topic_key":"system","supported":true,"reason":""}]}`
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"prompt_tokens":20,"completion_tokens":20,"total_tokens":40}}`, reply)
+	}
+	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` }, qaOverride)
+	service := generator.(*sourceWikiService)
+	model, err := service.models.GetModelByID(f.ctx, f.kb.SummaryModelID)
+	require.NoError(t, err)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, now)
+	batch.ModelSettingsFingerprint = sourceWikiModelFingerprint(model)
+	batch.ModelContextWindow = model.Parameters.ContextWindow
+	topic := types.SourceWikiTopic{SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "system", Kind: "system",
+		Title: "System overview", Priority: 120, Status: "planned"}
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	require.NoError(t, ledger.CreateWithPlan(f.ctx, batch, []types.SourceWikiTopic{topic}, now))
+	var coverage types.SourceWikiCoverageTopic
+	require.NoError(t, f.db.Where("batch_id = ? AND topic_key = ?", batch.ID, topic.TopicKey).Take(&coverage).Error)
+
+	checkpoint := sourceWikiAttemptCheckpoint{}
+	checkpoint.Evidence, err = service.collectTopicEvidence(f.ctx, f.kb.ID, &types.SourceWikiAttempt{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID,
+		TopicKind: "system", TopicKey: "system", ModelContextWindow: 65536, MaxCompletionTokens: 1024,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(checkpoint.Evidence), 9, "the fixed source read must supply more than six real evidence records")
+	longExcerpts := 0
+	for _, item := range checkpoint.Evidence {
+		if len(item.Text) > 160 {
+			longExcerpts++
+		}
+	}
+	require.GreaterOrEqual(t, longExcerpts, 9, "the checkpoint must include nine real excerpts longer than the former clip")
+	draft := sourceWikiDraft{Title: "System overview", Summary: strings.Repeat("summary-", 60), Sections: make([]sourceWikiSection, 9)}
+	for i := range draft.Sections {
+		draft.Sections[i] = sourceWikiSection{Text: fmt.Sprintf("section-%d:%s", i, strings.Repeat("draft", 55)), EvidenceIDs: []string{checkpoint.Evidence[i].Evidence.ID}}
+	}
+	draftJSON, err := json.Marshal(draft)
+	require.NoError(t, err)
+	checkpointJSON, err := json.Marshal(checkpoint)
+	require.NoError(t, err)
+	attempt := types.SourceWikiAttempt{
+		ID: uuid.NewString(), TenantID: batch.TenantID, KnowledgeBaseID: batch.KnowledgeBaseID,
+		SourceID: batch.SourceID, SnapshotID: batch.SnapshotID, BatchID: batch.ID,
+		TopicKind: topic.Kind, TopicKey: topic.TopicKey, ModulePath: topic.ModulePath, Title: topic.Title, Slug: coverage.WikiSlug,
+		Status: "staged", SourceConfigFingerprint: batch.SourceConfigFingerprint, SourceUpdatedAt: batch.SourceUpdatedAt,
+		ModelID: batch.ModelID, ModelSettingsFingerprint: batch.ModelSettingsFingerprint,
+		ModelContextWindow: batch.ModelContextWindow, MaxCompletionTokens: batch.MaxCompletionTokens,
+		MaxCalls: types.SourceWikiBatchChildMaxCalls, MaxTokens: types.SourceWikiBatchChildMaxTokens,
+		MaxElapsedMS: types.SourceWikiAttemptMaxElapsedMS, MaxRepairs: types.SourceWikiAttemptMaxRepairs,
+		DeadlineAt: batch.DeadlineAt, Phase: "staged", Draft: types.JSON(draftJSON), Checkpoint: types.JSON(checkpointJSON),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, f.db.Create(&attempt).Error)
+	evidenceRecords := make([]types.SourceWikiEvidence, 0, len(checkpoint.Evidence))
+	for _, item := range checkpoint.Evidence {
+		evidenceRecords = append(evidenceRecords, item.Evidence)
+	}
+	require.NoError(t, f.db.Transaction(func(tx *gorm.DB) error {
+		return repository.RegisterSourceWikiAttemptEvidence(tx, attempt.ID, evidenceRecords)
+	}))
+	require.NoError(t, ledger.UpdateTopic(f.ctx, batch.ID, topic.TopicKey, "draft", attempt.ID, "", "", now))
+	require.NoError(t, ledger.UpdateProgress(f.ctx, batch.ID, "batch_qa", "running", topic.TopicKey, "", 0, now))
+	batch, err = ledger.Get(f.ctx, f.kb.ID, batch.ID)
+	require.NoError(t, err)
+
+	done, err := service.processSourceWikiBatchQA(f.ctx, ledger, batch)
+	require.NoError(t, err)
+	require.True(t, done)
+	payload := <-captured
+	require.NotEmpty(t, payload, "normal group QA must send its candidate payload to the provider")
+	var input struct {
+		Cards []struct {
+			TopicKey string          `json:"topic_key"`
+			Draft    sourceWikiDraft `json:"draft"`
+			Evidence []struct {
+				Record types.SourceWikiEvidence `json:"record"`
+				Text   string                   `json:"text"`
+			} `json:"evidence"`
+		} `json:"cards"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &input))
+	require.Len(t, input.Cards, 1)
+	require.Equal(t, topic.TopicKey, input.Cards[0].TopicKey)
+	require.Equal(t, draft.Summary, input.Cards[0].Draft.Summary)
+	require.Equal(t, draft.Sections, input.Cards[0].Draft.Sections, "the real QA request must include all nine full sections")
+	require.Len(t, input.Cards[0].Evidence, len(checkpoint.Evidence), "the real QA request must include every registered evidence item")
+	for i, item := range input.Cards[0].Evidence {
+		require.Equal(t, checkpoint.Evidence[i].Evidence, item.Record)
+		require.Equal(t, checkpoint.Evidence[i].Text, item.Text, "the full registered raw excerpt must reach group QA")
+	}
+}
+
 func TestSourceWikiBatchStartGeneratesAndQAsAtLeastTwentyCards(t *testing.T) {
 	extraFiles := make(map[string][]byte, 20)
 	for i := 1; i <= 20; i++ {
@@ -1401,6 +1517,95 @@ func TestSourceWikiFlowEvidenceCapturesLateRelationRanges(t *testing.T) {
 		BatchID: batch.ID, TopicKey: coverage.TopicKey, TopicKind: "flow", ModelContextWindow: 800, MaxCompletionTokens: 100,
 	})
 	require.ErrorContains(t, err, "complete source evidence exceeds the bounded model context")
+}
+
+func TestSourceWikiUnmatchedVueRequestIsPublishedAndCollectedAsUncertainFlowEvidence(t *testing.T) {
+	raw := []byte(`<template><div /></template>
+<script>
+export default { methods: { loadOrders() {
+  this.$_HTTP.get('/api/orders', { params: {} })
+} } }
+</script>`)
+	f := newJavaSourceFixture(t, map[string][]byte{"src/web/Orders.vue": raw})
+	syncSourceFixture(t, f)
+	_, generator := newSourceWikiFixture(t, f, func(bool) string { return `{}` })
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	snapshot, err := repository.LoadSourceWikiSkeletonSnapshot(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.NoError(t, err)
+	require.True(t, snapshot.Complete)
+	var requestFact *types.ParsedSourceFact
+	for _, member := range snapshot.Members {
+		if member.Path != "src/web/Orders.vue" {
+			continue
+		}
+		for i := range member.Facts {
+			if member.Facts[i].Kind == "api_request" && member.Facts[i].RoutePath == "/api/orders" {
+				requestFact = &member.Facts[i]
+				break
+			}
+		}
+	}
+	require.NotNil(t, requestFact, "the published complete source snapshot must contain the parser-authored request fact")
+	var publishedAnchor *types.SourceCodeRelation
+	for i := range snapshot.Relations {
+		if snapshot.Relations[i].Kind == "http_route" && snapshot.Relations[i].FromPath == "src/web/Orders.vue" {
+			publishedAnchor = &snapshot.Relations[i]
+			break
+		}
+	}
+	require.NotNil(t, publishedAnchor, "whole-repository sync must publish a request-only relation anchor")
+	require.Equal(t, "uncertain", publishedAnchor.Determinacy)
+	require.Empty(t, publishedAnchor.ToFileID, "the unmatched request must not invent a backend edge")
+	require.Empty(t, publishedAnchor.ToKey)
+	require.Equal(t, "No statically validated backend route relationship was found for this request", publishedAnchor.ResolutionReason)
+	var publishedRange types.SourceRange
+	require.NoError(t, json.Unmarshal(publishedAnchor.FromRange, &publishedRange))
+	require.Equal(t, requestFact.Range, publishedRange)
+
+	service := generator.(*sourceWikiService)
+	relations, err := service.resolveSourceWikiRelations(f.ctx, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID, snapshot, []types.SourceCodeRelation{*publishedAnchor})
+	require.NoError(t, err, "the published request anchor must replay against its exact complete snapshot")
+	files := make([]sourceWikiSkeletonFile, 0, len(snapshot.Files))
+	for _, file := range snapshot.Files {
+		files = append(files, sourceWikiSkeletonFile{Path: file.Path, Generated: file.Generated, Facts: file.Facts})
+	}
+	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, Files: files, Relations: relations}, 40)
+	var flow *types.SourceWikiTopic
+	for i := range plan.Topics {
+		if plan.Topics[i].TopicKey == "flow/GET /api/orders" {
+			flow = &plan.Topics[i]
+			break
+		}
+	}
+	require.NotNil(t, flow)
+	require.True(t, flow.Uncertain)
+	require.Len(t, flow.Relations, 1)
+	batch := newSourceWikiTestBatch(f, publication.SnapshotID, time.Now().UTC().Truncate(time.Millisecond))
+	flow.Status = "planned"
+	ledger := repository.NewSourceWikiBatchLedger(f.db)
+	require.NoError(t, ledger.CreateWithPlan(f.ctx, batch, []types.SourceWikiTopic{*flow}, time.Now().UTC()))
+	evidence, err := service.collectTopicEvidence(f.ctx, f.kb.ID, &types.SourceWikiAttempt{
+		TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, SnapshotID: publication.SnapshotID,
+		BatchID: batch.ID, TopicKey: flow.TopicKey, TopicKind: "flow", ModelContextWindow: 65536, MaxCompletionTokens: 1024,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, evidence, "request-only anchor must make the frontend request source readable as flow evidence")
+	var matched *collectedWikiEvidence
+	for i := range evidence {
+		if evidence[i].Evidence.Path == "src/web/Orders.vue" {
+			matched = &evidence[i]
+			break
+		}
+	}
+	require.NotNil(t, matched)
+	require.True(t, sourceWikiFlowRangeCovers(matched.Evidence.Range, requestFact.Range))
+	require.Contains(t, matched.Text, `this.$_HTTP.get('/api/orders'`)
+	diagram, err := BuildSourceWikiFlowDiagram(relations, []types.SourceWikiEvidence{matched.Evidence})
+	require.NoError(t, err)
+	require.True(t, diagram.Uncertain)
+	require.Contains(t, diagram.Markdown, "-.->|uncertain HTTP route|")
+	require.Contains(t, diagram.Markdown, "unresolved endpoint")
 }
 
 func TestSourceWikiFlowEvidencePinsParticipatingCrossFileConfigurationFacts(t *testing.T) {
