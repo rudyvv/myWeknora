@@ -209,7 +209,7 @@ func (s *DataSourceService) stageSourceIndexes(ctx context.Context, ds *types.Da
 					usage.estimatedTokens.Add(attemptTokenEstimate)
 				})
 			}
-			vectors, err := model.BatchEmbed(embedCtx, texts)
+			vectors, err := sourceBatchEmbed(embedCtx, config.Parameters.Provider, model, texts)
 			if err != nil {
 				return 0, fmt.Errorf("source embedding request failed")
 			}
