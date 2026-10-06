@@ -68,28 +68,33 @@ export function sourceEvidenceKey(evidence: SourceEvidence): string {
 }
 
 export function isNavigableSourceEvidence(
-  knowledgeId: string | undefined,
-  evidence: SourceEvidence,
-): boolean {
-  if (!evidence || typeof evidence !== 'object') return false
-  const range = evidence?.range
-  return Boolean(
-    knowledgeId?.trim() &&
-    evidence.data_source_id?.trim() &&
-    evidence.snapshot_id?.trim() &&
-    evidence.file_version_id?.trim() &&
-    evidence.project_id?.trim() &&
-    /^[a-f0-9]{40,64}$/i.test(evidence.commit_sha || '') &&
-    evidence.path?.trim() &&
-    evidence.quality?.trim() &&
-    typeof evidence.gitlab_url === 'string' &&
-    (evidence.symbols == null || Array.isArray(evidence.symbols)) &&
-    (evidence.context == null || Array.isArray(evidence.context)) &&
-    Number.isSafeInteger(range?.start_byte) && range.start_byte >= 0 &&
-    Number.isSafeInteger(range?.end_byte) && range.end_byte > range.start_byte &&
-    Number.isSafeInteger(range?.start_line) && range.start_line > 0 &&
-    Number.isSafeInteger(range?.end_line) && range.end_line >= range.start_line,
-  )
+  knowledgeId: unknown,
+  evidence: unknown,
+): evidence is SourceEvidence {
+  if (typeof knowledgeId !== 'string' || !knowledgeId.trim()) return false
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return false
+
+  const candidate = evidence as Partial<SourceEvidence>
+  const requiredStrings = [
+    candidate.data_source_id,
+    candidate.snapshot_id,
+    candidate.file_version_id,
+    candidate.project_id,
+    candidate.path,
+    candidate.quality,
+  ]
+  if (!requiredStrings.every((value) => typeof value === 'string' && value.trim().length > 0)) return false
+  if (typeof candidate.commit_sha !== 'string' || !/^[a-f0-9]{40,64}$/i.test(candidate.commit_sha)) return false
+  if (typeof candidate.gitlab_url !== 'string') return false
+  if (candidate.symbols != null && !Array.isArray(candidate.symbols)) return false
+  if (candidate.context != null && !Array.isArray(candidate.context)) return false
+
+  const range = candidate.range
+  if (!range || typeof range !== 'object' || Array.isArray(range)) return false
+  return Number.isSafeInteger(range.start_byte) && range.start_byte >= 0 &&
+    Number.isSafeInteger(range.end_byte) && range.end_byte > range.start_byte &&
+    Number.isSafeInteger(range.start_line) && range.start_line > 0 &&
+    Number.isSafeInteger(range.end_line) && range.end_line >= range.start_line
 }
 
 export type KnowledgeReferenceLike = {

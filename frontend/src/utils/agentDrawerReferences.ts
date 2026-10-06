@@ -1,4 +1,6 @@
 import type { KnowledgeReferenceLike, SourceEvidence } from './referenceSources'
+import { groupGrepChunkResults } from './grepResultsGroup.ts'
+import type { GrepChunkResult } from '@/types/tool-results'
 
 export function getAgentDrawerReferences(
   refsOverride: KnowledgeReferenceLike[] | null | undefined,
@@ -39,4 +41,24 @@ export function getKnowledgeSearchToolReferences(event: any): KnowledgeReference
         ...(hasSourceEvidence ? { source_evidence: sourceEvidence as SourceEvidence | SourceEvidence[] } : {}),
       }
     })
+}
+
+export function getGrepChunkToolReferences(chunkResults: unknown): KnowledgeReferenceLike[] {
+  if (!Array.isArray(chunkResults) || !chunkResults.length) return []
+
+  return groupGrepChunkResults(chunkResults as GrepChunkResult[])
+    .filter((group) => group.knowledge_id || group.title)
+    .map((group, index) => ({
+      id: group.knowledge_id || group.key,
+      chunk_ids: group.chunks.map((chunk) => chunk.chunk_id).filter(Boolean),
+      source_evidence: group.chunks
+        .map((chunk) => chunk.source_evidence)
+        .filter((evidence): evidence is NonNullable<typeof evidence> => Boolean(evidence)),
+      knowledge_id: group.knowledge_id,
+      knowledge_title: group.title,
+      knowledge_base_id: group.knowledge_base_id,
+      chunk_index: index + 1,
+      chunk_type: group.is_faq ? 'faq' : undefined,
+      content: group.chunks.map((chunk) => chunk.content).filter(Boolean).slice(0, 3).join('\n\n') || group.match_snippet || '',
+    }))
 }

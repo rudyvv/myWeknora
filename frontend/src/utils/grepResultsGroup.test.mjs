@@ -91,6 +91,30 @@ test('groupGrepChunkResults keeps each chunk source evidence for the references 
   assert.deepEqual(group.chunks[0].source_evidence, sourceEvidence)
 })
 
+test('groupGrepChunkResults retains title-only source evidence hits with an empty snippet', () => {
+  const sourceEvidence = {
+    data_source_id: 'source-1', snapshot_id: 'snapshot-1', file_version_id: 'version-1',
+    project_id: 'project-1', commit_sha: 'a'.repeat(40), path: 'src/service.ts',
+    range: { start_byte: 0, end_byte: 8, start_line: 1, end_line: 1 },
+    symbols: null, quality: 'structural', gitlab_url: '', context: null,
+  }
+  const [group] = groupGrepChunkResults([{
+    chunk_id: 'chunk-title-hit',
+    knowledge_id: 'file-1',
+    knowledge_base_id: 'kb-1',
+    knowledge_title: 'Service source',
+    title_match: true,
+    match_snippet: '',
+    source_evidence: sourceEvidence,
+  }])
+
+  assert.equal(group.title_match, true)
+  assert.equal(group.match_snippet, '')
+  assert.equal(group.chunks.length, 1)
+  assert.equal(group.chunks[0].content, '')
+  assert.deepEqual(group.chunks[0].source_evidence, sourceEvidence)
+})
+
 test('countGrepDocuments prefers document_count from backend', () => {
   assert.equal(
     countGrepDocuments({

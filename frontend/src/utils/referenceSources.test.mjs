@@ -6,6 +6,7 @@ import {
   getDomainFromUrl,
   normalizeReferenceUrl,
   resolveReferenceHighlightKey,
+  isNavigableSourceEvidence,
 } from './referenceSources.ts'
 
 test('buildReferenceList separates web and document references', () => {
@@ -77,6 +78,45 @@ test('buildReferenceList preserves distinct fixed-version source evidence when g
   ])
 
   assert.deepEqual(item.sourceEvidence, [first, second])
+})
+
+test('source navigation rejects non-string identity, quality, commit, and knowledge IDs without throwing', () => {
+  const hash = 'a'.repeat(40)
+  const evidence = {
+    data_source_id: 'source-1',
+    snapshot_id: 'snapshot-1',
+    file_version_id: 'version-1',
+    project_id: 'project-1',
+    commit_sha: hash,
+    path: 'src/service.ts',
+    range: { start_byte: 0, end_byte: 8, start_line: 1, end_line: 1 },
+    symbols: null,
+    quality: 'structural',
+    gitlab_url: '',
+    context: null,
+  }
+  const malformedValues = [123, [], {}, [hash]]
+  const evidenceFields = [
+    'data_source_id', 'snapshot_id', 'file_version_id', 'project_id', 'path', 'quality', 'commit_sha',
+  ]
+
+  for (const field of evidenceFields) {
+    for (const value of malformedValues) {
+      let navigable = true
+      assert.doesNotThrow(() => {
+        navigable = isNavigableSourceEvidence('file-1', { ...evidence, [field]: value })
+      }, `${field}=${JSON.stringify(value)} must be rejected without throwing`)
+      assert.equal(navigable, false, `${field}=${JSON.stringify(value)} must not enable navigation`)
+    }
+  }
+
+  for (const knowledgeId of malformedValues) {
+    let navigable = true
+    assert.doesNotThrow(() => { navigable = isNavigableSourceEvidence(knowledgeId, evidence) })
+    assert.equal(navigable, false, `knowledgeId=${JSON.stringify(knowledgeId)} must not enable navigation`)
+  }
+
+  assert.equal(isNavigableSourceEvidence('file-1', evidence), true)
 })
 
 test('buildReferenceSections keeps tool results in their own section', () => {

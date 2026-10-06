@@ -627,7 +627,7 @@ import { getAttachmentParsingSummaryHtml } from '@/utils/attachmentParsingDispla
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
 import { useChatReferencesDrawer } from '@/composables/useChatReferencesDrawer';
 import type { KnowledgeReferenceLike, ReferenceHighlightTarget } from '@/utils/referenceSources';
-import { getAgentDrawerReferences, getKnowledgeSearchToolReferences } from '@/utils/agentDrawerReferences';
+import { getAgentDrawerReferences, getGrepChunkToolReferences, getKnowledgeSearchToolReferences } from '@/utils/agentDrawerReferences';
 import { resolveCitationChunkId } from '@/utils/citationMarkdown';
 import { getWikiPage, type WikiPage } from '@/api/wiki';
 import { MessagePlugin } from 'tdesign-vue-next';
@@ -1327,21 +1327,7 @@ function getToolReferenceItems(event: any): KnowledgeReferenceLike[] {
   if (toolName === 'grep_chunks') {
     const chunkResults = Array.isArray(toolData.chunk_results) ? toolData.chunk_results : [];
     if (chunkResults.length) {
-      return groupGrepChunkResults(chunkResults)
-        .filter((group) => group.knowledge_id || group.title)
-        .map((group, index) => ({
-          id: group.knowledge_id || group.key,
-          chunk_ids: group.chunks.map((chunk) => chunk.chunk_id).filter(Boolean),
-          source_evidence: group.chunks
-            .map((chunk) => chunk.source_evidence)
-            .filter((evidence): evidence is NonNullable<typeof evidence> => Boolean(evidence)),
-          knowledge_id: group.knowledge_id,
-          knowledge_title: group.title,
-          knowledge_base_id: group.knowledge_base_id,
-          chunk_index: index + 1,
-          chunk_type: group.is_faq ? 'faq' : undefined,
-          content: group.chunks.map((chunk) => chunk.content).filter(Boolean).slice(0, 3).join('\n\n') || group.match_snippet || '',
-        }));
+      return getGrepChunkToolReferences(chunkResults);
     }
 
     const knowledgeResults = Array.isArray(toolData.knowledge_results) ? toolData.knowledge_results : [];

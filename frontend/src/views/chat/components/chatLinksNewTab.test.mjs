@@ -8,6 +8,7 @@ const referenceDrawer = readFileSync(
 )
 const legacyReferences = readFileSync(new URL('./docInfo.vue', import.meta.url), 'utf8')
 const agentStream = readFileSync(new URL('./AgentStreamDisplay.vue', import.meta.url), 'utf8')
+const agentDrawerReferences = readFileSync(new URL('../../../utils/agentDrawerReferences.ts', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../index.vue', import.meta.url), 'utf8')
 
 test('reference document links open in a new tab', () => {
@@ -41,7 +42,11 @@ test('agent citations recover drawer references from retrieval tool events', () 
   )
   assert.match(
     agentStream,
-    /chunk_ids: group\.chunks\.map\(\(chunk\) => chunk\.chunk_id\)\.filter\(Boolean\)/,
+    /return getGrepChunkToolReferences\(chunkResults\)/,
+  )
+  assert.match(
+    agentDrawerReferences,
+    /chunk_ids: group\.chunks\.map\(\(chunk\) => chunk\.chunk_id\)\.filter\(Boolean\)[\s\S]*?source_evidence: group\.chunks/,
   )
   assert.equal(
     agentStream.match(/knowledgeReferences: getReferencesForDrawer\(\)|getReferencesForDrawer\(\),/g)?.length,

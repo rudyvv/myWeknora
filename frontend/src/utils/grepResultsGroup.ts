@@ -43,7 +43,7 @@ export function groupGrepChunkResults(chunkRows: GrepChunkResult[]): GrepGrouped
     group.chunk_hit_count += 1
     if (result.title_match) group.title_match = true
     if (!group.match_snippet && snippet) group.match_snippet = snippet
-    if (snippet) {
+    if (snippet || result.source_evidence) {
       group.chunks.push({
         content: snippet,
         chunk_id: result.faq_id || result.chunk_id,

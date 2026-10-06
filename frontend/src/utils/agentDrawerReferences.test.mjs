@@ -5,6 +5,7 @@ import {
   getKnowledgeSearchToolReferences,
 } from './agentDrawerReferences.ts'
 import { buildReferenceList, isNavigableSourceEvidence } from './referenceSources.ts'
+import * as agentDrawerReferences from './agentDrawerReferences.ts'
 
 test('empty aggregate references fall back to knowledge_search tool_result source evidence', () => {
   const sourceEvidence = {
@@ -48,4 +49,27 @@ test('empty aggregate references fall back to knowledge_search tool_result sourc
 
   const incompleteEvidence = { ...sourceEvidence, file_version_id: '' }
   assert.equal(isNavigableSourceEvidence(references[0].knowledge_id, incompleteEvidence), false)
+})
+
+test('title-only grep matches retain source evidence for the Agent citation drawer', () => {
+  const sourceEvidence = {
+    data_source_id: 'source-1', snapshot_id: 'snapshot-1', file_version_id: 'version-1',
+    project_id: 'project-1', commit_sha: 'a'.repeat(40), path: 'src/service.ts',
+    range: { start_byte: 0, end_byte: 8, start_line: 1, end_line: 1 },
+    symbols: null, quality: 'structural', gitlab_url: '', context: null,
+  }
+  const references = agentDrawerReferences.getGrepChunkToolReferences([{
+    chunk_id: 'title-only-hit',
+    knowledge_id: 'file-1',
+    knowledge_base_id: 'kb-1',
+    knowledge_title: 'Service source',
+    title_match: true,
+    match_snippet: '',
+    source_evidence: sourceEvidence,
+  }])
+
+  assert.equal(references.length, 1)
+  assert.equal(references[0].content, '')
+  assert.deepEqual(references[0].source_evidence, [sourceEvidence])
+  assert.deepEqual(buildReferenceList(references)[0].sourceEvidence, [sourceEvidence])
 })
