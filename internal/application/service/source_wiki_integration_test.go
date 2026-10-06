@@ -1136,6 +1136,151 @@ func TestSourceWikiTitleAndSummaryCannotHideModelVisibleSourcesAndQAIndicesAreSt
 	require.Equal(t, page.Version, unchanged.Version)
 }
 
+type sourceWikiTestJSONSchema struct {
+	Type        string                              `json:"type"`
+	Description string                              `json:"description"`
+	Properties  map[string]sourceWikiTestJSONSchema `json:"properties"`
+	Items       *sourceWikiTestJSONSchema           `json:"items"`
+}
+
+func sourceWikiTestSchemaFromInstructions(instructions string) (sourceWikiTestJSONSchema, bool) {
+	_, encoded, found := strings.Cut(instructions, "Response JSON Schema:\n")
+	if !found {
+		return sourceWikiTestJSONSchema{}, false
+	}
+	var schema sourceWikiTestJSONSchema
+	if err := json.Unmarshal([]byte(encoded), &schema); err != nil {
+		return sourceWikiTestJSONSchema{}, false
+	}
+	return schema, true
+}
+
+func sourceWikiTestHasTypedQASchema(schema sourceWikiTestJSONSchema) bool {
+	uncertain := schema.Properties["uncertain"]
+	sections := schema.Properties["sections"]
+	return schema.Type == "object" && uncertain.Type == "boolean" && sections.Type == "array" &&
+		sections.Items != nil && sections.Items.Type == "integer" && sections.Items.Description != ""
+}
+
+func sourceWikiTestHasTypedDraftSchema(schema sourceWikiTestJSONSchema) bool {
+	sections := schema.Properties["sections"]
+	if schema.Type != "object" || schema.Properties["title"].Type != "string" || schema.Properties["summary"].Type != "string" ||
+		sections.Type != "array" || sections.Items == nil || sections.Items.Type != "object" {
+		return false
+	}
+	sectionProperties := sections.Items.Properties
+	evidenceIDs := sectionProperties["evidence_ids"]
+	return sectionProperties["text"].Type == "string" && sectionProperties["uncertain"].Type == "boolean" &&
+		evidenceIDs.Type == "array" && evidenceIDs.Items != nil && evidenceIDs.Items.Type == "string"
+}
+
+func sourceWikiTestProviderPayload(t *testing.T, r *http.Request) (string, map[string]any) {
+	t.Helper()
+	var request struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+	require.GreaterOrEqual(t, len(request.Messages), 2)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal([]byte(request.Messages[1].Content), &payload))
+	_, ok := payload["instructions"].(string)
+	require.True(t, ok)
+	return r.Header.Get("X-Source-Wiki-Test-Stage"), payload
+}
+
+func writeSourceWikiFixtureReply(w http.ResponseWriter, content string) {
+	_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"total_tokens":40}}`, content)
+}
+
+func TestSourceWikiQARequestSchemaProducesTypedModelResponseAtServiceBoundary(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	seenSchema := map[string]bool{}
+	qaCalls := 0
+	wiki, generator := newSourceWikiFixture(t, f, func(bool) string { return "" }, func(w http.ResponseWriter, r *http.Request, _ bool) {
+		stage, payload := sourceWikiTestProviderPayload(t, r)
+		instructions, ok := payload["instructions"].(string)
+		require.True(t, ok)
+		schema, hasSchema := sourceWikiTestSchemaFromInstructions(instructions)
+		if stage == "source_wiki_generate" {
+			seenSchema[stage] = hasSchema && sourceWikiTestHasTypedDraftSchema(schema)
+			writeSourceWikiFixtureReply(w, `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`)
+			return
+		}
+		require.Equal(t, "source_wiki_qa", stage)
+		qaCalls++
+		seenSchema[stage] = sourceWikiTestHasTypedQASchema(schema)
+		if seenSchema[stage] {
+			writeSourceWikiFixtureReply(w, `{"supported":true,"reason":"","sections":[0],"uncertain":false}`)
+			return
+		}
+		// This boundary double follows an explicit typed QA response schema. In
+		// its absence it reproduces the observed model shape: uncertain as an array.
+		writeSourceWikiFixtureReply(w, `{"supported":true,"reason":"","sections":[0],"uncertain":[]}`)
+	})
+
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ready", attempt.Status, attempt.Reason)
+	require.True(t, seenSchema["source_wiki_generate"], "generation instructions must carry the typed draft schema")
+	require.True(t, seenSchema["source_wiki_qa"], "QA instructions must carry boolean uncertain and integer section-index types")
+	require.Equal(t, 1, qaCalls, "schema-following QA should pass on the first call without spending repairs")
+	require.Equal(t, 2, attempt.Calls, "generation and QA should each reserve one real provider call")
+	page, err := wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.NoError(t, err)
+	require.Equal(t, 1, page.Version)
+}
+
+func TestSourceWikiQAStillRejectsArrayForUncertain(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(bool) string { return "" }, func(w http.ResponseWriter, r *http.Request, _ bool) {
+		stage, _ := sourceWikiTestProviderPayload(t, r)
+		if stage == "source_wiki_generate" {
+			writeSourceWikiFixtureReply(w, `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false}]}`)
+			return
+		}
+		writeSourceWikiFixtureReply(w, `{"supported":true,"reason":"","sections":[0],"uncertain":[]}`)
+	})
+
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "failed", attempt.Status)
+	require.Contains(t, attempt.Reason, "cannot unmarshal array into Go struct field sourceWikiQA.uncertain")
+	require.Equal(t, 2, attempt.Repairs)
+	_, err = wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.Error(t, err, "malformed QA output must not publish a WikiPage")
+}
+
+func TestSourceWikiQAStillRequiresEverySectionIndex(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	wiki, generator := newSourceWikiFixture(t, f, func(bool) string { return "" }, func(w http.ResponseWriter, r *http.Request, _ bool) {
+		stage, _ := sourceWikiTestProviderPayload(t, r)
+		if stage == "source_wiki_generate" {
+			writeSourceWikiFixtureReply(w, `{"title":"Scheduling module","summary":"Returns a schedule.","sections":[{"text":"getPushSchedule returns a schedule.","evidence_ids":["e001"],"uncertain":false},{"text":"The method returns one schedule value.","evidence_ids":["e001"],"uncertain":false}]}`)
+			return
+		}
+		writeSourceWikiFixtureReply(w, `{"supported":true,"reason":"","sections":[0],"uncertain":false}`)
+	})
+
+	attempt, err := generator.GenerateModule(f.ctx, types.SourceWikiGenerateRequest{
+		KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID, ModulePath: "src", Title: "Scheduling module",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "failed", attempt.Status)
+	require.Contains(t, attempt.Reason, "QA did not verify each section")
+	require.Equal(t, 2, attempt.Repairs)
+	_, err = wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
+	require.Error(t, err, "QA that omits a section must not publish a WikiPage")
+}
+
 func TestSourceWikiGenerationPublicationGatesPreserveExistingBody(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	syncSourceFixture(t, f)
