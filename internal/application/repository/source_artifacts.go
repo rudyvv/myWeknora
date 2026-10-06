@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 func (r *sourceSnapshotRepository) GetPublished(ctx context.Context, tenant uint64, sourceID string) (*types.SourceRunResult, error) {
@@ -46,12 +46,16 @@ func (r *sourceSnapshotRepository) SaveParsedArtifact(ctx context.Context, tenan
 	if err != nil {
 		return err
 	}
-	artifact := &types.SourceParsedArtifact{TenantID: tenant, DataSourceID: sourceID, ArtifactKey: key, Parsed: types.JSON(data)}
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := assertSourceLeaseTx(tx, ctx); err != nil {
 			return err
 		}
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(artifact).Error; err != nil {
+		if err := tx.Exec(`WITH payload AS MATERIALIZED (
+			SELECT ?::jsonb AS parsed, ?::bigint AS tenant_id, ?::varchar(36) AS data_source_id, ?::text AS artifact_key
+		)
+			INSERT INTO source_parsed_artifacts (tenant_id,data_source_id,artifact_key,parsed,logical_payload_bytes)
+			SELECT payload.tenant_id,payload.data_source_id,payload.artifact_key,payload.parsed,octet_length(payload.parsed::text) FROM payload
+			ON CONFLICT (tenant_id,data_source_id,artifact_key) DO NOTHING`, string(data), tenant, sourceID, key).Error; err != nil {
 			return err
 		}
 		return r.assertSourceResourceQuotaTx(tx, tenant, sourceID)
@@ -91,8 +95,25 @@ func (r *sourceSnapshotRepository) SaveEmbeddingArtifacts(ctx context.Context, t
 		if err := assertSourceLeaseTx(tx, ctx); err != nil {
 			return err
 		}
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(artifacts, 100).Error; err != nil {
-			return err
+		for start := 0; start < len(artifacts); start += 100 {
+			end := min(start+100, len(artifacts))
+			batch := artifacts[start:end]
+			var values strings.Builder
+			args := make([]any, 0, len(batch)*4)
+			for i, artifact := range batch {
+				if i > 0 {
+					values.WriteByte(',')
+				}
+				values.WriteString("(?::bigint,?::varchar(36),?::text,?::jsonb)")
+				args = append(args, artifact.TenantID, artifact.DataSourceID, artifact.ArtifactKey, string(artifact.Vector))
+			}
+			query := `WITH payload (tenant_id,data_source_id,artifact_key,vector) AS MATERIALIZED (VALUES ` + values.String() + `)
+				INSERT INTO source_embedding_artifacts (tenant_id,data_source_id,artifact_key,vector,logical_payload_bytes)
+				SELECT tenant_id,data_source_id,artifact_key,vector,jsonb_array_length(vector)::bigint*4 FROM payload
+				ON CONFLICT (tenant_id,data_source_id,artifact_key) DO NOTHING`
+			if err := tx.Exec(query, args...).Error; err != nil {
+				return err
+			}
 		}
 		return r.assertSourceResourceQuotaTx(tx, tenant, sourceID)
 	})

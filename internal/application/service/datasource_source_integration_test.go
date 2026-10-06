@@ -3565,6 +3565,9 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 	leaseRecoveryMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000118_source_sync_lease_recoveries.up.sql"))
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(string(leaseRecoveryMigration)).Error)
+	artifactPayloadBytesMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000121_source_artifact_logical_payload_bytes.up.sql"))
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(artifactPayloadBytesMigration)).Error)
 	f.modelService = modelService
 	f.chunks = NewChunkService(repository.NewSourceAwareChunkRepository(db), repository.NewSourceAwareKnowledgeRepository(db), kbRepo, modelService, engines, nil, nil, nil, kbs)
 	f.knowledge = &knowledgeService{repo: repository.NewSourceAwareKnowledgeRepository(db), kbService: kbs, kbShareService: f.shares, chunkRepo: repository.NewSourceAwareChunkRepository(db), chunkService: f.chunks, modelService: modelService, retrieveEngine: engines, task: kbDeleteTaskEnqueuer{}, fileSvc: sourceNoObjectStorage{}, tagRepo: repository.NewKnowledgeTagRepository(db)}
