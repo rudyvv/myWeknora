@@ -201,6 +201,114 @@ func TestSourceWikiBatchLedgerReservesBudgetsAndPersistsStableCoverage(t *testin
 	require.Equal(t, "concept/source-"+f.ds.ID+"/module-"+hex.EncodeToString(hash[:8]), updated.WikiSlug)
 }
 
+func TestSourceWikiBatchReplanReplacesStaleAttemptLinks(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	ledger := newSourceWikiBatchLedgerFixture(t, f)
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	oldSnapshot := uuid.NewString()
+	oldBatch := newSourceWikiTestBatch(f, publication.SnapshotID, now.Add(-2*time.Minute))
+	oldBatch.ID = uuid.NewString()
+	oldBatch.Status = "failed"
+	oldBatch.Phase = "finished"
+	finishedAt := now.Add(-time.Minute)
+	oldBatch.FinishedAt = &finishedAt
+	oldBatch.UpdatedAt = finishedAt
+	oldBatch.Reason = "previous batch failed"
+	require.NoError(t, f.db.Create(oldBatch).Error)
+
+	type priorTopic struct {
+		key, status, snapshotID, lastReadySnapshotID, reason string
+		attemptID                                            string
+	}
+	prior := []priorTopic{
+		{key: "failed/topic", status: "failed", snapshotID: publication.SnapshotID, reason: "attempt target mismatch"},
+		{key: "ready/current", status: "ready", snapshotID: publication.SnapshotID, lastReadySnapshotID: publication.SnapshotID},
+		{key: "ready/old-snapshot", status: "ready", snapshotID: oldSnapshot, lastReadySnapshotID: oldSnapshot},
+	}
+	attempts := make([]types.SourceWikiAttempt, 0, len(prior))
+	coverage := make([]types.SourceWikiCoverageTopic, 0, len(prior))
+	for i, item := range prior {
+		attempt := types.SourceWikiAttempt{
+			ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID,
+			SnapshotID: item.snapshotID, BatchID: oldBatch.ID, TopicKind: "flow", TopicKey: item.key,
+			ModulePath: item.key, Title: item.key, Slug: "concept/source-" + f.ds.ID + "/" + item.key,
+			Status: item.status, Reason: item.reason, Calls: i + 1, Tokens: 100 * (i + 1),
+			SourceConfigFingerprint: oldBatch.SourceConfigFingerprint, SourceUpdatedAt: oldBatch.SourceUpdatedAt,
+			ModelID: oldBatch.ModelID, ModelSettingsFingerprint: oldBatch.ModelSettingsFingerprint,
+			ModelContextWindow: oldBatch.ModelContextWindow, MaxCompletionTokens: oldBatch.MaxCompletionTokens,
+			MaxCalls: types.SourceWikiBatchChildMaxCalls, MaxTokens: types.SourceWikiBatchChildMaxTokens,
+			MaxElapsedMS: types.SourceWikiAttemptMaxElapsedMS, MaxRepairs: types.SourceWikiAttemptMaxRepairs,
+			DeadlineAt: oldBatch.CreatedAt.Add(3 * time.Minute), CreatedAt: oldBatch.CreatedAt, UpdatedAt: oldBatch.CreatedAt,
+		}
+		attempts = append(attempts, attempt)
+		item.attemptID = attempt.ID
+		prior[i] = item
+
+		attemptID := attempt.ID
+		batchID := oldBatch.ID
+		coverage = append(coverage, types.SourceWikiCoverageTopic{
+			ID: uuid.NewString(), TenantID: f.kb.TenantID, KnowledgeBaseID: f.kb.ID, SourceID: f.ds.ID,
+			TopicKey: item.key, SnapshotID: item.snapshotID, Kind: "flow", Title: item.key,
+			Status: item.status, AttemptID: &attemptID, BatchID: &batchID, WikiSlug: attempt.Slug,
+			LastReadySnapshotID: item.lastReadySnapshotID, Reason: item.reason,
+			UncertaintyReasons: types.JSON("[]"), Relations: types.JSON("[]"), UpdatedAt: oldBatch.UpdatedAt,
+		})
+	}
+	require.NoError(t, f.db.Create(&attempts).Error)
+	require.NoError(t, f.db.Create(&coverage).Error)
+
+	next := newSourceWikiTestBatch(f, publication.SnapshotID, now)
+	require.NotEqual(t, oldBatch.ID, next.ID)
+	plan := []types.SourceWikiTopic{
+		{SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "failed/topic", Kind: "flow", Title: "failed/topic", Status: "planned"},
+		{SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "ready/current", Kind: "flow", Title: "ready/current", Status: "planned"},
+		{SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, TopicKey: "ready/old-snapshot", Kind: "flow", Title: "ready/old-snapshot", Status: "planned"},
+	}
+	require.NoError(t, ledger.CreateWithPlan(f.ctx, next, plan, now.Add(time.Second)))
+
+	coverage, err := ledger.Coverage(f.ctx, f.kb.ID, f.ds.ID)
+	require.NoError(t, err)
+	byTopic := make(map[string]types.SourceWikiCoverageTopic, len(coverage))
+	for _, topic := range coverage {
+		byTopic[topic.TopicKey] = topic
+	}
+	require.Len(t, byTopic, 3)
+
+	failed := byTopic["failed/topic"]
+	require.Equal(t, "planned", failed.Status)
+	require.Nil(t, failed.AttemptID, "a failed historical attempt cannot be reused by a fresh batch")
+	require.NotNil(t, failed.BatchID)
+	require.Equal(t, next.ID, *failed.BatchID)
+
+	currentReady := byTopic["ready/current"]
+	require.Equal(t, "ready", currentReady.Status)
+	require.NotNil(t, currentReady.AttemptID)
+	require.Equal(t, prior[1].attemptID, *currentReady.AttemptID)
+	require.Equal(t, publication.SnapshotID, currentReady.LastReadySnapshotID)
+
+	staleReady := byTopic["ready/old-snapshot"]
+	require.Equal(t, "planned", staleReady.Status)
+	require.Nil(t, staleReady.AttemptID, "a ready attempt from an older snapshot cannot become the new batch attempt")
+	require.Equal(t, oldSnapshot, staleReady.LastReadySnapshotID)
+	require.Equal(t, attempts[2].Slug, staleReady.WikiSlug)
+
+	attemptLedger := repository.NewSourceWikiAttemptLedger(f.db)
+	failedAttempt, err := attemptLedger.Get(f.ctx, prior[0].attemptID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", failedAttempt.Status)
+	require.Equal(t, "attempt target mismatch", failedAttempt.Reason)
+	require.Equal(t, oldBatch.ID, failedAttempt.BatchID)
+	require.Equal(t, 1, failedAttempt.Calls)
+	oldReadyAttempt, err := attemptLedger.Get(f.ctx, prior[2].attemptID)
+	require.NoError(t, err)
+	require.Equal(t, "ready", oldReadyAttempt.Status)
+	require.Equal(t, oldSnapshot, oldReadyAttempt.SnapshotID)
+}
+
 func TestSourceWikiBatchChildReservationsChargeParentAndAttemptAtomically(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	syncSourceFixture(t, f)

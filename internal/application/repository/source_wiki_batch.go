@@ -82,8 +82,9 @@ func validSourceWikiBatch(batch *types.SourceWikiBatch) bool {
 }
 
 // SavePlan persists the complete candidate plan atomically with its fixed
-// parent snapshot. Existing ready links are retained; a ready card only stays
-// current when it was generated against the same snapshot.
+// parent snapshot. Ready cards retain their attempt link only while they
+// remain current for that snapshot; stale or failed cards start without an
+// attempt in the new batch.
 func (l *SourceWikiBatchLedger) SavePlan(ctx context.Context, batchID string, topics []types.SourceWikiTopic, now time.Time) error {
 	if l == nil || l.db == nil || batchID == "" || now.IsZero() {
 		return fmt.Errorf("%w: missing batch, topic plan, or timestamp", ErrSourceWikiBatchInvalidState)
@@ -147,9 +148,10 @@ func (l *SourceWikiBatchLedger) SavePlan(ctx context.Context, batchID string, to
 			updates := map[string]any{
 				"knowledge_base_id": row.KnowledgeBaseID, "snapshot_id": row.SnapshotID, "kind": row.Kind,
 				"module_path": row.ModulePath, "title": row.Title, "priority": row.Priority,
-				"initial":   row.Initial,
-				"status":    gorm.Expr("CASE WHEN source_wiki_topics.status = 'ready' AND source_wiki_topics.last_ready_snapshot_id = EXCLUDED.snapshot_id THEN 'ready' ELSE EXCLUDED.status END"),
-				"uncertain": row.Uncertain, "uncertainty_reasons": row.UncertaintyReasons, "relations": row.Relations,
+				"initial":    row.Initial,
+				"status":     gorm.Expr("CASE WHEN source_wiki_topics.status = 'ready' AND source_wiki_topics.last_ready_snapshot_id = EXCLUDED.snapshot_id THEN 'ready' ELSE EXCLUDED.status END"),
+				"attempt_id": gorm.Expr("CASE WHEN source_wiki_topics.status = 'ready' AND source_wiki_topics.last_ready_snapshot_id = EXCLUDED.snapshot_id THEN source_wiki_topics.attempt_id ELSE NULL END"),
+				"uncertain":  row.Uncertain, "uncertainty_reasons": row.UncertaintyReasons, "relations": row.Relations,
 				"batch_id": row.BatchID, "wiki_slug": gorm.Expr("CASE WHEN source_wiki_topics.wiki_slug = '' THEN EXCLUDED.wiki_slug ELSE source_wiki_topics.wiki_slug END"),
 				"reason":     gorm.Expr("CASE WHEN source_wiki_topics.status = 'ready' AND source_wiki_topics.last_ready_snapshot_id = EXCLUDED.snapshot_id THEN source_wiki_topics.reason ELSE '' END"),
 				"updated_at": row.UpdatedAt,
