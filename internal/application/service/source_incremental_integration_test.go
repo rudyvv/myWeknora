@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,11 +57,21 @@ func TestSourceIncrementalOneTenAndHundredChangedFilesReuseUnchangedWork(t *test
 		baselineFiles[path] = []byte(content)
 	}
 	f := newJavaSourceFixture(t, baselineFiles)
+	var stableFileEmbeddingInputs atomic.Int64
+	f.embeddingForText = func(text string) []float32 {
+		if strings.HasPrefix(text, "src/Service.java\n") {
+			stableFileEmbeddingInputs.Add(1)
+		}
+		return []float32{1, 0, 0}
+	}
 	syncSourceFixture(t, f)
 	previous := latestIncrementalRun(t, f)
 	require.Equal(t, "published", previous.Snapshot.State)
 	require.True(t, previous.Snapshot.ManifestComplete)
 	require.Equal(t, 101, previous.Snapshot.FileCount, "the baseline is 100 change targets plus one stable source file")
+	stableMember := sourceMember(t, previous, "src/Service.java")
+	stableFileVectorCount := stableFileEmbeddingInputs.Load()
+	require.Positive(t, stableFileVectorCount, "baseline embedding HTTP inputs include the stable source file path")
 
 	for tier, changedFiles := range []int{1, 10, 100} {
 		parseCallsBefore := f.parseCount.Load()
@@ -91,7 +103,12 @@ func TestSourceIncrementalOneTenAndHundredChangedFilesReuseUnchangedWork(t *test
 		require.Equal(t, 101-changedFiles, snapshot.ReusedFileCount, "%d-file tier reuses every unchanged parser artifact", changedFiles)
 		require.Equal(t, int64(changedFiles), f.parseCount.Load()-parseCallsBefore, "%d-file tier parser HTTP calls", changedFiles)
 		require.Positive(t, snapshot.EmbeddedChunkCount, "%d-file tier dispatches embedding work", changedFiles)
-		require.Positive(t, snapshot.ReusedVectorCount, "%d-file tier reuses unchanged embeddings", changedFiles)
+		currentStableMember := sourceMember(t, current, "src/Service.java")
+		require.Equal(t, stableMember.SourceFileID, currentStableMember.SourceFileID, "%d-file tier retains stable source-file identity", changedFiles)
+		require.Equal(t, stableMember.BlobSHA, currentStableMember.BlobSHA, "%d-file tier keeps stable source content", changedFiles)
+		require.Equal(t, stableFileVectorCount, stableFileEmbeddingInputs.Load(), "%d-file tier never sends the stable path to the embedding service again", changedFiles)
+		require.GreaterOrEqual(t, snapshot.ReusedVectorCount, int(stableFileVectorCount),
+			"%d-file tier's vector reuse count includes the stable file's baseline embedding inputs", changedFiles)
 		require.Greater(t, f.embedCount.Load(), embeddingCallsBefore, "%d-file tier reaches the local embedding boundary", changedFiles)
 		require.NotNil(t, current.Telemetry)
 		require.Equal(t, targetSHA, current.Telemetry.PublishedCommitSHA, "%d-file tier telemetry pins the published commit", changedFiles)
