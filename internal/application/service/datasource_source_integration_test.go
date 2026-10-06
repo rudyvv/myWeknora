@@ -4,6 +4,7 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -1806,8 +1807,9 @@ func TestApprovedSupplementTSPythonFixturesStayOnTheirAuthorizedPublishedSnapsho
 
 	files := map[string][]byte{tsPath: tsBytes, pythonPath: pythonBytes}
 	f := newApprovedSupplementSourceFixture(t, files)
-	// Embeddings stay at the existing local fixture boundary; no provider model is called.
+	// Ingestion and query embeddings use the existing local HTTP stub, never an external provider.
 	f.embeddingForText = func(string) []float32 { return []float32{1, 0, 0} }
+	f.captureParsePaths.Store(true)
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
 	require.NoError(t, err)
 	require.True(t, preview.CanSync, "the selected approved TypeScript and Python fixtures must be admitted by parser health")
@@ -1819,7 +1821,15 @@ func TestApprovedSupplementTSPythonFixturesStayOnTheirAuthorizedPublishedSnapsho
 	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
 	require.Equal(t, types.SyncLogStatusSuccess, finished.Status)
-	require.EqualValues(t, 2, f.parseCount.Load(), "both original approved files must pass through parser HTTP")
+	parserPaths := f.capturedParserPaths()
+	seenParserPaths := make(map[string]bool, len(files))
+	for _, parserPath := range parserPaths {
+		require.Contains(t, files, parserPath, "the parser HTTP body must identify one of the exact approved inputs")
+		seenParserPaths[parserPath] = true
+	}
+	for approvedPath := range files {
+		require.True(t, seenParserPaths[approvedPath], "the approved input must reach parser HTTP: %s", approvedPath)
+	}
 	parseResult, err := finished.ParseResult()
 	require.NoError(t, err)
 	require.NotNil(t, parseResult.Source.Snapshot)
@@ -1918,6 +1928,35 @@ func TestApprovedSupplementTSPythonFixturesStayOnTheirAuthorizedPublishedSnapsho
 		require.Contains(t, toolResult.Output, tc.symbol)
 	}
 
+	vectorQuery := "approved fixture vector route proof"
+	embedCountBeforeVectorQuery := f.embedCount.Load()
+	vectorResults, err := f.kbs.HybridSearch(pinned, f.kb.ID, types.SearchParams{
+		QueryText: vectorQuery, MatchCount: 100, SourceIDs: []string{f.ds.ID},
+		DisableKeywordsMatch: true, SkipContextEnrichment: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, embedCountBeforeVectorQuery+1, f.embedCount.Load(), "vector-only retrieval should resolve the query through the local fake embedding provider")
+	vectorEvidenceByPath := make(map[string]types.SourceEvidence, len(cases))
+	for _, candidate := range vectorResults {
+		path, ok := candidate.Metadata["source_path"]
+		if !ok || path != tsPath && path != pythonPath {
+			continue
+		}
+		var envelope struct {
+			Source types.SourceEvidence `json:"source"`
+		}
+		require.NoError(t, json.Unmarshal(candidate.ChunkMetadata, &envelope))
+		vectorEvidenceByPath[path] = envelope.Source
+	}
+	require.Len(t, vectorEvidenceByPath, len(cases), "the vector index must route to both approved source files")
+	for _, tc := range cases {
+		vectorEvidence := vectorEvidenceByPath[tc.path]
+		require.Equal(t, tc.path, vectorEvidence.Path)
+		require.Equal(t, parseResult.Source.Snapshot.ID, vectorEvidence.SnapshotID)
+		require.Equal(t, f.sha, vectorEvidence.CommitSHA)
+		require.Equal(t, evidenceByPath[tc.path].FileVersionID, vectorEvidence.FileVersionID)
+	}
+
 	tsHit := hitsByPath[tsPath]
 	pythonHit := hitsByPath[pythonPath]
 	tsOnlyTargets := types.SearchTargets{
@@ -1929,6 +1968,21 @@ func TestApprovedSupplementTSPythonFixturesStayOnTheirAuthorizedPublishedSnapsho
 	defer releaseTSOnly()
 	_, err = f.knowledge.GetSourceFile(tsOnly, pythonHit.KnowledgeID, evidenceByPath[pythonPath].FileVersionID)
 	require.Error(t, err, "a question scoped to the TS file must not read the separately approved Python file")
+	tsOnlyVectorResults, err := f.kbs.HybridSearch(tsOnly, f.kb.ID, types.SearchParams{
+		QueryText: vectorQuery, MatchCount: 100, SourceIDs: []string{f.ds.ID}, KnowledgeIDs: []string{tsHit.KnowledgeID},
+		DisableKeywordsMatch: true, SkipContextEnrichment: true,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, tsOnlyVectorResults)
+	for _, candidate := range tsOnlyVectorResults {
+		require.Equal(t, tsPath, candidate.Metadata["source_path"], "TS-only authorization scope must exclude the Python file from vector retrieval")
+		var envelope struct {
+			Source types.SourceEvidence `json:"source"`
+		}
+		require.NoError(t, json.Unmarshal(candidate.ChunkMetadata, &envelope))
+		require.Equal(t, evidenceByPath[tsPath].SnapshotID, envelope.Source.SnapshotID)
+		require.Equal(t, evidenceByPath[tsPath].FileVersionID, envelope.Source.FileVersionID)
+	}
 	pythonArgs, err := json.Marshal(map[string]any{"knowledge_id": pythonHit.KnowledgeID, "limit": 5, "offset": 0})
 	require.NoError(t, err)
 	deniedRead, err := agenttools.NewListKnowledgeChunksTool(f.knowledge, f.chunks, tsOnlyTargets).Execute(tsOnly, pythonArgs)
@@ -3033,6 +3087,9 @@ type javaSourceFixture struct {
 	embeddingForText        func(string) []float32
 	embedCount              atomic.Int64
 	parseCount              atomic.Int64
+	captureParsePaths       atomic.Bool
+	parsePathMu             sync.Mutex
+	parsePaths              []string
 	parseStarted            chan struct{}
 	parseRelease            chan struct{}
 	advanceFiles            func(map[string][]byte) string
@@ -3045,6 +3102,37 @@ type javaSourceFixture struct {
 	advanceJava             func(string) string
 	shares                  interfaces.KBShareService
 	agentShares             interfaces.AgentShareService
+}
+
+func (f *javaSourceFixture) captureParserRequestPath(r *http.Request) {
+	const maxParserRequestBodyBytes = 1 << 20
+	if r.Body == nil {
+		return
+	}
+	originalBody := r.Body
+	body, err := io.ReadAll(io.LimitReader(originalBody, maxParserRequestBodyBytes+1))
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{Reader: io.MultiReader(bytes.NewReader(body), originalBody), Closer: originalBody}
+	if err != nil || len(body) > maxParserRequestBodyBytes {
+		return
+	}
+	var request struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(body, &request) != nil || request.Path == "" {
+		return
+	}
+	f.parsePathMu.Lock()
+	f.parsePaths = append(f.parsePaths, request.Path)
+	f.parsePathMu.Unlock()
+}
+
+func (f *javaSourceFixture) capturedParserPaths() []string {
+	f.parsePathMu.Lock()
+	defer f.parsePathMu.Unlock()
+	return append([]string(nil), f.parsePaths...)
 }
 
 // A local alias keeps the fixture's public boundary explicit.
@@ -3198,6 +3286,9 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 	parserProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/parse" {
 			f.parseCount.Add(1)
+			if f.captureParsePaths.Load() {
+				f.captureParserRequestPath(r)
+			}
 			if f.parseStarted != nil {
 				select {
 				case f.parseStarted <- struct{}{}:
