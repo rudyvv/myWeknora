@@ -185,7 +185,7 @@ func ParseFileWithProfile(ctx context.Context, endpoint, path string, raw []byte
 					return nil, fmt.Errorf("source parser returned invalid context coordinates")
 				}
 			}
-			trimmed, headerTokens, e := fitSourceIndexHeader(codec, path, chunk, profile.MaxTokens)
+			trimmed, headerTokens, e := fitSourceIndexText(codec, path, chunk, profile.MaxTokens)
 			if e != nil {
 				return nil, fmt.Errorf("source tokenization failed")
 			}
@@ -243,12 +243,15 @@ func sourceIndexHeaderTokenCount(codec tokenizer.Codec, path string, chunk types
 	return len(headerIDs), nil
 }
 
-func fitSourceIndexHeader(codec tokenizer.Codec, path string, chunk *types.ParsedSourceChunk, limit int) (bool, int, error) {
+func fitSourceIndexText(codec tokenizer.Codec, path string, chunk *types.ParsedSourceChunk, limit int) (bool, int, error) {
 	trimmed := false
 	for {
-		headerTokens, err := sourceIndexHeaderTokenCount(codec, path, *chunk)
-		if err != nil || headerTokens <= limit {
+		headerTokens, _, fullTokens, err := sourceIndexTokenCounts(codec, path, *chunk)
+		if err != nil {
 			return trimmed, headerTokens, err
+		}
+		if headerTokens <= limit && fullTokens <= limit {
+			return trimmed, headerTokens, nil
 		}
 		if len(chunk.Context) > 0 {
 			chunk.Context = chunk.Context[1:]

@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -238,6 +239,146 @@ func TestParseFileWithProfileDropsOversizedTraceContextBeforeReslicingBody(t *te
 		require.LessOrEqual(t, body, profile.MaxTokens)
 		require.LessOrEqual(t, full, profile.MaxTokens)
 	}
+}
+
+func TestParseFileWithProfileFitsCompleteDerivedTextWithoutChangingSourceEvidence(t *testing.T) {
+	raw := []byte(strings.Repeat("x ", 512))
+	digest := sha256.Sum256(raw)
+	const path = "src/Mapper.java"
+	const tokenLimit = 495
+	contextRange := types.SourceRange{StartByte: 0, EndByte: 960, StartLine: 1, EndLine: 1}
+	traceContext := types.SourceContext{Text: string(raw[contextRange.StartByte:contextRange.EndByte]), Range: contextRange}
+	chunkSymbols := []string{"Mapper.query"}
+	firstChunk := types.ParsedSourceChunk{
+		Content: string(raw[:64]),
+		Range:   types.SourceRange{StartByte: 0, EndByte: 64, StartLine: 1, EndLine: 1},
+		Quality: "structural", Symbols: chunkSymbols, Context: []types.SourceContext{traceContext},
+	}
+	codec, err := tokenizer.Get(tokenizer.Cl100kBase)
+	require.NoError(t, err)
+	headerTokens, bodyTokens, fullTokens, err := sourceIndexTokenCounts(codec, path, firstChunk)
+	require.NoError(t, err)
+	require.LessOrEqual(t, headerTokens, tokenLimit, "the fixture must have a context header within budget")
+	require.LessOrEqual(t, bodyTokens, tokenLimit, "the 64-byte body alone must fit")
+	require.Greater(t, fullTokens, tokenLimit, "the joined header plus 64-byte body must exceed budget")
+
+	symbolRange := types.SourceRange{StartByte: 0, EndByte: 2, StartLine: 1, EndLine: 1}
+	signatureRange := types.SourceRange{StartByte: 0, EndByte: 1, StartLine: 1, EndLine: 1}
+	originalSymbols := []types.SourceSymbol{{
+		Kind: "method", Name: "query", QualifiedName: "Mapper.query", Signature: string(raw[:1]),
+		Range: symbolRange, SignatureRange: signatureRange,
+	}}
+	factRange := types.SourceRange{StartByte: 0, EndByte: 2, StartLine: 1, EndLine: 1}
+	originalFacts := []types.ParsedSourceFact{{
+		Kind: "java_method", Name: "Mapper.query", Quality: "structural", Range: factRange, Text: string(raw[:2]),
+	}}
+	var budgets, roundCoverage []int
+	var invalidRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Path          string `json:"path"`
+			SHA256        string `json:"sha256"`
+			ContentBase64 string `json:"content_base64"`
+			ChunkMaxBytes int    `json:"chunk_max_bytes"`
+		}
+		if json.NewDecoder(r.Body).Decode(&request) != nil {
+			invalidRequest = true
+			http.Error(w, "invalid parser request", http.StatusBadRequest)
+			return
+		}
+		requestBytes, decodeErr := base64.StdEncoding.DecodeString(request.ContentBase64)
+		if decodeErr != nil || string(requestBytes) != string(raw) || request.Path != path || request.SHA256 != hex.EncodeToString(digest[:]) || request.ChunkMaxBytes <= 0 {
+			invalidRequest = true
+			http.Error(w, "unexpected parser request", http.StatusBadRequest)
+			return
+		}
+		budgets = append(budgets, request.ChunkMaxBytes)
+		parsed := types.ParsedSourceFile{
+			ParserVersion: "fixture-parser-v1", SHA256: hex.EncodeToString(digest[:]), ByteLength: len(raw),
+			Encoding: "utf-8", Quality: "structural", Symbols: originalSymbols, Facts: originalFacts,
+		}
+		for start := 0; start < len(requestBytes); {
+			end := min(start+request.ChunkMaxBytes, len(requestBytes))
+			span := types.SourceRange{StartByte: start, EndByte: end, StartLine: 1, EndLine: 1}
+			parsed.Chunks = append(parsed.Chunks, types.ParsedSourceChunk{
+				Content: string(requestBytes[start:end]), Range: span, Quality: "structural",
+				Symbols: chunkSymbols, Context: []types.SourceContext{traceContext},
+			})
+			start = end
+		}
+		covered := 0
+		for _, chunk := range parsed.Chunks {
+			if chunk.Range.StartByte != covered || chunk.Range.EndByte <= covered {
+				invalidRequest = true
+				break
+			}
+			covered = chunk.Range.EndByte
+		}
+		roundCoverage = append(roundCoverage, covered)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(parsed)
+	}))
+	defer server.Close()
+
+	got, err := ParseFileWithProfile(context.Background(), server.URL, path, raw, IndexProfile{Tokenizer: tokenizer.Cl100kBase, MaxTokens: tokenLimit})
+	require.NoError(t, err, "parser byte-budget rounds: %v", budgets)
+	require.False(t, invalidRequest)
+	require.Greater(t, len(budgets), 1, "oversized bodies should exercise multiple parser byte-budget rounds")
+	require.Equal(t, 4096, budgets[0])
+	for _, covered := range roundCoverage {
+		require.Equal(t, len(raw), covered, "each parser round must cover the complete source")
+	}
+	require.Equal(t, string(raw), strings.Join(chunkContents(got.Chunks), ""), "the original file must not be truncated or rewritten")
+	require.Equal(t, originalSymbols, got.Symbols, "parser-authored global symbols must remain intact")
+	require.Equal(t, originalFacts, got.Facts, "parser-authored facts must remain intact")
+	require.Contains(t, got.Diagnostics, types.ParsedSourceDiagnostic{
+		Code: "source_index_header_trimmed", Message: "Trace context or nonessential symbols were omitted from derived embedding text to fit the model input limit",
+		Range: got.Chunks[0].Range,
+	})
+	cursor := 0
+	for _, chunk := range got.Chunks {
+		require.Equal(t, cursor, chunk.Range.StartByte)
+		require.Greater(t, chunk.Range.EndByte, cursor)
+		require.Equal(t, string(raw[chunk.Range.StartByte:chunk.Range.EndByte]), chunk.Content)
+		require.Equal(t, 1, chunk.Range.StartLine)
+		require.Equal(t, 1, chunk.Range.EndLine)
+		require.Empty(t, chunk.Context, "nonessential trace context should be removed before symbols")
+		require.Equal(t, chunkSymbols, chunk.Symbols, "symbols should remain when removing context is sufficient")
+		_, body, full, countErr := sourceIndexTokenCounts(codec, path, chunk)
+		require.NoError(t, countErr)
+		require.LessOrEqual(t, body, tokenLimit)
+		require.LessOrEqual(t, full, tokenLimit)
+		cursor = chunk.Range.EndByte
+	}
+	require.Equal(t, len(raw), cursor, "the final chunk coordinates must reach EOF")
+}
+
+func TestParseFileWithProfileRejectsRequiredPathHeaderOverBudget(t *testing.T) {
+	const tokenLimit = 64
+	path := "src/" + strings.Repeat("verylongsegment/", 1000) + "Mapper.java"
+	raw := []byte("x")
+	digest := sha256.Sum256(raw)
+	codec, err := tokenizer.Get(tokenizer.Cl100kBase)
+	require.NoError(t, err)
+	headerTokens, err := sourceIndexHeaderTokenCount(codec, path, types.ParsedSourceChunk{})
+	require.NoError(t, err)
+	require.Greater(t, headerTokens, tokenLimit, "the required path alone must exceed the profile budget")
+
+	parsed := types.ParsedSourceFile{
+		ParserVersion: "fixture-parser-v1", SHA256: hex.EncodeToString(digest[:]), ByteLength: len(raw),
+		Encoding: "utf-8", Quality: "structural",
+		Chunks: []types.ParsedSourceChunk{{
+			Content: string(raw), Range: types.SourceRange{StartByte: 0, EndByte: len(raw), StartLine: 1, EndLine: 1}, Quality: "structural",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(parsed)
+	}))
+	defer server.Close()
+
+	_, err = ParseFileWithProfile(context.Background(), server.URL, path, raw, IndexProfile{Tokenizer: tokenizer.Cl100kBase, MaxTokens: tokenLimit})
+	require.ErrorContains(t, err, "source index header exceeds the embedding model token budget after removing trace context")
 }
 
 func chunkContents(chunks []types.ParsedSourceChunk) []string {
