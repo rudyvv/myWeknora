@@ -1275,7 +1275,7 @@ func TestSourceWikiQAStillRequiresEverySectionIndex(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "failed", attempt.Status)
-	require.Contains(t, attempt.Reason, "QA did not verify each section")
+	require.Contains(t, attempt.Reason, "independent QA rejected draft:")
 	require.Equal(t, 2, attempt.Repairs)
 	_, err = wiki.GetPageBySlug(f.ctx, f.kb.ID, attempt.Slug)
 	require.Error(t, err, "QA that omits a section must not publish a WikiPage")
