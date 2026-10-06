@@ -599,6 +599,159 @@ func TestSourceAcceptanceRunnerRequiresDistinctSourcesForCrossRepositoryQuestion
 	}
 }
 
+func TestSourceAcceptanceRunnerFailsClosedForUnmappedRepositoryByDefault(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	manifest := goldShapedQuestionManifest(false)
+	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, nil)
+	if result.ExitCode == 0 || !strings.Contains(report, "source_mapping_missing") || fixture.searchCalls != 0 || fixture.requestCalls != 0 {
+		t.Fatalf("runner did not fail closed before HTTP search when the repository map is missing: exit=%d requests=%d searches=%d report=%s", result.ExitCode, fixture.requestCalls, fixture.searchCalls, report)
+	}
+	result, report = runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, nil, "-ReportUnmappedAsUnknown")
+	if result.ExitCode == 0 || !strings.Contains(report, "unmapped_unknown_mode_invalid") || fixture.searchCalls != 0 || fixture.requestCalls != 0 {
+		t.Fatalf("opt-in mode accepted a missing repository map or made HTTP requests: exit=%d requests=%d searches=%d report=%s", result.ExitCode, fixture.requestCalls, fixture.searchCalls, report)
+	}
+}
+
+func TestSourceAcceptanceRunnerReportsUnmappedQuestionsAsUnknownWhenOptedIn(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	manifest := goldShapedQuestionManifest(false)
+	questions := manifest["questions"].([]any)
+	for _, index := range []int{0, 1} {
+		questions[index].(map[string]any)["repository"] = "nsb"
+	}
+	sourceMap := map[string]any{
+		"schema_version": 1, "status": "approved", "knowledge_base_id": "kb-1",
+		"mappings": map[string]any{
+			"evip_mobile": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+		},
+	}
+	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap, "-ReportUnmappedAsUnknown")
+	if result.ExitCode == 0 || !strings.Contains(report, "unmapped_repository_questions") || fixture.searchCalls != 28 || fixture.sourceReadCalls != 280 {
+		t.Fatalf("runner did not search only the 28 mapped questions and read only their top-10 hits: exit=%d searches=%d source_reads=%d report=%s", result.ExitCode, fixture.searchCalls, fixture.sourceReadCalls, report)
+	}
+	var document struct {
+		Status    string `json:"status"`
+		Threshold struct {
+			TotalQuestions int  `json:"total_questions"`
+			MatchedCount   int  `json:"matched_count"`
+			UnknownCount   int  `json:"unknown_count"`
+			ThresholdMet   bool `json:"threshold_met"`
+		} `json:"evidence_threshold"`
+		Results []struct {
+			QuestionID string `json:"question_id"`
+			Category   string `json:"category"`
+			QuerySHA   string `json:"query_sha256"`
+			Status     string `json:"status"`
+			Reason     string `json:"reason"`
+			Expected   []struct {
+				SourceID   string `json:"source_id"`
+				SnapshotID string `json:"snapshot_id"`
+			} `json:"expected_evidence"`
+		} `json:"question_results"`
+	}
+	if err := json.Unmarshal([]byte(report), &document); err != nil {
+		t.Fatalf("could not decode runner report: %v", err)
+	}
+	if document.Status == "completed" || document.Threshold.TotalQuestions != 30 || document.Threshold.MatchedCount != 28 || document.Threshold.UnknownCount != 2 || !document.Threshold.ThresholdMet || len(document.Results) != 30 {
+		t.Fatalf("unknown questions were counted as matched or allowed the full acceptance to complete: %+v", document)
+	}
+	for _, index := range []int{0, 1} {
+		got := document.Results[index]
+		question := questions[index].(map[string]any)
+		query := question["question"].(string)
+		digest := sha256.Sum256([]byte(query))
+		if got.QuestionID != question["id"] || got.Category != question["category"] || got.QuerySHA != hex.EncodeToString(digest[:]) || got.Status != "unknown" || got.Reason != "unmapped_repository" || len(got.Expected) != 1 || got.Expected[0].SourceID != "" || got.Expected[0].SnapshotID != "" {
+			t.Fatalf("unknown question lost its identity or acquired a synthetic source/snapshot: %+v", got)
+		}
+	}
+	for _, got := range document.Results[2:] {
+		if got.Status != "matched" {
+			t.Fatalf("mapped question %s did not retain normal exact-evidence scoring: status=%s", got.QuestionID, got.Status)
+		}
+	}
+}
+
+func TestSourceAcceptanceRunnerMarksWholeCrossRepositoryQuestionUnknown(t *testing.T) {
+	fixture := &acceptanceFixture{}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	manifest := goldShapedQuestionManifest(true)
+	sourceMap := map[string]any{
+		"schema_version": 1, "status": "approved", "knowledge_base_id": "kb-1",
+		"mappings": map[string]any{
+			"evip_mobile": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+		},
+	}
+	result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap, "-ReportUnmappedAsUnknown")
+	if result.ExitCode == 0 || !strings.Contains(report, "unmapped_repository_questions") || fixture.searchCalls != 29 || fixture.sourceReadCalls != 290 {
+		t.Fatalf("cross-repository question was not skipped as a whole: exit=%d searches=%d source_reads=%d report=%s", result.ExitCode, fixture.searchCalls, fixture.sourceReadCalls, report)
+	}
+	var document struct {
+		Results []struct {
+			QuestionID string `json:"question_id"`
+			Status     string `json:"status"`
+			Reason     string `json:"reason"`
+		} `json:"question_results"`
+	}
+	if err := json.Unmarshal([]byte(report), &document); err != nil {
+		t.Fatalf("could not decode runner report: %v", err)
+	}
+	if len(document.Results) != 30 || document.Results[10].QuestionID != "BC-01" || document.Results[10].Status != "unknown" || document.Results[10].Reason != "unmapped_repository" {
+		t.Fatalf("cross-repository question was not recorded as one unknown result: %+v", document.Results)
+	}
+}
+
+func TestSourceAcceptanceRunnerDoesNotTreatMalformedOrOutOfKBInputsAsUnknown(t *testing.T) {
+	t.Run("malformed evidence", func(t *testing.T) {
+		fixture := &acceptanceFixture{}
+		server := httptest.NewServer(fixture)
+		defer server.Close()
+		manifest := goldShapedQuestionManifest(false)
+		first := manifest["questions"].([]any)[0].(map[string]any)
+		first["evidence"].([]any)[0].(map[string]any)["path"] = "../outside/Foo.java"
+		sourceMap := map[string]any{"schema_version": 1, "status": "approved", "knowledge_base_id": "kb-1", "mappings": map[string]any{
+			"evip_mobile": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+		}}
+		result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap, "-ReportUnmappedAsUnknown")
+		if result.ExitCode == 0 || !strings.Contains(report, "question_evidence_invalid") || fixture.requestCalls != 0 {
+			t.Fatalf("malformed evidence was downgraded to unknown or reached HTTP: exit=%d requests=%d report=%s", result.ExitCode, fixture.requestCalls, report)
+		}
+	})
+	t.Run("mapping outside selected knowledge base", func(t *testing.T) {
+		fixture := &acceptanceFixture{}
+		server := httptest.NewServer(fixture)
+		defer server.Close()
+		manifest := goldShapedQuestionManifest(false)
+		sourceMap := map[string]any{"schema_version": 1, "status": "approved", "knowledge_base_id": "kb-2", "mappings": map[string]any{
+			"evip_mobile": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+		}}
+		result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap, "-ReportUnmappedAsUnknown")
+		if result.ExitCode == 0 || !strings.Contains(report, "source_mapping_invalid") || fixture.requestCalls != 0 {
+			t.Fatalf("out-of-knowledge-base mapping was downgraded to unknown or reached HTTP: exit=%d requests=%d report=%s", result.ExitCode, fixture.requestCalls, report)
+		}
+	})
+	t.Run("unmapped source override", func(t *testing.T) {
+		fixture := &acceptanceFixture{}
+		server := httptest.NewServer(fixture)
+		defer server.Close()
+		manifest := goldShapedQuestionManifest(false)
+		first := manifest["questions"].([]any)[0].(map[string]any)
+		first["repository"] = "nsb"
+		first["evidence"].([]any)[0].(map[string]any)["source_id"] = "source-2"
+		sourceMap := map[string]any{"schema_version": 1, "status": "approved", "knowledge_base_id": "kb-1", "mappings": map[string]any{
+			"evip_mobile": map[string]any{"source_id": "source-1", "snapshot_id": "snapshot-1", "commit_sha": "commit-1"},
+		}}
+		result, report := runSourceAcceptanceWithQuestions(t, server.URL, acceptanceTestToken, manifest, sourceMap, "-ReportUnmappedAsUnknown")
+		if result.ExitCode == 0 || !strings.Contains(report, "source_mapping_scope_mismatch") || fixture.requestCalls != 0 {
+			t.Fatalf("explicit source override was downgraded to unknown or reached HTTP: exit=%d requests=%d report=%s", result.ExitCode, fixture.requestCalls, report)
+		}
+	})
+}
+
 func TestSourceAcceptanceRunnerKeepsWholeT22StatusUnknown(t *testing.T) {
 	fixture := &acceptanceFixture{}
 	server := httptest.NewServer(fixture)

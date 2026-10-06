@@ -26,6 +26,7 @@ param(
     [ValidateRange(1, 60)] [int] $PollIntervalSeconds = 2,
     [ValidateRange(1, 360)] [int] $RunTimeoutMinutes = 120,
     [switch] $AllowDraftQuestions,
+    [switch] $ReportUnmappedAsUnknown,
     [switch] $Publish
 )
 
@@ -771,6 +772,39 @@ function Invoke-QuestionSearch($Question) {
     }
 }
 
+function New-UnmappedRepositoryQuestionResult($Question) {
+    $questionId = [string](Get-Field $Question 'question_id')
+    $category = [string](Get-Field $Question 'category')
+    $query = [string](Get-Field $Question 'query')
+    $expectedItems = @(Get-Field $Question 'expected_evidence')
+    $queryDigest = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($query))).ToLowerInvariant()
+    $expectedReport = @($expectedItems | ForEach-Object { [ordered]@{
+        evidence_id = Get-Field $_ 'evidence_id'
+        repository = Get-Field $_ 'repository'
+        source_id = Get-Field $_ 'source_id'
+        snapshot_id = Get-Field $_ 'snapshot_id'
+        commit_sha = Get-Field $_ 'commit_sha'
+        path = Get-Field $_ 'path'
+        start_line = Get-Field $_ 'start_line'
+        end_line = Get-Field $_ 'end_line'
+        sha256 = Get-Field $_ 'sha256'
+        hash_mode = Get-Field $_ 'hash_mode'
+        matched = $false
+    } })
+    return [ordered]@{
+        question_id = $questionId
+        category = $category
+        query_sha256 = $queryDigest
+        repository_ids = @($expectedItems | ForEach-Object { Get-Field $_ 'repository' } | Select-Object -Unique)
+        source_snapshot_scope = @()
+        expected_evidence = $expectedReport
+        retrieved_top10 = @()
+        matched_expected_evidence_ids = @()
+        status = 'unknown'
+        reason = 'unmapped_repository'
+    }
+}
+
 function Invoke-AgentUiSmoke {
     if ([string]::IsNullOrWhiteSpace($AgentSessionId) -and [string]::IsNullOrWhiteSpace($AgentId) -and [string]::IsNullOrWhiteSpace($AgentQuestion)) { return }
     if ([string]::IsNullOrWhiteSpace($AgentSessionId) -or [string]::IsNullOrWhiteSpace($AgentId) -or [string]::IsNullOrWhiteSpace($AgentQuestion)) {
@@ -913,6 +947,9 @@ try {
         Stop-Acceptance 'questions_not_approved' 'The question manifest is still a draft; supply its human approval marker before acceptance scoring.'
     }
     if ($Publish -and -not $allowedManifestStatus) { Stop-Acceptance 'questions_not_approved' 'Publishing cannot be requested for an unapproved question manifest.' }
+    if ($ReportUnmappedAsUnknown -and (-not $allowedManifestStatus -or -not $RepositorySourceMap -or $AllowDraftQuestions -or $Publish)) {
+        Stop-Acceptance 'unmapped_unknown_mode_invalid' 'Reporting unmapped repositories as unknown requires an approved question manifest, an approved repository map, and read-only mode.'
+    }
     $script:report.question_manifest.scoring_allowed = $allowedManifestStatus
 
     $script:repositoryMappings = @{}
@@ -981,6 +1018,7 @@ try {
         if ($evidenceItems.Count -eq 0 -or $evidenceItems.Count -gt 20) { Stop-Acceptance 'question_evidence_invalid' "Question '$id' must name 1 to 20 expected evidence spans." }
         $normalizedEvidence = [System.Collections.Generic.List[object]]::new()
         $evidenceOrdinal = 0
+        $questionHasUnmappedRepository = $false
         foreach ($evidence in $evidenceItems) {
             $evidenceOrdinal++
             $pathValue = Get-Field $evidence 'path'
@@ -994,11 +1032,28 @@ try {
                 Stop-Acceptance 'question_evidence_invalid' "Question '$id' evidence must identify a relative path, valid one-based line range, and SHA-256."
             }
             $mapping = if ($repositoryId) { Get-RepositoryMapping $repositoryId } else { $null }
-            if ($repositoryId -and -not $mapping) { Stop-Acceptance 'source_mapping_missing' "Question '$id' references a repository without an approved source mapping." }
+            $unmappedRepository = $false
+            if ($ReportUnmappedAsUnknown -and -not $repositoryId) {
+                Stop-Acceptance 'question_repository_invalid' "Question '$id' evidence must identify a repository in the approved question bank."
+            }
+            if ($repositoryId -and -not $mapping) {
+                if (-not $ReportUnmappedAsUnknown) {
+                    Stop-Acceptance 'source_mapping_missing' "Question '$id' references a repository without an approved source mapping."
+                }
+                if (-not $repositoryCommits.ContainsKey($repositoryId)) {
+                    Stop-Acceptance 'question_repository_invalid' "Question '$id' references a repository outside the pinned question-bank inventory."
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string](Get-Field $evidence 'source_id')) -or
+                    -not [string]::IsNullOrWhiteSpace([string](Get-Field $evidence 'snapshot_id'))) {
+                    Stop-Acceptance 'source_mapping_scope_mismatch' "Question '$id' supplies a source or snapshot override for an unmapped repository."
+                }
+                $unmappedRepository = $true
+                $questionHasUnmappedRepository = $true
+            }
             $sourceId = [string](Get-Field $evidence 'source_id')
             if (-not $sourceId -and $mapping) { $sourceId = [string](Get-Field $mapping 'source_id') }
-            if (-not $sourceId) { $sourceId = $DataSourceId }
-            if (-not $sourceId) { Stop-Acceptance 'source_mapping_missing' "Question '$id' evidence repository has no explicit source mapping." }
+            if (-not $sourceId -and -not $unmappedRepository) { $sourceId = $DataSourceId }
+            if (-not $sourceId -and -not $unmappedRepository) { Stop-Acceptance 'source_mapping_missing' "Question '$id' evidence repository has no explicit source mapping." }
             if ($mapping -and (Get-Field $mapping 'knowledge_base_id') -and (Get-Field $mapping 'knowledge_base_id') -ne $KnowledgeBaseId) { Stop-Acceptance 'source_mapping_scope_mismatch' "Question '$id' repository mapping is outside the selected knowledge base." }
             if ($mapping -and (Get-Field $mapping 'source_id') -ne $sourceId) { Stop-Acceptance 'source_mapping_scope_mismatch' "Question '$id' evidence source differs from its approved repository mapping." }
             $snapshotId = [string](Get-Field $evidence 'snapshot_id')
@@ -1006,6 +1061,9 @@ try {
             if (-not $snapshotId -and $mapping) {
                 $snapshotId = [string](Get-Field $mapping 'snapshot_id')
                 $snapshotIdExplicit = -not [string]::IsNullOrWhiteSpace($snapshotId)
+            }
+            if ($ReportUnmappedAsUnknown -and $mapping -and $snapshotIdExplicit -and $snapshotId -cne [string](Get-Field $mapping 'snapshot_id')) {
+                Stop-Acceptance 'source_mapping_scope_mismatch' "Question '$id' evidence snapshot differs from its approved repository mapping."
             }
             $commit = [string](Get-Field $evidence 'commit_sha')
             if (-not $commit -and $repositoryId -and $repositoryCommits.ContainsKey($repositoryId)) { $commit = [string]$repositoryCommits[$repositoryId] }
@@ -1023,11 +1081,13 @@ try {
             if ($HashMode -and $HashMode -cne $evidenceHashMode) { Stop-Acceptance 'question_hash_mode_mismatch' "Question '$id' evidence hash mode differs from the command-line hash-mode assertion." }
             if ($mapping -and $commit -cne [string](Get-Field $mapping 'commit_sha')) { Stop-Acceptance 'source_mapping_commit_mismatch' "Question '$id' evidence commit differs from its approved repository mapping." }
             if ($repositoryId -and $repositoryCommits.ContainsKey($repositoryId) -and $commit -cne [string]$repositoryCommits[$repositoryId]) { Stop-Acceptance 'question_commit_mismatch' "Question '$id' evidence commit differs from the question bank's pinned repository commit." }
+            if ($unmappedRepository -and -not $commit) { Stop-Acceptance 'question_commit_missing' "Question '$id' unmapped repository evidence has no pinned question-bank commit." }
             $evidenceId = '{0}-{1:D2}' -f $id, $evidenceOrdinal
             $normalizedEvidence.Add([ordered]@{ evidence_id = $evidenceId; repository = $repositoryId; source_id = $sourceId; snapshot_id = $snapshotId; snapshot_id_explicit = $snapshotIdExplicit; commit_sha = $commit; path = $path; start_line = [int]$start; end_line = [int]$end; sha256 = $sha.ToLowerInvariant(); hash_mode = $evidenceHashMode; symbol = Get-Field $evidence 'symbol' })
         }
-        $questionRepositories = @($normalizedEvidence | ForEach-Object { [string](Get-Field $_ 'repository') } | Select-Object -Unique)
-        $questionSources = @($normalizedEvidence | ForEach-Object { [string](Get-Field $_ 'source_id') } | Select-Object -Unique)
+        $mappedEvidence = @($normalizedEvidence | Where-Object { -not [string]::IsNullOrWhiteSpace([string](Get-Field $_ 'source_id')) })
+        $questionRepositories = @($mappedEvidence | ForEach-Object { [string](Get-Field $_ 'repository') } | Select-Object -Unique)
+        $questionSources = @($mappedEvidence | ForEach-Object { [string](Get-Field $_ 'source_id') } | Select-Object -Unique)
         if ($questionRepositories.Count -gt 1 -or $questionSources.Count -gt 1) {
             if ($questionRepositories -contains '' -or $questionSources.Count -ne $questionRepositories.Count) {
                 Stop-Acceptance 'question_cross_repository_mapping_invalid' 'Cross-repository evidence must resolve through explicit mappings to distinct source identities.'
@@ -1035,7 +1095,7 @@ try {
         }
         $questionIds[$id] = $true
         $categoryCounts[$category]++
-        $questions.Add([ordered]@{ question_id = $id; category = $category; query = $query; expected_evidence = @($normalizedEvidence.ToArray()) })
+        $questions.Add([ordered]@{ question_id = $id; category = $category; query = $query; expected_evidence = @($normalizedEvidence.ToArray()); unmapped_repository = $questionHasUnmappedRepository })
     }
     $datasetHashMode = [string](Get-Field $manifest 'hash_mode')
     if ((@(Get-Field $manifest 'repositories')).Count -gt 0 -and $datasetHashMode -notin @('sha256_utf8_lf', 'sha256_raw_utf8')) {
@@ -1236,12 +1296,18 @@ try {
     if ($Publish) { $script:report.publish.sync_log_id = Get-Field $publishedRuns[0].log 'id'; $script:report.publish.status = 'success' }
 
     foreach ($question in $questions) {
-        $result = Invoke-QuestionSearch $question
+        if ((Get-Field $question 'unmapped_repository') -eq $true) {
+            $result = New-UnmappedRepositoryQuestionResult $question
+        } else {
+            $result = Invoke-QuestionSearch $question
+        }
         $script:report.question_results += $result
     }
     $matchedCount = @($script:report.question_results | Where-Object { $_.status -eq 'matched' }).Count
+    $unknownCount = @($script:report.question_results | Where-Object { $_.status -eq 'unknown' }).Count
+    $unmappedUnknownCount = @($script:report.question_results | Where-Object { $_.status -eq 'unknown' -and $_.reason -eq 'unmapped_repository' }).Count
     $script:report.evidence_threshold.matched_count = $matchedCount
-    $script:report.evidence_threshold.unknown_count = 30 - $matchedCount
+    $script:report.evidence_threshold.unknown_count = $unknownCount
     $script:report.evidence_threshold.threshold_met = $allowedManifestStatus -and $matchedCount -ge 27
 
     if ($allowedManifestStatus) { Invoke-AgentUiSmoke }
@@ -1252,11 +1318,19 @@ try {
         [Console]::Error.WriteLine('Source acceptance evidence was collected for a draft question set; it is not scored for release acceptance.')
         exit 3
     }
-    if (-not $script:report.evidence_threshold.threshold_met) {
+    if ($unmappedUnknownCount -gt 0 -or -not $script:report.evidence_threshold.threshold_met) {
         $script:report.status = 'failed'
-        $script:report.errors += [ordered]@{ code = 'top10_threshold_not_met'; message = 'Fewer than 27 of 30 questions had authorized, exact-path/line/hash evidence in the selected top 10.' }
+        if ($unmappedUnknownCount -gt 0) {
+            $script:report.errors += [ordered]@{ code = 'unmapped_repository_questions'; message = 'One or more questions contain unmapped repositories and remain unknown; the full acceptance cannot be completed.' }
+        } else {
+            $script:report.errors += [ordered]@{ code = 'top10_threshold_not_met'; message = 'Fewer than 27 of 30 questions had authorized, exact-path/line/hash evidence in the selected top 10.' }
+        }
         Write-Report
-        [Console]::Error.WriteLine('Source acceptance finished below the 27/30 top-10 evidence threshold; see the bounded report.')
+        if ($unmappedUnknownCount -gt 0) {
+            [Console]::Error.WriteLine('Source acceptance retained unknown unmapped-repository questions; the full acceptance was not completed.')
+        } else {
+            [Console]::Error.WriteLine('Source acceptance finished below the 27/30 top-10 evidence threshold; see the bounded report.')
+        }
         exit 2
     }
     $script:report.status = 'completed'
