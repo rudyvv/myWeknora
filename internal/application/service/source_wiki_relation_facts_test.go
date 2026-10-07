@@ -2,9 +2,11 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -86,6 +88,22 @@ func TestSourceWikiRelationFactResolutionHydratesVerifiedRefsAndFailsClosed(t *t
 	unchanged, err := sourceWikiResolveRelationFactRefs(nil, []types.SourceCodeRelation{ordinary})
 	if err != nil || !reflect.DeepEqual(unchanged, []types.SourceCodeRelation{ordinary}) {
 		t.Fatalf("non-route relations should retain their existing validation path: %#v, %v", unchanged, err)
+	}
+}
+
+func TestSourceWikiRelationResolutionCapacityIsDeferred(t *testing.T) {
+	capacityErr := &source.SourceRelationFactCapacityError{Budget: "cumulative refs", Requested: 1, Limit: 0}
+	deferred := sourceWikiRelationResolutionError(capacityErr)
+	if !errors.Is(deferred, repository.ErrSourceWikiDerivationDeferred) || errors.Is(deferred, repository.ErrSourceWikiDerivationUnavailable) {
+		t.Fatalf("capacity exhaustion must defer Wiki derivation: %v", deferred)
+	}
+	var got *source.SourceRelationFactCapacityError
+	if !errors.As(deferred, &got) || got != capacityErr {
+		t.Fatalf("deferred error should preserve the typed capacity cause: %#v", deferred)
+	}
+	unavailable := sourceWikiRelationResolutionError(errors.New("reference identity mismatch"))
+	if !errors.Is(unavailable, repository.ErrSourceWikiDerivationUnavailable) || errors.Is(unavailable, repository.ErrSourceWikiDerivationDeferred) {
+		t.Fatalf("invalid reference evidence must remain unavailable: %v", unavailable)
 	}
 }
 

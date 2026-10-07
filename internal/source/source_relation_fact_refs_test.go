@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -218,6 +219,45 @@ func TestResolveSourceRelationFactRefsReplaysLegacyRouteAgainstCompleteSnapshot(
 	resolution := NewSourceRelationFactRefResolver(snapshot).Resolve(relation)
 	if resolution.Status != SourceRelationFactRefsReplayed || len(resolution.Refs) != 3 {
 		t.Fatalf("legacy route did not recover its exact configuration refs: %#v", resolution)
+	}
+}
+
+func TestBoundedSourceRelationReplayDefersBeforeRefBudgetIsExceeded(t *testing.T) {
+	snapshot, relation := httpRouteFactSnapshot(t)
+	relation.Context = types.JSON(`[]`)
+	resolver := newSourceRelationFactRefResolverWithLimits(snapshot, 2, 1<<20)
+	resolution := resolver.Resolve(relation)
+	var capacityErr *SourceRelationFactCapacityError
+	if !errors.As(resolution.Err, &capacityErr) || capacityErr.Budget != "cumulative refs" || capacityErr.Used > capacityErr.Limit {
+		t.Fatalf("legacy replay must stop at the cumulative ref bound: %#v", resolution)
+	}
+	if len(resolution.Refs) != 0 {
+		t.Fatalf("an over-budget replay must not return a partial ref set: %#v", resolution.Refs)
+	}
+
+	resolver = newSourceRelationFactRefResolverWithLimits(snapshot, 100, 1)
+	resolution = resolver.Resolve(relation)
+	if !errors.As(resolution.Err, &capacityErr) || capacityErr.Budget != "serialized context bytes" {
+		t.Fatalf("legacy replay must check serialized bytes before marshaling: %#v", resolution)
+	}
+}
+
+func TestSourceRelationRefMergeChecksCapacityBeforeAppending(t *testing.T) {
+	first := types.SourceRelationFactRef{FileID: "first"}
+	second := types.SourceRelationFactRef{FileID: "second"}
+	third := types.SourceRelationFactRef{FileID: "third"}
+	budget := newSourceRelationFactCapacityBudget(2, 1<<20)
+	merged, err := sourceRelationFactRefsWithBudget(budget, first)
+	if err != nil || len(merged) != 1 {
+		t.Fatalf("initial bounded ref allocation failed: %#v, %v", merged, err)
+	}
+	_, err = mergeSourceRelationFactRefsWithBudget(merged, []types.SourceRelationFactRef{second, third}, budget)
+	var capacityErr *SourceRelationFactCapacityError
+	if !errors.As(err, &capacityErr) || capacityErr.Budget != "cumulative refs" {
+		t.Fatalf("merge must fail before retaining a ref beyond the budget: %v", err)
+	}
+	if budget.refs != 2 || len(merged) > 2 {
+		t.Fatalf("failed merge exceeded retained-ref budget: used=%d refs=%d", budget.refs, len(merged))
 	}
 }
 

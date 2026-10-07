@@ -106,18 +106,16 @@ func sourceWikiResolveRelationFactRefs(resolver *source.SourceRelationFactRefRes
 			continue
 		}
 		resolution := resolver.Resolve(resolved[i])
+		if resolution.Err != nil {
+			return nil, fmt.Errorf("HTTP route relation reference resolution failed: %w", resolution.Err)
+		}
 		if resolution.Status != source.SourceRelationFactRefsVerified && resolution.Status != source.SourceRelationFactRefsReplayed {
 			return nil, fmt.Errorf("HTTP route relation lacks verifiable exact source-fact references")
 		}
-		refs := resolution.Refs
-		if refs == nil {
-			refs = []types.SourceRelationFactRef{}
+		if len(resolution.Context) == 0 {
+			return nil, fmt.Errorf("HTTP route relation reference context is unavailable")
 		}
-		encoded, err := json.Marshal(refs)
-		if err != nil {
-			return nil, fmt.Errorf("cannot encode verified source-fact references")
-		}
-		resolved[i].Context = types.JSON(encoded)
+		resolved[i].Context = resolution.Context
 	}
 	return resolved, nil
 }

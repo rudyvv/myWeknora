@@ -170,7 +170,7 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 	}
 	relations, err := s.resolveSourceWikiRelations(ctx, kb.TenantID, kb.ID, sourceID, snapshot.ID, factSnapshot, relationInventory.Relations)
 	if err != nil {
-		return nil, fmt.Errorf("%w: HTTP route relation references could not be verified: %w", repository.ErrSourceWikiDerivationUnavailable, err)
+		return nil, sourceWikiRelationResolutionError(err)
 	}
 	plan, candidateLimitExceeded := buildSourceWikiSkeletonWithLimit(sourceWikiSkeletonInput{
 		SourceID: sourceID, SnapshotID: snapshot.ID, Files: skeletonFiles, ModuleSeedFiles: moduleSeedFiles, Relations: relations,
@@ -254,6 +254,14 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 		SourceConfigFingerprint:  sourceWikiSourceFingerprint(&dataSource),
 		ModelSettingsFingerprint: modelFingerprint, PlannedTopics: plan.Topics,
 	}, nil
+}
+
+func sourceWikiRelationResolutionError(err error) error {
+	var capacityErr *source.SourceRelationFactCapacityError
+	if errors.As(err, &capacityErr) {
+		return fmt.Errorf("%w: HTTP route relation reference replay exceeded a hard bound: %w", repository.ErrSourceWikiDerivationDeferred, err)
+	}
+	return fmt.Errorf("%w: HTTP route relation references could not be verified: %w", repository.ErrSourceWikiDerivationUnavailable, err)
 }
 
 func loadCurrentSourceWikiPublication(ctx context.Context, db *gorm.DB, kb *types.KnowledgeBase, sourceID string) (*types.SourcePublication, *types.SourceSnapshot, error) {
