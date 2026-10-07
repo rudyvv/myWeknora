@@ -474,9 +474,6 @@ func TestSourceWikiBatchPreflightPinsPublishedInputsWithoutCreatingOrDispatching
 		providerCalls.Add(1)
 		return `{}`
 	})
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 
 	model, err := f.modelService.GetModelByID(f.ctx, f.kb.SummaryModelID)
 	require.NoError(t, err)
@@ -598,9 +595,6 @@ func TestSourceWikiBatchPreflightRejectsIncompleteInventoriesWithoutWikiWrites(t
 		providerCalls.Add(1)
 		return `{}`
 	})
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 	preflight := generator.(interface {
 		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
 	})
@@ -620,7 +614,7 @@ func TestSourceWikiBatchPreflightRejectsIncompleteInventoriesWithoutWikiWrites(t
 
 	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", snapshot.ID).
 		Update("relation_count", types.SourceWikiSkeletonMaxRelations+1).Error)
-	_, err = preflight.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	_, err := preflight.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
 	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationDeferred)
 	assertNoWikiWrites()
 	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", snapshot.ID).
