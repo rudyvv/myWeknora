@@ -172,10 +172,10 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 	if err != nil {
 		return nil, fmt.Errorf("%w: HTTP route relation references could not be verified: %w", repository.ErrSourceWikiDerivationUnavailable, err)
 	}
-	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
+	plan, candidateLimitExceeded := buildSourceWikiSkeletonWithLimit(sourceWikiSkeletonInput{
 		SourceID: sourceID, SnapshotID: snapshot.ID, Files: skeletonFiles, ModuleSeedFiles: moduleSeedFiles, Relations: relations,
-	}, types.SourceWikiBatchMaxInitialTopics)
-	if len(plan.Topics) > types.SourceWikiBatchMaxCandidates {
+	}, types.SourceWikiBatchMaxInitialTopics, types.SourceWikiBatchMaxCandidates)
+	if candidateLimitExceeded {
 		return nil, fmt.Errorf("%w: candidate inventory exceeds the %d-topic preflight bound", repository.ErrSourceWikiDerivationDeferred, types.SourceWikiBatchMaxCandidates)
 	}
 	if err := validateSourceWikiSkeletonPlan(plan); err != nil {

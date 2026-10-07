@@ -26,6 +26,31 @@ func TestLoadSourceWikiImpactSnapshotClassifiesFactBudgetFailureBeforeLoadingRow
 	assertSourceWikiImpactMockExpectations(t, mock)
 }
 
+func TestLoadSourceWikiImpactSnapshotClassifiesMemberBudgetsBeforeLoadingRows(t *testing.T) {
+	tests := []struct {
+		name          string
+		metadataBytes int64
+		factBytes     int64
+		wantReason    SourceWikiImpactLoadReasonCode
+	}{
+		{name: "member metadata", metadataBytes: types.SourceWikiImpactMaxMemberMetadataBytes + 1, wantReason: SourceWikiImpactReasonMemberMetadataBytesExceeded},
+		{name: "facts on excluded members", factBytes: types.SourceWikiImpactMaxFactBytes + 1, wantReason: SourceWikiImpactReasonFactBytesExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock := newSourceWikiImpactLoaderMock(t)
+			expectSourceWikiImpactSnapshot(mock, true, 1, true, 0)
+			expectSourceWikiImpactMemberInventory(mock, test.metadataBytes, test.factBytes, 0)
+
+			snapshot, loaded, err := LoadSourceWikiImpactSnapshot(db, 7, "kb-one", "source-one", "snapshot-one",
+				types.SourceWikiImpactPublishedComplete)
+			assertSourceWikiImpactLoadFailure(t, snapshot, loaded, err,
+				SourceWikiImpactLoadFailureBudgetExceeded, test.wantReason, ErrSourceWikiImpactLoadBudgetExceeded)
+			assertSourceWikiImpactMockExpectations(t, mock)
+		})
+	}
+}
+
 func TestLoadSourceWikiImpactSnapshotClassifiesPreflightBudgetFailures(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -152,7 +177,7 @@ func TestLoadSourceWikiImpactSnapshotKeepsOperationalErrorsUntyped(t *testing.T)
 	t.Run("cancelled database read", func(t *testing.T) {
 		db, mock := newSourceWikiImpactLoaderMock(t)
 		expectSourceWikiImpactSnapshot(mock, true, 0, true, 0)
-		mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH\(sv\.facts::text\).*FROM source_snapshot_members sm.*`).
+		mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH.*sv\.facts::text.*FROM source_snapshot_members sm.*`).
 			WillReturnError(context.Canceled)
 		snapshot, loaded, err := LoadSourceWikiImpactSnapshot(db, 7, "kb-one", "source-one", "snapshot-one",
 			types.SourceWikiImpactPublishedComplete)
@@ -169,7 +194,7 @@ func TestLoadSourceWikiImpactSnapshotKeepsOperationalErrorsUntyped(t *testing.T)
 func TestLoadSourceWikiImpactSnapshotPreservesParsedAndExcludedMembers(t *testing.T) {
 	db, mock := newSourceWikiImpactLoaderMock(t)
 	expectSourceWikiImpactSnapshot(mock, true, 2, true, 0)
-	expectSourceWikiImpactFactInventory(mock, 2, 0)
+	expectSourceWikiImpactMemberInventory(mock, 175, 2, 0)
 	expectSourceWikiImpactRelationBounds(mock, 0, 0)
 	expectSourceWikiImpactMemberRows(mock, sourceWikiImpactMemberRows().
 		AddRow("app/A.java", "file-one", "version-one", "", "parsed", false,
@@ -295,8 +320,12 @@ func expectSourceWikiImpactSnapshot(mock sqlmock.Sqlmock, manifestComplete bool,
 }
 
 func expectSourceWikiImpactFactInventory(mock sqlmock.Sqlmock, factBytes, factCount int64) {
-	mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH\(sv\.facts::text\).*jsonb_typeof\(sv\.facts\).*FROM source_snapshot_members sm.*`).
-		WillReturnRows(sqlmock.NewRows([]string{"fact_bytes", "fact_count"}).AddRow(factBytes, factCount))
+	expectSourceWikiImpactMemberInventory(mock, 0, factBytes, factCount)
+}
+
+func expectSourceWikiImpactMemberInventory(mock sqlmock.Sqlmock, metadataBytes, factBytes, factCount int64) {
+	mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH.*sm\.path.*sv\.facts::text.*jsonb_typeof\(sv\.facts\).*FROM source_snapshot_members sm.*`).
+		WillReturnRows(sqlmock.NewRows([]string{"metadata_bytes", "fact_bytes", "fact_count"}).AddRow(metadataBytes, factBytes, factCount))
 }
 
 func expectSourceWikiImpactRelationBounds(mock sqlmock.Sqlmock, contextBytes, relationBytes int64) {

@@ -82,23 +82,38 @@ func loadSourceWikiImpactSnapshot(
 		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
 			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonRelationCountExceeded)
 	}
-	type factInventorySize struct {
-		FactBytes int64
-		FactCount int64
+	type memberInventorySize struct {
+		MetadataBytes int64
+		FactBytes     int64
+		FactCount     int64
 	}
-	var factInventory factInventorySize
+	var memberInventory memberInventorySize
 	if err := db.Table("source_snapshot_members sm").
 		Joins("LEFT JOIN source_file_versions sv ON sv.id=sm.file_version_id AND sv.snapshot_id=sm.snapshot_id").
-		Select(`COALESCE(SUM(OCTET_LENGTH(sv.facts::text)), 0) AS fact_bytes,
-			COALESCE(SUM(CASE WHEN jsonb_typeof(sv.facts)='array' THEN jsonb_array_length(sv.facts) ELSE 0 END), 0) AS fact_count`).
-		Where("sm.snapshot_id=? AND sm.status='parsed'", snapshotID).Scan(&factInventory).Error; err != nil {
-		return types.SourceWikiImpactSnapshot{}, nil, fmt.Errorf("read source Wiki impact fact inventory bounds: %w", err)
+		Joins("LEFT JOIN source_files sf ON sf.id=sm.source_file_id").
+		Select(`COALESCE(SUM(
+			OCTET_LENGTH(COALESCE(sm.path, '')) + OCTET_LENGTH(COALESCE(sm.source_file_id, '')) +
+			OCTET_LENGTH(COALESCE(sm.file_version_id, '')) + OCTET_LENGTH(COALESCE(sm.blob_sha, '')) +
+			OCTET_LENGTH(COALESCE(sm.status, '')) + OCTET_LENGTH(COALESCE(sf.id, '')) +
+			OCTET_LENGTH(COALESCE(sf.knowledge_base_id, '')) + OCTET_LENGTH(COALESCE(sf.data_source_id, '')) +
+			OCTET_LENGTH(COALESCE(sv.id, '')) + OCTET_LENGTH(COALESCE(sv.source_file_id, '')) +
+			OCTET_LENGTH(COALESCE(sv.sha256, '')) + OCTET_LENGTH(COALESCE(sv.parser_version, '')) +
+			OCTET_LENGTH(COALESCE(sv.quality, ''))
+		), 0) AS metadata_bytes,
+			COALESCE(SUM(OCTET_LENGTH(COALESCE(sv.facts::text, ''))), 0) AS fact_bytes,
+			COALESCE(SUM(CASE WHEN sm.status='parsed' AND jsonb_typeof(sv.facts)='array' THEN jsonb_array_length(sv.facts) ELSE 0 END), 0) AS fact_count`).
+		Where("sm.snapshot_id=?", snapshotID).Scan(&memberInventory).Error; err != nil {
+		return types.SourceWikiImpactSnapshot{}, nil, fmt.Errorf("read source Wiki impact member inventory bounds: %w", err)
 	}
-	if factInventory.FactBytes > types.SourceWikiImpactMaxFactBytes {
+	if memberInventory.MetadataBytes > types.SourceWikiImpactMaxMemberMetadataBytes {
+		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonMemberMetadataBytesExceeded)
+	}
+	if memberInventory.FactBytes > types.SourceWikiImpactMaxFactBytes {
 		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
 			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonFactBytesExceeded)
 	}
-	if factInventory.FactCount > types.SourceWikiImpactMaxFacts {
+	if memberInventory.FactCount > types.SourceWikiImpactMaxFacts {
 		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
 			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonFactCountExceeded)
 	}
@@ -168,8 +183,22 @@ func loadSourceWikiImpactSnapshot(
 		Files:   make([]types.SourceWikiSkeletonFile, 0, len(rows)),
 	}
 	seenPaths, seenFiles, seenVersions := map[string]bool{}, map[string]bool{}, map[string]bool{}
-	factCount, factBytes := int64(0), int64(0)
+	factCount, factBytes, materializedFactBytes, memberMetadataBytes := int64(0), int64(0), int64(0), int64(0)
 	for _, row := range rows {
+		memberMetadataBytes += sourceWikiMemberMetadataBytes(
+			row.Path, row.SourceFileID, row.FileVersionID, row.BlobSHA, row.Status,
+			row.FileID, row.FileKBID, row.FileSourceID, row.VersionID, row.VersionSourceFileID,
+			row.ContentSHA, row.ParserVersion, row.Quality,
+		)
+		materializedFactBytes += int64(len(row.Facts))
+		if memberMetadataBytes > types.SourceWikiImpactMaxMemberMetadataBytes {
+			return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+				SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonMemberMetadataBytesExceeded)
+		}
+		if materializedFactBytes > types.SourceWikiImpactMaxFactBytes {
+			return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+				SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonFactBytesExceeded)
+		}
 		// A joined file outside the requested scope is an authorization/identity
 		// boundary failure, not a deterministic proof defect eligible for fallback.
 		if row.FileID != "" && (row.FileTenantID != tenantID || row.FileKBID != knowledgeBaseID || row.FileSourceID != sourceID) {
@@ -244,6 +273,10 @@ func loadSourceWikiImpactSnapshot(
 		}
 		result.Members = append(result.Members, member)
 	}
+	if memberMetadataBytes != memberInventory.MetadataBytes || materializedFactBytes != memberInventory.FactBytes {
+		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+			SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonMemberBytesMismatch)
+	}
 	loaded.Complete = true
 	var relations []types.SourceCodeRelation
 	if relationInventory != nil {
@@ -273,6 +306,14 @@ func loadSourceWikiImpactSnapshot(
 	result.Relations = relations
 	loaded.Relations = relations
 	return result, loaded, nil
+}
+
+func sourceWikiMemberMetadataBytes(values ...string) int64 {
+	var total int64
+	for _, value := range values {
+		total += int64(len(value))
+	}
+	return total
 }
 
 func verifySourceWikiRelationInventoryRows(

@@ -54,6 +54,11 @@ type sourceWikiModuleCandidate struct {
 // seeds. The initial batch limit is capped here even if a caller misconfigures
 // it; later candidates remain visible as expansion work.
 func buildSourceWikiSkeleton(input sourceWikiSkeletonInput, initialLimit int) SourceWikiSkeletonPlan {
+	plan, _ := buildSourceWikiSkeletonWithLimit(input, initialLimit, 0)
+	return plan
+}
+
+func buildSourceWikiSkeletonWithLimit(input sourceWikiSkeletonInput, initialLimit, maxCandidates int) (SourceWikiSkeletonPlan, bool) {
 	if initialLimit < 0 {
 		initialLimit = 0
 	}
@@ -84,7 +89,17 @@ func buildSourceWikiSkeleton(input sourceWikiSkeletonInput, initialLimit int) So
 		}
 	}
 	modules := sourceWikiModuleCandidates(moduleFilesByPath)
-	flows := sourceWikiFlowCandidates(input.Relations, filesByPath)
+	if maxCandidates > 0 && len(modules)+1 > maxCandidates {
+		return SourceWikiSkeletonPlan{}, true
+	}
+	maxFlows := -1
+	if maxCandidates > 0 {
+		maxFlows = maxCandidates - len(modules) - 1
+	}
+	flows, exceeded := sourceWikiFlowCandidatesWithLimit(input.Relations, filesByPath, maxFlows)
+	if exceeded {
+		return SourceWikiSkeletonPlan{}, true
+	}
 	topics := make([]SourceWikiTopic, 0, 1+len(modules)+len(flows))
 	topics = append(topics, SourceWikiTopic{
 		SourceID: input.SourceID, SnapshotID: input.SnapshotID, TopicKey: sourceWikiTopicSystem,
@@ -131,7 +146,7 @@ func buildSourceWikiSkeleton(input sourceWikiSkeletonInput, initialLimit int) So
 	}
 	plan.InitialCount = min(initialLimit, len(topics))
 	plan.ExpansionCount = len(topics) - plan.InitialCount
-	return plan
+	return plan, false
 }
 
 // validateSourceWikiSkeletonPlan is the independent bounded integrity check
@@ -246,6 +261,11 @@ type sourceWikiFlowCandidate struct {
 }
 
 func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[string]sourceWikiSkeletonFile) []sourceWikiFlowCandidate {
+	result, _ := sourceWikiFlowCandidatesWithLimit(relations, files, -1)
+	return result
+}
+
+func sourceWikiFlowCandidatesWithLimit(relations []types.SourceCodeRelation, files map[string]sourceWikiSkeletonFile, maxCandidates int) ([]sourceWikiFlowCandidate, bool) {
 	ordered := append([]types.SourceCodeRelation(nil), relations...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
@@ -301,7 +321,11 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 			}
 		}
 		sort.Strings(candidate.reasons)
+		_, existed := candidates[route]
 		candidates[route] = candidate
+		if maxCandidates >= 0 && !existed && len(candidates) > maxCandidates {
+			return nil, true
+		}
 	}
 	// Frontend API requests remain useful flow entrypoints even when static
 	// correlation found no backend endpoint. Keep them in coverage as uncertain
@@ -343,7 +367,11 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 				}
 			}
 			sort.Strings(candidate.reasons)
+			_, existed := candidates[route]
 			candidates[route] = candidate
+			if maxCandidates >= 0 && !existed && len(candidates) > maxCandidates {
+				return nil, true
+			}
 		}
 	}
 	result := make([]sourceWikiFlowCandidate, 0, len(candidates))
@@ -351,7 +379,7 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 		result = append(result, candidate)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].route < result[j].route })
-	return result
+	return result, false
 }
 
 func sourceWikiCanonicalRoute(key string) string {

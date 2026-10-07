@@ -122,6 +122,23 @@ func TestSourceWikiSkeletonCapsInitialBatchAndKeepsStableSourceTopicKeys(t *test
 	require.NotEqual(t, plan.Topics[1].SourceID, other.Topics[1].SourceID)
 }
 
+func TestSourceWikiSkeletonDefersAtCandidateLimitWhileBuildingFlows(t *testing.T) {
+	input := sourceWikiSkeletonInput{SourceID: "source-a", SnapshotID: "snapshot-bounded"}
+	for _, route := range []string{"/one", "/two", "/three"} {
+		input.Files = append(input.Files, sourceWikiSkeletonFile{Path: "web/" + strings.TrimPrefix(route, "/") + ".ts", Facts: []types.ParsedSourceFact{{
+			Kind: "api_request", RoutePath: route, HTTPMethod: "GET", Quality: "structural",
+		}}})
+	}
+
+	plan, exceeded := buildSourceWikiSkeletonWithLimit(input, 40, 3)
+	require.True(t, exceeded, "system plus three distinct routes exceeds a three-topic candidate budget")
+	require.Empty(t, plan.Topics, "overflow must defer without returning a partial plan")
+
+	plan, exceeded = buildSourceWikiSkeletonWithLimit(input, 40, 4)
+	require.False(t, exceeded)
+	require.Len(t, plan.Topics, 4)
+}
+
 func TestSourceWikiSkeletonDoesNotPromoteUncertainRouteIntoCertainFlow(t *testing.T) {
 	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
 		SourceID: "source-a", SnapshotID: "snapshot-1",

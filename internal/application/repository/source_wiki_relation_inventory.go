@@ -13,8 +13,13 @@ import (
 const sourceWikiRelationBoundsSelect = `
 	COALESCE(SUM(OCTET_LENGTH(COALESCE(context::text, ''))), 0) AS context_bytes,
 	COALESCE(SUM(
+		OCTET_LENGTH(COALESCE(id, '')) + OCTET_LENGTH(COALESCE(data_source_id, '')) +
+		OCTET_LENGTH(COALESCE(snapshot_id, '')) + OCTET_LENGTH(COALESCE(kind, '')) +
+		OCTET_LENGTH(COALESCE(from_file_id, '')) + OCTET_LENGTH(COALESCE(from_version_id, '')) +
 		OCTET_LENGTH(COALESCE(from_path, '')) + OCTET_LENGTH(COALESCE(from_key, '')) +
 		OCTET_LENGTH(COALESCE(to_path, '')) + OCTET_LENGTH(COALESCE(to_key, '')) +
+		OCTET_LENGTH(COALESCE(to_file_id, '')) + OCTET_LENGTH(COALESCE(to_version_id, '')) +
+		OCTET_LENGTH(COALESCE(determinacy, '')) + OCTET_LENGTH(COALESCE(quality, '')) +
 		OCTET_LENGTH(COALESCE(resolution_reason, '')) + OCTET_LENGTH(COALESCE(from_range::text, '')) +
 		OCTET_LENGTH(COALESCE(to_range::text, '')) + OCTET_LENGTH(COALESCE(context::text, ''))
 	), 0) AS relation_bytes`
@@ -152,8 +157,8 @@ func LoadSourceWikiRelationInventory(
 				return fmt.Errorf("%w: source Wiki relation fields exceed the %d-byte bound", ErrSourceWikiDerivationDeferred, types.SourceWikiImpactMaxRelationBytes)
 			}
 		}
-		if int64(len(relations)) != bounds.RelationCount || contextBytes > bounds.ContextBytes || relationBytes > bounds.RelationBytes {
-			return fmt.Errorf("%w: source Wiki relation inventory is incomplete", ErrSourceWikiDerivationUnavailable)
+		if int64(len(relations)) != bounds.RelationCount || contextBytes != bounds.ContextBytes || relationBytes != bounds.RelationBytes {
+			return fmt.Errorf("%w: source Wiki relation inventory byte aggregate mismatch", ErrSourceWikiDerivationUnavailable)
 		}
 		inventory = &SourceWikiRelationInventory{
 			TenantID: tenantID, KnowledgeBaseID: knowledgeBaseID, DataSourceID: sourceID, SnapshotID: snapshotID,
@@ -171,7 +176,10 @@ func LoadSourceWikiRelationInventory(
 }
 
 func sourceWikiRelationVariableBytes(relation types.SourceCodeRelation) int64 {
-	return int64(len(relation.FromPath)) + int64(len(relation.FromKey)) + int64(len(relation.ToPath)) +
-		int64(len(relation.ToKey)) + int64(len(relation.ResolutionReason)) + int64(len(relation.FromRange)) +
-		int64(len(relation.ToRange)) + int64(len(relation.Context))
+	return int64(len(relation.ID)) + int64(len(relation.DataSourceID)) + int64(len(relation.SnapshotID)) +
+		int64(len(relation.Kind)) + int64(len(relation.FromFileID)) + int64(len(relation.FromVersionID)) +
+		int64(len(relation.FromPath)) + int64(len(relation.FromKey)) + int64(len(relation.ToFileID)) +
+		int64(len(relation.ToVersionID)) + int64(len(relation.ToPath)) + int64(len(relation.ToKey)) +
+		int64(len(relation.Determinacy)) + int64(len(relation.Quality)) + int64(len(relation.ResolutionReason)) +
+		int64(len(relation.FromRange)) + int64(len(relation.ToRange)) + int64(len(relation.Context))
 }
