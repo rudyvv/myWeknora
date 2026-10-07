@@ -1,0 +1,17 @@
+# T22：预览确认目标的条件手动同步
+
+验收起点98b6b7428def37c527717916961e86ec9aeb8040。这是nsb完整范围发布前发现的预览→worker HEAD竞态修复，不代表已经发布或T22通过。
+
+## 产品合同
+
+现有Admin/KB授权的手动同步API允许可选 expected_commit_sha（完整小写40位hex）。旧空请求行为保持。字段不是仓库/分支配置，不允许任意历史选择：服务应在当前已登记源、分支和授权下解析HEAD并核对请求值；不符则在登记同步任务前拒绝。源码以外模式或没有durable协调器时拒绝该选项，不静默忽略。解析完成后在协调事务中登记请求的确定target_commit_sha，现有配置代数/租约fencing保留。worker及崩溃恢复已支持已登记target；分支随后正常推进仍处理原固定目标。获取旧目标失败必须明确失败并保留上一发布，不替换为新HEAD。
+
+与普通信号共用同源串行和待追赶规则；被更新信号取代的待执行请求不能冒称它已发布。原GitLab只读权限、master分支和完整5448文件范围不变，不要求/声称冻结真实远端分支。产品实现及真实回归完成后才可解除acceptance source-publish --publish的准备态拒绝。
+
+## 先冻结审查的真实回归夹具
+
+新增公开HTTP→service→durable PG→worker→GetSyncLog seam测试：使用现有真实Git/parser/双索引夹具，先预览并用HTTP提交expected commit，再修改测试仓库分支HEAD，断言最终发布仍是旧目标及重复投递保持同一发布。未执行目标源码；模型仅受控边界替身，不代表真实模型业务评分。
+
+既有SOURCE_TEST_POSTGRES_DSN仍须127.0.0.1/source_test。新增明确opt-in仅可把数据库字段换成已存在source_t22_live_rehearsal_20261006，且必须port57822/sslmode=disable/无附加URI参数。只在随机source_test_UUID schema创建synthetic fixture表/索引并清理自身schema，不写public的真实验收KB/源/账本/任务，不改扩展、Redis或原8080。clone路径只只读核验vector/pg_search均已存在，缺失拒绝，不安装扩展。禁止输出DSN或密码。根在精确测试/fixture冻结经独立审查后才执行它；基线的真实失败是预期red，不得算验收成功。只跑该新增测试，不重复已接受T06/T09/T10。
+
+测试fixture的额外导出只存在于integration测试二进制；新handler/服务/协调器产品代码尚待实施。后续冻结代码需独立Standards/Spec与安全Sol审查，测试命令/结果和准确SHA分别记录；最后整票完成时才一次全套测试。

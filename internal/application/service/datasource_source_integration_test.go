@@ -3249,11 +3249,28 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 	// These fixtures can create/drop schemas only in the dedicated test database.
 	require.Equal(t, "/source_test", address.Path)
 	require.Equal(t, "127.0.0.1", address.Hostname())
+	cloneFixture := os.Getenv("SOURCE_TEST_FIXED_ACCEPTANCE_CLONE")
+	if cloneFixture != "" {
+		// This opt-in is used only by the Root-reviewed acceptance regression.
+		// No arbitrary database, endpoint, credentials or public rows are allowed.
+		require.Equal(t, "source_t22_live_rehearsal_20261006", cloneFixture)
+		require.Equal(t, "57822", address.Port())
+		require.Equal(t, "disable", address.Query().Get("sslmode"))
+		require.Len(t, address.Query(), 1)
+		address.Path = "/" + cloneFixture
+		dsn = address.String()
+	}
 	silentLogger := quietSourceIntegrationLogger{}
 	admin, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{Logger: silentLogger})
 	require.NoError(t, err)
 	schema := "source_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	require.NoError(t, admin.Exec("CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search").Error)
+	if cloneFixture == "" {
+		require.NoError(t, admin.Exec("CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search").Error)
+	} else {
+		var extensionCount int64
+		require.NoError(t, admin.Raw("SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pg_search')").Scan(&extensionCount).Error)
+		require.Equal(t, int64(2), extensionCount)
+	}
 	require.NoError(t, admin.Exec("CREATE SCHEMA "+schema).Error)
 	t.Cleanup(func() {
 		_ = admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error
