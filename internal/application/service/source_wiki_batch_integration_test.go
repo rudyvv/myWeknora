@@ -665,7 +665,13 @@ func TestSourceWikiBatchCannotStartWithOnlySystemOverview(t *testing.T) {
 	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", publication.SnapshotID).
 		Update("relation_count", 0).Error)
 
-	projection, err := repository.LoadSourceWikiModuleProjection(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	service := generator.(*sourceWikiService)
+	readCtx, release, err := beginSourceRead(f.ctx, service.kb, types.SearchTargets{&types.SearchTarget{
+		Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID, SourceIDs: []string{f.ds.ID},
+	}})
+	require.NoError(t, err)
+	defer release()
+	projection, err := repository.LoadSourceWikiModuleProjection(readCtx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
 	require.NoError(t, err)
 	require.NotEmpty(t, projection.Members)
 	seedFiles := make([]sourceWikiSkeletonFile, 0, len(projection.Members))
