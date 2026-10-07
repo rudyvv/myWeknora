@@ -11,12 +11,14 @@ import (
 )
 
 const (
-	sourceWikiTopicSystem      = "system"
-	sourceWikiTopicModule      = "module"
-	sourceWikiTopicFlow        = "flow"
-	sourceWikiMaxInitialTopics = 40
-	sourceWikiMaxFlowRelations = 64
-	sourceWikiMaxFlowDepth     = 8
+	sourceWikiTopicSystem              = "system"
+	sourceWikiTopicModule              = "module"
+	sourceWikiTopicFlow                = "flow"
+	sourceWikiMaxInitialTopics         = 40
+	sourceWikiMaxFlowRelations         = 64
+	sourceWikiMaxFlowDepth             = 8
+	sourceWikiMaxFlowEvidenceRelations = 100_000
+	sourceWikiMaxFlowEvidenceBytes     = 64 << 20
 )
 
 type SourceWikiTopic = types.SourceWikiTopic
@@ -30,10 +32,11 @@ type SourceWikiSkeletonPlan struct {
 }
 
 type sourceWikiSkeletonInput struct {
-	SourceID   string
-	SnapshotID string
-	Files      []sourceWikiSkeletonFile
-	Relations  []types.SourceCodeRelation
+	SourceID        string
+	SnapshotID      string
+	Files           []sourceWikiSkeletonFile
+	ModuleSeedFiles []sourceWikiSkeletonFile
+	Relations       []types.SourceCodeRelation
 }
 
 type sourceWikiSkeletonFile struct {
@@ -53,6 +56,16 @@ type sourceWikiModuleCandidate struct {
 // seeds. The initial batch limit is capped here even if a caller misconfigures
 // it; later candidates remain visible as expansion work.
 func buildSourceWikiSkeleton(input sourceWikiSkeletonInput, initialLimit int) SourceWikiSkeletonPlan {
+	plan, _ := buildSourceWikiSkeletonWithBudgets(input, initialLimit, 0, -1, -1)
+	return plan
+}
+
+func buildSourceWikiSkeletonWithLimit(input sourceWikiSkeletonInput, initialLimit, maxCandidates int) (SourceWikiSkeletonPlan, bool) {
+	return buildSourceWikiSkeletonWithBudgets(input, initialLimit, maxCandidates,
+		sourceWikiMaxFlowEvidenceRelations, sourceWikiMaxFlowEvidenceBytes)
+}
+
+func buildSourceWikiSkeletonWithBudgets(input sourceWikiSkeletonInput, initialLimit, maxCandidates, maxFlowEvidenceRelations int, maxFlowEvidenceBytes int64) (SourceWikiSkeletonPlan, bool) {
 	if initialLimit < 0 {
 		initialLimit = 0
 	}
@@ -70,8 +83,31 @@ func buildSourceWikiSkeleton(input sourceWikiSkeletonInput, initialLimit int) So
 		filesByPath[clean] = file
 	}
 
-	modules := sourceWikiModuleCandidates(filesByPath)
-	flows := sourceWikiFlowCandidates(input.Relations, filesByPath)
+	moduleFilesByPath := filesByPath
+	if input.ModuleSeedFiles != nil {
+		moduleFilesByPath = make(map[string]sourceWikiSkeletonFile, len(input.ModuleSeedFiles))
+		for _, file := range input.ModuleSeedFiles {
+			clean := normalizeSourceWikiPath(file.Path)
+			if clean == "" {
+				continue
+			}
+			file.Path = clean
+			moduleFilesByPath[clean] = file
+		}
+	}
+	modules := sourceWikiModuleCandidates(moduleFilesByPath)
+	if maxCandidates > 0 && len(modules)+1 > maxCandidates {
+		return SourceWikiSkeletonPlan{}, true
+	}
+	maxFlows := -1
+	if maxCandidates > 0 {
+		maxFlows = maxCandidates - len(modules) - 1
+	}
+	flows, exceeded := sourceWikiFlowCandidatesWithBudgets(input.Relations, filesByPath, maxFlows,
+		maxFlowEvidenceRelations, maxFlowEvidenceBytes)
+	if exceeded {
+		return SourceWikiSkeletonPlan{}, true
+	}
 	topics := make([]SourceWikiTopic, 0, 1+len(modules)+len(flows))
 	topics = append(topics, SourceWikiTopic{
 		SourceID: input.SourceID, SnapshotID: input.SnapshotID, TopicKey: sourceWikiTopicSystem,
@@ -118,7 +154,7 @@ func buildSourceWikiSkeleton(input sourceWikiSkeletonInput, initialLimit int) So
 	}
 	plan.InitialCount = min(initialLimit, len(topics))
 	plan.ExpansionCount = len(topics) - plan.InitialCount
-	return plan
+	return plan, false
 }
 
 // validateSourceWikiSkeletonPlan is the independent bounded integrity check
@@ -233,6 +269,12 @@ type sourceWikiFlowCandidate struct {
 }
 
 func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[string]sourceWikiSkeletonFile) []sourceWikiFlowCandidate {
+	result, _ := sourceWikiFlowCandidatesWithBudgets(relations, files, -1, -1, -1)
+	return result
+}
+
+func sourceWikiFlowCandidatesWithBudgets(relations []types.SourceCodeRelation, files map[string]sourceWikiSkeletonFile,
+	maxCandidates, maxEvidenceRelations int, maxEvidenceBytes int64) ([]sourceWikiFlowCandidate, bool) {
 	ordered := append([]types.SourceCodeRelation(nil), relations...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
@@ -250,6 +292,8 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 	}
 
 	candidates := map[string]sourceWikiFlowCandidate{}
+	var totalEvidenceRelations int
+	var totalEvidenceBytes int64
 	for _, routeEdge := range ordered {
 		if routeEdge.Kind != "http_route" || sourceWikiRelationTouchesGenerated(routeEdge, files) {
 			continue
@@ -260,6 +304,17 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 		}
 		if route == "" {
 			continue
+		}
+		if _, exists := candidates[route]; !exists {
+			if maxCandidates >= 0 && len(candidates)+1 > maxCandidates {
+				return nil, true
+			}
+			if maxEvidenceRelations >= 0 && totalEvidenceRelations+1 > maxEvidenceRelations {
+				return nil, true
+			}
+			if maxEvidenceBytes >= 0 && totalEvidenceBytes+sourceWikiFlowRelationPayloadBytes(routeEdge) > maxEvidenceBytes {
+				return nil, true
+			}
 		}
 		chain := sourceWikiTraceFlow(routeEdge, adjacency)
 		reasons := make([]string, 0)
@@ -281,14 +336,29 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 		candidate := candidates[route]
 		candidate.route = route
 		candidate.priority = 100
-		candidate.relations = sourceWikiMergeRelations(candidate.relations, allRelations)
 		for _, reason := range reasons {
 			if !sourceWikiReasonIncluded(candidate.reasons, reason) {
 				candidate.reasons = append(candidate.reasons, reason)
 			}
 		}
 		sort.Strings(candidate.reasons)
+		_, existed := candidates[route]
+		if len(candidate.relations) < sourceWikiMaxFlowRelations+1 {
+			oldEvidenceRelations := len(candidate.relations)
+			oldEvidenceBytes := sourceWikiFlowRelationsPayloadBytes(candidate.relations)
+			candidate.relations = sourceWikiMergeRelations(candidate.relations, allRelations)
+			newEvidenceRelations := totalEvidenceRelations - oldEvidenceRelations + len(candidate.relations)
+			newEvidenceBytes := totalEvidenceBytes - oldEvidenceBytes + sourceWikiFlowRelationsPayloadBytes(candidate.relations)
+			if (maxEvidenceRelations >= 0 && newEvidenceRelations > maxEvidenceRelations) ||
+				(maxEvidenceBytes >= 0 && newEvidenceBytes > maxEvidenceBytes) {
+				return nil, true
+			}
+			totalEvidenceRelations, totalEvidenceBytes = newEvidenceRelations, newEvidenceBytes
+		}
 		candidates[route] = candidate
+		if maxCandidates >= 0 && !existed && len(candidates) > maxCandidates {
+			return nil, true
+		}
 	}
 	// Frontend API requests remain useful flow entrypoints even when static
 	// correlation found no backend endpoint. Keep them in coverage as uncertain
@@ -310,6 +380,9 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 			route := sourceWikiCanonicalRoute(fact.HTTPMethod + " " + fact.RoutePath)
 			if route == "" {
 				continue
+			}
+			if _, exists := candidates[route]; !exists && maxCandidates >= 0 && len(candidates)+1 > maxCandidates {
+				return nil, true
 			}
 			candidate := candidates[route]
 			candidate.route = route
@@ -338,7 +411,31 @@ func sourceWikiFlowCandidates(relations []types.SourceCodeRelation, files map[st
 		result = append(result, candidate)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].route < result[j].route })
-	return result
+	return result, false
+}
+
+// sourceWikiFlowRelationPayloadBytes estimates a conservative JSON payload
+// upper bound. Direct strings and string contents inside raw JSON can expand
+// sixfold when encoding/json escapes control or HTML-sensitive characters.
+func sourceWikiFlowRelationPayloadBytes(relation types.SourceCodeRelation) int64 {
+	bytes := int64(512)
+	for _, value := range []string{
+		relation.ID, relation.DataSourceID, relation.SnapshotID, relation.Kind,
+		relation.FromFileID, relation.FromVersionID, relation.FromPath, relation.FromKey,
+		relation.ToFileID, relation.ToVersionID, relation.ToPath, relation.ToKey,
+		relation.Determinacy, relation.Quality, relation.ResolutionReason,
+	} {
+		bytes += int64(len(value)) * 6
+	}
+	return bytes + 6*int64(len(relation.FromRange)+len(relation.ToRange)+len(relation.Context))
+}
+
+func sourceWikiFlowRelationsPayloadBytes(relations []types.SourceCodeRelation) int64 {
+	var total int64
+	for _, relation := range relations {
+		total += sourceWikiFlowRelationPayloadBytes(relation)
+	}
+	return total
 }
 
 func sourceWikiCanonicalRoute(key string) string {
@@ -441,6 +538,13 @@ func sourceWikiRelationNodes(fileID, filePath string) []string {
 }
 
 func sourceWikiMergeRelations(existing, incoming []types.SourceCodeRelation) []types.SourceCodeRelation {
+	maxRelations := sourceWikiMaxFlowRelations + 1
+	if len(existing) >= maxRelations {
+		if len(existing) > maxRelations {
+			return append([]types.SourceCodeRelation(nil), existing[:maxRelations]...)
+		}
+		return existing
+	}
 	merged := append([]types.SourceCodeRelation(nil), existing...)
 	seen := make(map[string]bool, len(existing)+len(incoming))
 	identity := func(edge types.SourceCodeRelation) string {
@@ -455,11 +559,11 @@ func sourceWikiMergeRelations(existing, incoming []types.SourceCodeRelation) []t
 		if seen[key] {
 			continue
 		}
-		seen[key] = true
-		merged = append(merged, edge)
-		if len(merged) >= sourceWikiMaxFlowRelations+1 {
+		if len(merged) >= maxRelations {
 			break
 		}
+		seen[key] = true
+		merged = append(merged, edge)
 	}
 	return merged
 }

@@ -413,11 +413,11 @@ func sourceWikiSkeletonPlanForImpact(snapshot types.SourceWikiImpactSnapshot, lo
 	for _, file := range loaded.Files {
 		files = append(files, sourceWikiSkeletonFile{Path: file.Path, Generated: file.Generated, Facts: file.Facts})
 	}
-	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
+	plan, candidateLimitExceeded := buildSourceWikiSkeletonWithLimit(sourceWikiSkeletonInput{
 		SourceID: snapshot.SourceID, SnapshotID: snapshot.SnapshotID, Files: files, Relations: loaded.Relations,
-	}, sourceWikiMaxInitialTopics)
-	if len(plan.Topics) > types.SourceWikiBatchMaxCandidates {
-		return nil, fmt.Errorf("source Wiki topic inventory exceeds the bounded candidate count")
+	}, sourceWikiMaxInitialTopics, types.SourceWikiBatchMaxCandidates)
+	if candidateLimitExceeded {
+		return nil, fmt.Errorf("%w: source Wiki topic inventory exceeds the bounded candidate count", repository.ErrSourceWikiDerivationDeferred)
 	}
 	if err := validateSourceWikiSkeletonPlan(plan); err != nil {
 		return nil, err

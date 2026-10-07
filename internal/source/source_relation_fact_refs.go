@@ -3,6 +3,7 @@ package source
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -20,7 +21,146 @@ const (
 	sourceRelationFactContextMax  = 1 << 20
 	// Large snapshots fail closed instead of triggering unbounded legacy replay.
 	sourceRelationReplayMaxFacts = 100_000
+
+	sourceRelationFactReplayMaxRefs         int64 = 100_000
+	sourceRelationFactReplayMaxContextBytes int64 = 32 << 20
+	sourceRelationReplayMaxRouteWork        int64 = 1_000_000
+	sourceRelationReplayMaxRouteCandidates  int64 = 100_000
 )
+
+// SourceRelationFactCapacityError identifies bounded replay or resolution
+// work that cannot safely produce a complete route-fact reference set.
+type SourceRelationFactCapacityError struct {
+	Budget    string
+	Used      int64
+	Requested int64
+	Limit     int64
+}
+
+func (err *SourceRelationFactCapacityError) Error() string {
+	if err == nil {
+		return "source relation fact capacity exceeded"
+	}
+	return fmt.Sprintf("source relation fact %s capacity exceeded: used %d, requested %d, limit %d",
+		err.Budget, err.Used, err.Requested, err.Limit)
+}
+
+type sourceRelationFactCapacityBudget struct {
+	refs                 int64
+	contextBytes         int64
+	routeWork            int64
+	routeCandidateCopies int64
+	maxRefs              int64
+	maxContext           int64
+	maxRouteWork         int64
+	maxRouteCandidates   int64
+}
+
+func newSourceRelationFactCapacityBudget(maxRefs, maxContextBytes int64) *sourceRelationFactCapacityBudget {
+	return &sourceRelationFactCapacityBudget{
+		maxRefs: maxRefs, maxContext: maxContextBytes,
+		maxRouteWork: sourceRelationReplayMaxRouteWork, maxRouteCandidates: sourceRelationReplayMaxRouteCandidates,
+	}
+}
+
+func (budget *sourceRelationFactCapacityBudget) addRefs(requested int64) error {
+	if budget == nil || requested == 0 {
+		return nil
+	}
+	if requested < 0 || requested > budget.maxRefs-budget.refs {
+		return &SourceRelationFactCapacityError{
+			Budget: "cumulative refs", Used: budget.refs, Requested: requested, Limit: budget.maxRefs,
+		}
+	}
+	budget.refs += requested
+	return nil
+}
+
+func (budget *sourceRelationFactCapacityBudget) checkContextBytes(requested int64) error {
+	if budget == nil {
+		return nil
+	}
+	if requested < 0 || requested > budget.maxContext-budget.contextBytes {
+		return &SourceRelationFactCapacityError{
+			Budget: "serialized context bytes", Used: budget.contextBytes, Requested: requested, Limit: budget.maxContext,
+		}
+	}
+	return nil
+}
+
+func (budget *sourceRelationFactCapacityBudget) addContextBytes(requested int64) error {
+	if err := budget.checkContextBytes(requested); err != nil {
+		return err
+	}
+	if budget != nil {
+		budget.contextBytes += requested
+	}
+	return nil
+}
+
+func (budget *sourceRelationFactCapacityBudget) addRouteWork(requested int64) error {
+	if budget == nil || requested == 0 {
+		return nil
+	}
+	if requested < 0 || requested > budget.maxRouteWork-budget.routeWork {
+		return &SourceRelationFactCapacityError{
+			Budget: "route correlation work", Used: budget.routeWork, Requested: requested, Limit: budget.maxRouteWork,
+		}
+	}
+	budget.routeWork += requested
+	return nil
+}
+
+func (budget *sourceRelationFactCapacityBudget) reserveRouteCandidateCopies(requested int64) error {
+	if budget == nil || requested == 0 {
+		return nil
+	}
+	if requested < 0 || requested > budget.maxRouteCandidates-budget.routeCandidateCopies {
+		return &SourceRelationFactCapacityError{
+			Budget: "route candidate copies", Used: budget.routeCandidateCopies, Requested: requested, Limit: budget.maxRouteCandidates,
+		}
+	}
+	budget.routeCandidateCopies += requested
+	return nil
+}
+
+// SourceRelationFactRefsEncodedUpperBound returns a conservative upper bound
+// for JSON encoding refs, allowing callers to reject oversized contexts before
+// allocating the encoded buffer.
+func sourceRelationFactRefsEncodedUpperBound(refs []types.SourceRelationFactRef) int64 {
+	const encodedRefFixedOverhead int64 = 256
+
+	size := int64(2) // surrounding JSON array brackets
+	for _, ref := range refs {
+		size += encodedRefFixedOverhead + 6*int64(len(ref.DataSourceID)+len(ref.SnapshotID)+len(ref.FileID)+
+			len(ref.FileVersionID)+len(ref.Path)+len(ref.Kind)+len(ref.Role)+len(ref.Quality))
+	}
+	if len(refs) > 1 {
+		size += int64(len(refs) - 1) // commas between refs
+	}
+	return size
+}
+
+// MarshalSourceRelationFactRefsBounded applies the same per-route serialized
+// context cap used by verification before allocating JSON output.
+func marshalSourceRelationFactRefsBounded(refs []types.SourceRelationFactRef) ([]byte, error) {
+	upperBound := sourceRelationFactRefsEncodedUpperBound(refs)
+	if upperBound > sourceRelationFactContextMax {
+		return nil, &SourceRelationFactCapacityError{
+			Budget: "serialized context bytes", Requested: upperBound, Limit: sourceRelationFactContextMax,
+		}
+	}
+	encoded, err := json.Marshal(refs)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(encoded)) > sourceRelationFactContextMax {
+		return nil, &SourceRelationFactCapacityError{
+			Budget: "serialized context bytes", Requested: int64(len(encoded)), Limit: sourceRelationFactContextMax,
+		}
+	}
+	return encoded, nil
+}
 
 // SourceRelationFactSnapshot must contain the complete parsed membership for
 // one immutable snapshot, not a topic- or relation-filtered subset. Members
@@ -34,8 +174,10 @@ type SourceRelationFactSnapshot struct {
 }
 
 type SourceRelationFactRefResolution struct {
-	Status string
-	Refs   []types.SourceRelationFactRef
+	Status  string
+	Refs    []types.SourceRelationFactRef
+	Context types.JSON
+	Err     error
 }
 
 // SourceRelationFactRefResolver verifies persisted refs and can replay legacy
@@ -47,8 +189,11 @@ type SourceRelationFactRefResolver struct {
 	usable        bool
 	membersByFile map[string]SourceRelationMember
 
-	replayOnce sync.Once
-	replayByID map[sourceRelationIdentity][]types.SourceCodeRelation
+	replayOnce      sync.Once
+	replayByID      map[sourceRelationIdentity][]types.SourceCodeRelation
+	replayErr       error
+	maxRefs         int64
+	maxContextBytes int64
 }
 
 type sourceRelationIdentity struct {
@@ -72,7 +217,17 @@ type sourceRelationIdentity struct {
 }
 
 func NewSourceRelationFactRefResolver(snapshot SourceRelationFactSnapshot) *SourceRelationFactRefResolver {
-	resolver := &SourceRelationFactRefResolver{snapshot: snapshot}
+	return newSourceRelationFactRefResolverWithLimits(snapshot,
+		sourceRelationFactReplayMaxRefs, sourceRelationFactReplayMaxContextBytes)
+}
+
+func newSourceRelationFactRefResolverWithLimits(
+	snapshot SourceRelationFactSnapshot,
+	maxRefs, maxContextBytes int64,
+) *SourceRelationFactRefResolver {
+	resolver := &SourceRelationFactRefResolver{
+		snapshot: snapshot, maxRefs: maxRefs, maxContextBytes: maxContextBytes,
+	}
 	if snapshot.TenantID == 0 || snapshot.DataSourceID == "" || snapshot.SnapshotID == "" ||
 		!snapshot.Complete || len(snapshot.Members) > types.SourceWikiSkeletonMaxFiles {
 		return resolver
@@ -113,6 +268,11 @@ func (resolver *SourceRelationFactRefResolver) Resolve(relation types.SourceCode
 		relation.Kind != "http_route" {
 		return unavailableSourceRelationFactRefs()
 	}
+	if int64(len(relation.Context)) > sourceRelationFactContextMax {
+		return SourceRelationFactRefResolution{Status: SourceRelationFactRefsUnavailable, Err: &SourceRelationFactCapacityError{
+			Budget: "per-route serialized context bytes", Requested: int64(len(relation.Context)), Limit: sourceRelationFactContextMax,
+		}}
+	}
 
 	refs, hasRefs, valid := decodeSourceRelationFactRefs(relation.Context)
 	if !valid {
@@ -123,6 +283,9 @@ func (resolver *SourceRelationFactRefResolver) Resolve(relation types.SourceCode
 		return unavailableSourceRelationFactRefs()
 	}
 	resolver.replayOnce.Do(resolver.replaySnapshot)
+	if resolver.replayErr != nil {
+		return SourceRelationFactRefResolution{Status: SourceRelationFactRefsUnavailable, Err: resolver.replayErr}
+	}
 	matches := resolver.replayByID[identity]
 	if len(matches) != 1 {
 		return unavailableSourceRelationFactRefs()
@@ -135,15 +298,20 @@ func (resolver *SourceRelationFactRefResolver) Resolve(relation types.SourceCode
 		if !resolver.verifyRefs(refs) || !hasCausalRefs || !sameSourceRelationFactRefSet(refs, causalRefs) {
 			return unavailableSourceRelationFactRefs()
 		}
-		return SourceRelationFactRefResolution{Status: SourceRelationFactRefsVerified, Refs: causalRefs}
+		return SourceRelationFactRefResolution{Status: SourceRelationFactRefsVerified, Refs: causalRefs, Context: matches[0].Context}
 	}
-	return SourceRelationFactRefResolution{Status: SourceRelationFactRefsReplayed, Refs: causalRefs}
+	return SourceRelationFactRefResolution{Status: SourceRelationFactRefsReplayed, Refs: causalRefs, Context: matches[0].Context}
 }
 
 func (resolver *SourceRelationFactRefResolver) replaySnapshot() {
 	resolver.replayByID = make(map[sourceRelationIdentity][]types.SourceCodeRelation)
-	relations := CorrelateSourceFacts(resolver.snapshot.TenantID, resolver.snapshot.DataSourceID,
-		resolver.snapshot.SnapshotID, resolver.snapshot.Members)
+	relations, err := CorrelateSourceFactsBounded(resolver.snapshot.TenantID, resolver.snapshot.DataSourceID,
+		resolver.snapshot.SnapshotID, resolver.snapshot.Members, resolver.maxRefs, resolver.maxContextBytes)
+	if err != nil {
+		resolver.replayByID = nil
+		resolver.replayErr = err
+		return
+	}
 	if len(relations) > types.SourceWikiSkeletonMaxRelations {
 		resolver.replayByID = nil
 		return

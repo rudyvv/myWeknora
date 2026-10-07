@@ -64,6 +64,22 @@ type sourceReference struct {
 // intentionally contains no Java/XML/SQL parsing and never infers a target
 // file from a basename or a generated diagnostic.
 func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []SourceRelationMember) []types.SourceCodeRelation {
+	relations, _ := correlateSourceFacts(tenant, sourceID, snapshotID, members, nil)
+	return relations
+}
+
+// CorrelateSourceFactsBounded performs the same snapshot-local correlation as
+// CorrelateSourceFacts while bounding temporary and serialized route evidence.
+// It is used by Wiki legacy replay, where a complete fact snapshot may contain
+// many more route references than the Wiki evidence budget can retain.
+func CorrelateSourceFactsBounded(tenant uint64, sourceID, snapshotID string, members []SourceRelationMember,
+	maxRefs, maxContextBytes int64) ([]types.SourceCodeRelation, error) {
+	budget := newSourceRelationFactCapacityBudget(maxRefs, maxContextBytes)
+	return correlateSourceFacts(tenant, sourceID, snapshotID, members, budget)
+}
+
+func correlateSourceFacts(tenant uint64, sourceID, snapshotID string, members []SourceRelationMember,
+	budget *sourceRelationFactCapacityBudget) ([]types.SourceCodeRelation, error) {
 	documents := map[string][]*mapperDocument{}
 	statementsByKey := map[string][]factOwner{}
 	resultMapsByKey := map[string][]factOwner{}
@@ -238,17 +254,22 @@ func CorrelateSourceFacts(tenant uint64, sourceID, snapshotID string, members []
 		}
 		relations = append(relations, relation)
 	}
-	relations = append(relations, correlateStaticBusinessFlow(tenant, sourceID, snapshotID, members)...)
+	flowRelations, err := correlateStaticBusinessFlow(tenant, sourceID, snapshotID, members, budget)
+	if err != nil {
+		return nil, err
+	}
+	relations = append(relations, flowRelations...)
 
 	sort.SliceStable(relations, func(i, j int) bool {
 		a, b := relations[i], relations[j]
 		return fmt.Sprintf("%s|%s|%09d|%s|%s", a.FromPath, a.Kind, rangeStart(a.FromRange), a.ToPath, a.ToKey) <
 			fmt.Sprintf("%s|%s|%09d|%s|%s", b.FromPath, b.Kind, rangeStart(b.FromRange), b.ToPath, b.ToKey)
 	})
-	return relations
+	return relations, nil
 }
 
-func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, members []SourceRelationMember) []types.SourceCodeRelation {
+func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, members []SourceRelationMember,
+	budget *sourceRelationFactCapacityBudget) ([]types.SourceCodeRelation, error) {
 	typeDeclarations := map[string][]factOwner{}
 	methods := map[string][]factOwner{}
 	methodsByType := map[string][]factOwner{}
@@ -553,12 +574,18 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 		methodSet, methodRestricted, methodUncertain := springMethodConstraint(fact)
 		prefixes := classRoutes[fact.Namespace]
 		if len(prefixes) == 0 {
+			if err := budget.reserveRouteCandidateCopies(1); err != nil {
+				return nil, err
+			}
 			endpoints = append(endpoints, sourceRouteEndpoint{owner: mapping, path: normalizeSourceRoute(fact.RoutePath),
 				methods: methodSet, methodRestricted: methodRestricted, methodUncertain: methodUncertain,
 				uncertain: fact.Dynamic || fact.Certainty == "uncertain"})
 			continue
 		}
 		for _, prefix := range prefixes {
+			if err := budget.addRouteWork(1); err != nil {
+				return nil, err
+			}
 			if prefix.fact.RoutePath == "" {
 				continue
 			}
@@ -568,9 +595,17 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			if !hasMethods {
 				continue
 			}
+			if err := budget.reserveRouteCandidateCopies(1); err != nil {
+				return nil, err
+			}
 			var supportingFacts []types.SourceRelationFactRef
 			if !sourceFactRangeCoveredBySameMember(mapping, prefix) {
-				supportingFacts = []types.SourceRelationFactRef{sourceRelationFactRef(sourceID, snapshotID, prefix, "spring_class_mapping")}
+				var err error
+				supportingFacts, err = sourceRelationFactRefsWithBudget(budget,
+					sourceRelationFactRef(sourceID, snapshotID, prefix, "spring_class_mapping"))
+				if err != nil {
+					return nil, err
+				}
 			}
 			endpoints = append(endpoints, sourceRouteEndpoint{owner: mapping,
 				path:    normalizeSourceRoute(joinSourceRoute(prefix.fact.RoutePath, fact.RoutePath)),
@@ -596,8 +631,14 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 		requestRoutes := []sourceRequestRoute{{path: normalizeSourceRoute(fact.RoutePath)}}
 		var moduleProxies []factOwner
 		for _, proxy := range apiProxies {
+			if err := budget.addRouteWork(1); err != nil {
+				return nil, err
+			}
 			root := proxy.fact.OwnerName
 			if root != "" && sourcePathWithin(request.member.Path, root) {
+				if err := budget.reserveRouteCandidateCopies(1); err != nil {
+					return nil, err
+				}
 				moduleProxies = append(moduleProxies, proxy)
 			}
 		}
@@ -606,11 +647,17 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			// Configurations in sibling applications must not rewrite this request.
 			requestRoutes = nil
 			for _, prefix := range apiPrefixes {
+				if err := budget.addRouteWork(1); err != nil {
+					return nil, err
+				}
 				prefixFact := prefix.fact
 				if prefixFact.RoutePath == "" || prefixFact.Dynamic || !strings.HasPrefix(prefixFact.RoutePath, "/") {
 					continue
 				}
 				for _, proxy := range moduleProxies {
+					if err := budget.addRouteWork(1); err != nil {
+						return nil, err
+					}
 					proxyFact := proxy.fact
 					if !sourcePathWithin(prefix.member.Path, proxyFact.OwnerName) {
 						continue
@@ -628,36 +675,59 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 					}
 					resolvedPath := normalizeSourceRoute(joinSourceRoute(proxyFact.RoutePath,
 						joinSourceRoute(proxyFact.Namespace, remainder)))
+					supportingFacts, err := sourceRelationFactRefsWithBudget(budget,
+						sourceRelationFactRef(sourceID, snapshotID, prefix, "api_prefix"),
+						sourceRelationFactRef(sourceID, snapshotID, proxy, "api_proxy"))
+					if err != nil {
+						return nil, err
+					}
+					if err := budget.reserveRouteCandidateCopies(1); err != nil {
+						return nil, err
+					}
 					requestRoutes = append(requestRoutes, sourceRequestRoute{path: resolvedPath, uncertain: prefixFact.Certainty != "certain",
-						reason: "frontend prefix or proxy transformation is conditional or unverified",
-						supportingFacts: []types.SourceRelationFactRef{
-							sourceRelationFactRef(sourceID, snapshotID, prefix, "api_prefix"),
-							sourceRelationFactRef(sourceID, snapshotID, proxy, "api_proxy"),
-						}})
+						reason:          "frontend prefix or proxy transformation is conditional or unverified",
+						supportingFacts: supportingFacts})
 				}
 			}
-			requestRoutes = uniqueRequestRoutes(requestRoutes)
+			var err error
+			requestRoutes, err = uniqueRequestRoutes(requestRoutes, budget)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if len(requestRoutes) == 0 {
 			relations = append(relations, requestOnlyRoute("No statically validated backend route relationship was found for this request"))
 			continue
 		}
+		var err error
 		var candidates []sourceRouteEndpoint
 		for _, requestRoute := range requestRoutes {
 			for _, endpoint := range endpoints {
+				if err := budget.addRouteWork(1); err != nil {
+					return nil, err
+				}
 				exactRoute := endpoint.path == requestRoute.path
 				legacySuffix := endpoint.path == normalizeSourceRoute(strings.TrimSuffix(requestRoute.path, ".do"))
 				methodMatches, methodUncertain := springRouteMethodMatch(endpoint, fact.HTTPMethod)
 				if (!exactRoute && !legacySuffix) || !methodMatches {
 					continue
 				}
+				if err := budget.reserveRouteCandidateCopies(1); err != nil {
+					return nil, err
+				}
 				candidate := endpoint
 				candidate.uncertain = endpoint.uncertain || requestRoute.uncertain || methodUncertain || (legacySuffix && !exactRoute)
-				candidate.supportingFacts = mergeSourceRelationFactRefs(endpoint.supportingFacts, requestRoute.supportingFacts)
+				candidate.supportingFacts, err = mergeSourceRelationFactRefsWithBudget(endpoint.supportingFacts, requestRoute.supportingFacts, budget)
+				if err != nil {
+					return nil, err
+				}
 				candidates = append(candidates, candidate)
 			}
 		}
-		candidates = uniqueRouteEndpoints(candidates)
+		candidates, err = uniqueRouteEndpoints(candidates, budget)
+		if err != nil {
+			return nil, err
+		}
 		if len(candidates) == 0 {
 			relations = append(relations, requestOnlyRoute("No statically validated backend route relationship was found for this request"))
 			continue
@@ -666,7 +736,9 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			relation := sourceFactRelation(tenant, sourceID, snapshotID, "http_route",
 				request.member, fact, fromKey,
 				&candidates[0].owner, springEndpointKey(candidates[0].owner.fact, candidates[0].path), "certain", "")
-			setSourceRelationFactRefs(&relation, candidates[0].supportingFacts)
+			if err := setSourceRelationFactRefsWithBudget(&relation, candidates[0].supportingFacts, budget); err != nil {
+				return nil, err
+			}
 			relations = append(relations, relation)
 			continue
 		}
@@ -682,13 +754,18 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			relation.ToKey = springEndpointKey(candidates[0].owner.fact, candidates[0].path)
 			var supportingFacts []types.SourceRelationFactRef
 			for _, candidate := range candidates {
-				supportingFacts = mergeSourceRelationFactRefs(supportingFacts, candidate.supportingFacts)
+				supportingFacts, err = mergeSourceRelationFactRefsWithBudget(supportingFacts, candidate.supportingFacts, budget)
+				if err != nil {
+					return nil, err
+				}
 			}
-			setSourceRelationFactRefs(&relation, supportingFacts)
+			if err := setSourceRelationFactRefsWithBudget(&relation, supportingFacts, budget); err != nil {
+				return nil, err
+			}
 			relations = append(relations, relation)
 		}
 	}
-	return relations
+	return relations, nil
 }
 
 func sourcePathWithin(filePath, directory string) bool {
@@ -823,7 +900,10 @@ func sourceMemberVersionKey(member SourceRelationMember) string {
 	return member.FileID + "\x00" + member.VersionID
 }
 
-func uniqueRequestRoutes(routes []sourceRequestRoute) []sourceRequestRoute {
+func uniqueRequestRoutes(routes []sourceRequestRoute, budget *sourceRelationFactCapacityBudget) ([]sourceRequestRoute, error) {
+	if err := budget.reserveRouteCandidateCopies(int64(len(routes))); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]int, len(routes))
 	unique := make([]sourceRequestRoute, 0, len(routes))
 	for _, route := range routes {
@@ -833,16 +913,23 @@ func uniqueRequestRoutes(routes []sourceRequestRoute) []sourceRequestRoute {
 			if unique[index].reason == "" {
 				unique[index].reason = route.reason
 			}
-			unique[index].supportingFacts = mergeSourceRelationFactRefs(unique[index].supportingFacts, route.supportingFacts)
+			var err error
+			unique[index].supportingFacts, err = mergeSourceRelationFactRefsWithBudget(unique[index].supportingFacts, route.supportingFacts, budget)
+			if err != nil {
+				return nil, err
+			}
 			continue
 		}
 		seen[key] = len(unique)
 		unique = append(unique, route)
 	}
-	return unique
+	return unique, nil
 }
 
-func uniqueRouteEndpoints(endpoints []sourceRouteEndpoint) []sourceRouteEndpoint {
+func uniqueRouteEndpoints(endpoints []sourceRouteEndpoint, budget *sourceRelationFactCapacityBudget) ([]sourceRouteEndpoint, error) {
+	if err := budget.reserveRouteCandidateCopies(int64(len(endpoints))); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]int, len(endpoints))
 	unique := make([]sourceRouteEndpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
@@ -850,13 +937,17 @@ func uniqueRouteEndpoints(endpoints []sourceRouteEndpoint) []sourceRouteEndpoint
 			strings.Join(endpoint.methods, ",") + fmt.Sprint(endpoint.methodRestricted) + fmt.Sprint(endpoint.methodUncertain)
 		if index, exists := seen[key]; exists {
 			unique[index].uncertain = unique[index].uncertain || endpoint.uncertain
-			unique[index].supportingFacts = mergeSourceRelationFactRefs(unique[index].supportingFacts, endpoint.supportingFacts)
+			var err error
+			unique[index].supportingFacts, err = mergeSourceRelationFactRefsWithBudget(unique[index].supportingFacts, endpoint.supportingFacts, budget)
+			if err != nil {
+				return nil, err
+			}
 			continue
 		}
 		seen[key] = len(unique)
 		unique = append(unique, endpoint)
 	}
-	return unique
+	return unique, nil
 }
 
 func sourceRelationFactRef(sourceID, snapshotID string, owner factOwner, role string) types.SourceRelationFactRef {
@@ -890,9 +981,54 @@ func mergeSourceRelationFactRefs(existing, incoming []types.SourceRelationFactRe
 	return merged
 }
 
-func setSourceRelationFactRefs(relation *types.SourceCodeRelation, refs []types.SourceRelationFactRef) {
+func sourceRelationFactRefsWithBudget(budget *sourceRelationFactCapacityBudget,
+	refs ...types.SourceRelationFactRef) ([]types.SourceRelationFactRef, error) {
+	if err := budget.addRefs(int64(len(refs))); err != nil {
+		return nil, err
+	}
+	return append([]types.SourceRelationFactRef(nil), refs...), nil
+}
+
+func mergeSourceRelationFactRefsWithBudget(existing, incoming []types.SourceRelationFactRef,
+	budget *sourceRelationFactCapacityBudget) ([]types.SourceRelationFactRef, error) {
+	if budget == nil {
+		return mergeSourceRelationFactRefs(existing, incoming), nil
+	}
+	capacity := min(len(existing)+len(incoming), sourceRelationFactRefMaxCount+1)
+	seen := make(map[types.SourceRelationFactRef]struct{}, capacity)
+	merged := make([]types.SourceRelationFactRef, 0, min(capacity, sourceRelationFactRefMaxCount))
+	for _, group := range [][]types.SourceRelationFactRef{existing, incoming} {
+		for _, ref := range group {
+			if _, exists := seen[ref]; exists {
+				continue
+			}
+			if len(merged) >= sourceRelationFactRefMaxCount {
+				return nil, &SourceRelationFactCapacityError{
+					Budget: "per-route refs", Used: int64(len(merged)), Requested: 1, Limit: sourceRelationFactRefMaxCount,
+				}
+			}
+			if err := budget.addRefs(1); err != nil {
+				return nil, err
+			}
+			seen[ref] = struct{}{}
+			merged = append(merged, ref)
+		}
+	}
+	return merged, nil
+}
+
+func setSourceRelationFactRefsWithBudget(relation *types.SourceCodeRelation, refs []types.SourceRelationFactRef,
+	budget *sourceRelationFactCapacityBudget) error {
 	if relation == nil || len(refs) == 0 {
-		return
+		return nil
+	}
+	if budget != nil && len(refs) > sourceRelationFactRefMaxCount {
+		return &SourceRelationFactCapacityError{
+			Budget: "per-route refs", Requested: int64(len(refs)), Limit: sourceRelationFactRefMaxCount,
+		}
+	}
+	if err := budget.addRefs(int64(len(refs))); err != nil {
+		return err
 	}
 	ordered := append([]types.SourceRelationFactRef(nil), refs...)
 	sort.Slice(ordered, func(i, j int) bool {
@@ -916,10 +1052,27 @@ func setSourceRelationFactRefs(relation *types.SourceCodeRelation, refs []types.
 		}
 		return false
 	})
-	encoded, err := json.Marshal(ordered)
+	if budget == nil {
+		encoded, err := json.Marshal(ordered)
+		if err == nil {
+			relation.Context = types.JSON(encoded)
+		}
+		return err
+	}
+	upperBound := sourceRelationFactRefsEncodedUpperBound(ordered)
+	if upperBound > sourceRelationFactContextMax {
+		return &SourceRelationFactCapacityError{
+			Budget: "serialized context bytes", Requested: upperBound, Limit: sourceRelationFactContextMax,
+		}
+	}
+	if err := budget.addContextBytes(upperBound); err != nil {
+		return err
+	}
+	encoded, err := marshalSourceRelationFactRefsBounded(ordered)
 	if err == nil {
 		relation.Context = types.JSON(encoded)
 	}
+	return err
 }
 
 func flattenFactOwners(values map[string][]factOwner) []factOwner {

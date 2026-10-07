@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -25,20 +26,47 @@ func TestLoadSourceWikiImpactSnapshotClassifiesFactBudgetFailureBeforeLoadingRow
 	assertSourceWikiImpactMockExpectations(t, mock)
 }
 
+func TestLoadSourceWikiImpactSnapshotClassifiesMemberBudgetsBeforeLoadingRows(t *testing.T) {
+	tests := []struct {
+		name          string
+		metadataBytes int64
+		factBytes     int64
+		wantReason    SourceWikiImpactLoadReasonCode
+	}{
+		{name: "member metadata", metadataBytes: types.SourceWikiImpactMaxMemberMetadataBytes + 1, wantReason: SourceWikiImpactReasonMemberMetadataBytesExceeded},
+		{name: "facts on excluded members", factBytes: types.SourceWikiImpactMaxFactBytes + 1, wantReason: SourceWikiImpactReasonFactBytesExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock := newSourceWikiImpactLoaderMock(t)
+			expectSourceWikiImpactSnapshot(mock, true, 1, true, 0)
+			expectSourceWikiImpactMemberInventory(mock, test.metadataBytes, test.factBytes, 0)
+
+			snapshot, loaded, err := LoadSourceWikiImpactSnapshot(db, 7, "kb-one", "source-one", "snapshot-one",
+				types.SourceWikiImpactPublishedComplete)
+			assertSourceWikiImpactLoadFailure(t, snapshot, loaded, err,
+				SourceWikiImpactLoadFailureBudgetExceeded, test.wantReason, ErrSourceWikiImpactLoadBudgetExceeded)
+			assertSourceWikiImpactMockExpectations(t, mock)
+		})
+	}
+}
+
 func TestLoadSourceWikiImpactSnapshotClassifiesPreflightBudgetFailures(t *testing.T) {
 	tests := []struct {
-		name         string
-		members      int
-		relations    int
-		factBytes    int64
-		factCount    int64
-		contextBytes int64
-		wantReason   SourceWikiImpactLoadReasonCode
+		name          string
+		members       int
+		relations     int
+		factBytes     int64
+		factCount     int64
+		contextBytes  int64
+		relationBytes int64
+		wantReason    SourceWikiImpactLoadReasonCode
 	}{
 		{name: "member count", members: types.SourceWikiSkeletonMaxFiles + 1, wantReason: SourceWikiImpactReasonMemberCountExceeded},
 		{name: "relation count", relations: types.SourceWikiSkeletonMaxRelations + 1, wantReason: SourceWikiImpactReasonRelationCountExceeded},
 		{name: "fact bytes", factBytes: types.SourceWikiImpactMaxFactBytes + 1, wantReason: SourceWikiImpactReasonFactBytesExceeded},
 		{name: "relation context bytes", contextBytes: types.SourceWikiImpactMaxContextBytes + 1, wantReason: SourceWikiImpactReasonRelationBytesExceeded},
+		{name: "relation total bytes", relationBytes: types.SourceWikiImpactMaxRelationBytes + 1, wantReason: SourceWikiImpactReasonRelationTotalBytesExceeded},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -47,7 +75,7 @@ func TestLoadSourceWikiImpactSnapshotClassifiesPreflightBudgetFailures(t *testin
 			if test.members <= types.SourceWikiSkeletonMaxFiles && test.relations <= types.SourceWikiSkeletonMaxRelations {
 				expectSourceWikiImpactFactInventory(mock, test.factBytes, test.factCount)
 				if test.factBytes <= types.SourceWikiImpactMaxFactBytes && test.factCount <= types.SourceWikiImpactMaxFacts {
-					expectSourceWikiImpactContextBytes(mock, test.contextBytes)
+					expectSourceWikiImpactRelationBounds(mock, test.contextBytes, test.relationBytes)
 				}
 			}
 
@@ -86,7 +114,7 @@ func TestLoadSourceWikiImpactSnapshotClassifiesIncompleteProof(t *testing.T) {
 			expectSourceWikiImpactSnapshot(mock, test.manifest, test.memberCount, test.relations, test.relationCount)
 			if test.manifest && test.relations && test.memberCount <= types.SourceWikiSkeletonMaxFiles && test.relationCount <= types.SourceWikiSkeletonMaxRelations {
 				expectSourceWikiImpactFactInventory(mock, 0, 0)
-				expectSourceWikiImpactContextBytes(mock, 0)
+				expectSourceWikiImpactRelationBounds(mock, 0, 0)
 				expectSourceWikiImpactMemberRows(mock, test.memberRows)
 				if test.wantReason == SourceWikiImpactReasonRelationCountMismatch {
 					expectSourceWikiImpactRelationRows(mock, sqlmock.NewRows([]string{"id"}))
@@ -106,7 +134,7 @@ func TestLoadSourceWikiImpactSnapshotClassifiesInvalidMaterializedFacts(t *testi
 	db, mock := newSourceWikiImpactLoaderMock(t)
 	expectSourceWikiImpactSnapshot(mock, true, 1, true, 0)
 	expectSourceWikiImpactFactInventory(mock, 2, 0)
-	expectSourceWikiImpactContextBytes(mock, 0)
+	expectSourceWikiImpactRelationBounds(mock, 0, 0)
 	expectSourceWikiImpactMemberRows(mock, sourceWikiImpactMemberRows().AddRow(
 		"app/A.java", "file-one", "version-one", "", "parsed", false,
 		"file-one", uint64(7), "kb-one", "source-one", "version-one", "file-one",
@@ -123,7 +151,7 @@ func TestLoadSourceWikiImpactSnapshotKeepsMissingParserMetadataTyped(t *testing.
 	db, mock := newSourceWikiImpactLoaderMock(t)
 	expectSourceWikiImpactSnapshot(mock, true, 1, true, 0)
 	expectSourceWikiImpactFactInventory(mock, 2, 0)
-	expectSourceWikiImpactContextBytes(mock, 0)
+	expectSourceWikiImpactRelationBounds(mock, 0, 0)
 	expectSourceWikiImpactMemberRows(mock, sourceWikiImpactMemberRows().AddRow(
 		"app/A.java", "file-one", "version-one", "", "parsed", false,
 		"file-one", uint64(7), "kb-one", "source-one", "version-one", "file-one",
@@ -149,7 +177,7 @@ func TestLoadSourceWikiImpactSnapshotKeepsOperationalErrorsUntyped(t *testing.T)
 	t.Run("cancelled database read", func(t *testing.T) {
 		db, mock := newSourceWikiImpactLoaderMock(t)
 		expectSourceWikiImpactSnapshot(mock, true, 0, true, 0)
-		mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH\(sv\.facts::text\).*FROM source_snapshot_members sm.*`).
+		mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH.*sv\.facts::text.*FROM source_snapshot_members sm.*`).
 			WillReturnError(context.Canceled)
 		snapshot, loaded, err := LoadSourceWikiImpactSnapshot(db, 7, "kb-one", "source-one", "snapshot-one",
 			types.SourceWikiImpactPublishedComplete)
@@ -166,8 +194,8 @@ func TestLoadSourceWikiImpactSnapshotKeepsOperationalErrorsUntyped(t *testing.T)
 func TestLoadSourceWikiImpactSnapshotPreservesParsedAndExcludedMembers(t *testing.T) {
 	db, mock := newSourceWikiImpactLoaderMock(t)
 	expectSourceWikiImpactSnapshot(mock, true, 2, true, 0)
-	expectSourceWikiImpactFactInventory(mock, 2, 0)
-	expectSourceWikiImpactContextBytes(mock, 0)
+	expectSourceWikiImpactMemberInventory(mock, 175, 2, 0)
+	expectSourceWikiImpactRelationBounds(mock, 0, 0)
 	expectSourceWikiImpactMemberRows(mock, sourceWikiImpactMemberRows().
 		AddRow("app/A.java", "file-one", "version-one", "", "parsed", false,
 			"file-one", uint64(7), "kb-one", "source-one", "version-one", "file-one",
@@ -191,6 +219,57 @@ func TestLoadSourceWikiImpactSnapshotPreservesParsedAndExcludedMembers(t *testin
 	assertSourceWikiImpactMockExpectations(t, mock)
 }
 
+func TestLoadSourceWikiImpactSnapshotWithRelationInventoryReusesAndVerifiesRows(t *testing.T) {
+	relationTime := time.Date(2026, time.October, 7, 12, 0, 0, 0, time.UTC)
+	relation := types.SourceCodeRelation{
+		ID: "relation-one", TenantID: 7, DataSourceID: "source-one", SnapshotID: "snapshot-one",
+		Kind: "http_route", FromFileID: "file-one", FromVersionID: "version-one", FromPath: "app/A.vue",
+		FromKey: "GET /api/a", FromRange: types.JSON(`{"start":1}`), ToFileID: "", ToVersionID: "",
+		ToPath: "", ToKey: "", ToRange: types.JSON(`{}`), Determinacy: "uncertain", Quality: "structural",
+		ResolutionReason: "unmatched", Context: types.JSON(`[]`), CreatedAt: relationTime,
+	}
+	for _, mismatch := range []bool{false, true} {
+		name := "matches"
+		inventoryRelation := relation
+		if mismatch {
+			name = "mismatch fails closed"
+			inventoryRelation.FromPath = "other.vue"
+		}
+		t.Run(name, func(t *testing.T) {
+			db, mock := newSourceWikiImpactLoaderMock(t)
+			expectSourceWikiImpactSnapshot(mock, true, 0, true, 1)
+			expectSourceWikiImpactFactInventory(mock, 0, 0)
+			expectSourceWikiImpactRelationBounds(mock, int64(len(relation.Context)), sourceWikiRelationVariableBytes(relation))
+			expectSourceWikiImpactMemberRows(mock, sourceWikiImpactMemberRows())
+			expectSourceWikiImpactRelationRows(mock, sourceWikiImpactRelationRows().AddRow(
+				relation.ID, relation.TenantID, relation.DataSourceID, relation.SnapshotID, relation.Kind,
+				relation.FromFileID, relation.FromVersionID, relation.FromPath, relation.FromKey, []byte(relation.FromRange),
+				relation.ToFileID, relation.ToVersionID, relation.ToPath, relation.ToKey, []byte(relation.ToRange),
+				relation.Determinacy, relation.Quality, relation.ResolutionReason, []byte(relation.Context), relation.CreatedAt))
+			inventory := &SourceWikiRelationInventory{
+				TenantID: 7, KnowledgeBaseID: "kb-one", DataSourceID: "source-one", SnapshotID: "snapshot-one",
+				ExpectedCount: 1, RelationsComplete: true, Relations: []types.SourceCodeRelation{inventoryRelation},
+			}
+
+			snapshot, loaded, err := LoadSourceWikiImpactSnapshotWithRelationInventory(db, 7, "kb-one", "source-one", "snapshot-one",
+				types.SourceWikiImpactPublishedComplete, inventory)
+			if mismatch {
+				assertSourceWikiImpactLoadFailure(t, snapshot, loaded, err,
+					SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonRelationInventoryChanged, ErrSourceWikiImpactProofIncomplete)
+			} else {
+				if err != nil {
+					t.Fatalf("load exact bounded relation inventory: %v", err)
+				}
+				if len(snapshot.Relations) != 1 || loaded == nil || len(loaded.Relations) != 1 ||
+					&snapshot.Relations[0] != &inventory.Relations[0] || &loaded.Relations[0] != &inventory.Relations[0] {
+					t.Fatal("impact snapshot must reuse the single verified relation inventory")
+				}
+			}
+			assertSourceWikiImpactMockExpectations(t, mock)
+		})
+	}
+}
+
 func TestLoadSourceWikiImpactSnapshotKeepsForeignFileScopeOperational(t *testing.T) {
 	for _, status := range []string{"parsed", "excluded"} {
 		for _, scope := range []string{"tenant", "kb", "source"} {
@@ -209,7 +288,7 @@ func TestLoadSourceWikiImpactSnapshotKeepsForeignFileScopeOperational(t *testing
 					fileVersionID, contentSHA, parserVersion, quality = "", "", "", ""
 				}
 				expectSourceWikiImpactFactInventory(mock, factBytes, 0)
-				expectSourceWikiImpactContextBytes(mock, 0)
+				expectSourceWikiImpactRelationBounds(mock, 0, 0)
 				fileTenantID, fileKBID, fileSourceID := uint64(7), "kb-one", "source-one"
 				switch scope {
 				case "tenant":
@@ -241,13 +320,17 @@ func expectSourceWikiImpactSnapshot(mock sqlmock.Sqlmock, manifestComplete bool,
 }
 
 func expectSourceWikiImpactFactInventory(mock sqlmock.Sqlmock, factBytes, factCount int64) {
-	mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH\(sv\.facts::text\).*jsonb_typeof\(sv\.facts\).*FROM source_snapshot_members sm.*`).
-		WillReturnRows(sqlmock.NewRows([]string{"fact_bytes", "fact_count"}).AddRow(factBytes, factCount))
+	expectSourceWikiImpactMemberInventory(mock, 0, factBytes, factCount)
 }
 
-func expectSourceWikiImpactContextBytes(mock sqlmock.Sqlmock, contextBytes int64) {
-	mock.ExpectQuery(`SELECT COALESCE\(SUM\(OCTET_LENGTH\(context::text\)\), 0\) FROM "source_code_relations".*`).
-		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(contextBytes))
+func expectSourceWikiImpactMemberInventory(mock sqlmock.Sqlmock, metadataBytes, factBytes, factCount int64) {
+	mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH.*sm\.path.*sv\.facts::text.*jsonb_typeof\(sv\.facts\).*FROM source_snapshot_members sm.*`).
+		WillReturnRows(sqlmock.NewRows([]string{"metadata_bytes", "fact_bytes", "fact_count"}).AddRow(metadataBytes, factBytes, factCount))
+}
+
+func expectSourceWikiImpactRelationBounds(mock sqlmock.Sqlmock, contextBytes, relationBytes int64) {
+	mock.ExpectQuery(`(?s)SELECT.*OCTET_LENGTH.*context::text.*from_path.*from_key.*to_path.*to_key.*resolution_reason.*from_range.*to_range.*FROM "source_code_relations".*`).
+		WillReturnRows(sqlmock.NewRows([]string{"context_bytes", "relation_bytes"}).AddRow(contextBytes, relationBytes))
 }
 
 func expectSourceWikiImpactMemberRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
@@ -256,6 +339,14 @@ func expectSourceWikiImpactMemberRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) 
 
 func expectSourceWikiImpactRelationRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
 	mock.ExpectQuery(`SELECT \* FROM "source_code_relations".*`).WillReturnRows(rows)
+}
+
+func sourceWikiImpactRelationRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id", "tenant_id", "data_source_id", "snapshot_id", "kind", "from_file_id", "from_version_id",
+		"from_path", "from_key", "from_range", "to_file_id", "to_version_id", "to_path", "to_key",
+		"to_range", "determinacy", "quality", "resolution_reason", "context", "created_at",
+	})
 }
 
 func sourceWikiImpactMemberColumns() []string {

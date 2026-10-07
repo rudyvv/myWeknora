@@ -3,25 +3,27 @@ package types
 import "time"
 
 const (
-	SourceWikiSkeletonMaxFiles         = 50_000
-	SourceWikiSkeletonMaxRelations     = 200_000
-	SourceWikiImpactMaxFacts           = 200_000
-	SourceWikiImpactMaxFactBytes       = 64 << 20
-	SourceWikiImpactMaxContextBytes    = 32 << 20
-	SourceWikiBatchMaxCalls            = 240
-	SourceWikiBatchMaxTokens           = 4_000_000
-	SourceWikiBatchMaxElapsed          = time.Hour
-	SourceWikiBatchQAMaxElapsed        = 5 * time.Minute
-	SourceWikiBatchMaxInitialTopics    = 40
-	SourceWikiBatchMaxCompletionTokens = 4096
-	SourceWikiBatchMinInputTokens      = 4096
-	SourceWikiBatchMaxCandidates       = 100000
-	SourceWikiBatchSkeletonMaxCalls    = 6
-	SourceWikiBatchSkeletonMaxTokens   = 120_000
-	SourceWikiBatchQAMaxCalls          = 12
-	SourceWikiBatchQAMaxTokens         = 240_000
-	SourceWikiBatchChildMaxCalls       = 18
-	SourceWikiBatchChildMaxTokens      = 360_000
+	SourceWikiSkeletonMaxFiles             = 50_000
+	SourceWikiSkeletonMaxRelations         = 200_000
+	SourceWikiImpactMaxFacts               = 200_000
+	SourceWikiImpactMaxFactBytes           = 64 << 20
+	SourceWikiImpactMaxContextBytes        = 32 << 20
+	SourceWikiImpactMaxRelationBytes       = 32 << 20
+	SourceWikiImpactMaxMemberMetadataBytes = 32 << 20
+	SourceWikiBatchMaxCalls                = 240
+	SourceWikiBatchMaxTokens               = 4_000_000
+	SourceWikiBatchMaxElapsed              = time.Hour
+	SourceWikiBatchQAMaxElapsed            = 5 * time.Minute
+	SourceWikiBatchMaxInitialTopics        = 40
+	SourceWikiBatchMaxCompletionTokens     = 4096
+	SourceWikiBatchMinInputTokens          = 4096
+	SourceWikiBatchMaxCandidates           = 100000
+	SourceWikiBatchSkeletonMaxCalls        = 6
+	SourceWikiBatchSkeletonMaxTokens       = 120_000
+	SourceWikiBatchQAMaxCalls              = 12
+	SourceWikiBatchQAMaxTokens             = 240_000
+	SourceWikiBatchChildMaxCalls           = 18
+	SourceWikiBatchChildMaxTokens          = 360_000
 )
 
 type SourceWikiSkeletonFile struct {

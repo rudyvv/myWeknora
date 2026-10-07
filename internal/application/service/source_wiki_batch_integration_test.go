@@ -26,7 +26,28 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+type sourceWikiBatchSQLCapture struct {
+	logger.Interface
+	mu      sync.Mutex
+	queries []string
+}
+
+func (c *sourceWikiBatchSQLCapture) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	query, rows := fc()
+	c.mu.Lock()
+	c.queries = append(c.queries, query)
+	c.mu.Unlock()
+	c.Interface.Trace(ctx, begin, func() (string, int64) { return query, rows }, err)
+}
+
+func (c *sourceWikiBatchSQLCapture) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.queries...)
+}
 
 func newSourceWikiBatchLedgerFixture(t *testing.T, f *javaSourceFixture) *repository.SourceWikiBatchLedger {
 	t.Helper()
@@ -453,9 +474,6 @@ func TestSourceWikiBatchPreflightPinsPublishedInputsWithoutCreatingOrDispatching
 		providerCalls.Add(1)
 		return `{}`
 	})
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 
 	model, err := f.modelService.GetModelByID(f.ctx, f.kb.SummaryModelID)
 	require.NoError(t, err)
@@ -467,10 +485,25 @@ func TestSourceWikiBatchPreflightPinsPublishedInputsWithoutCreatingOrDispatching
 		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
 	})
 	require.True(t, ok, "source Wiki exposes batch preflight through its public interface")
-	result, err := preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
-	require.NoError(t, err)
+	wikiService := generator.(*sourceWikiService)
 	var publication types.SourcePublication
 	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	legacySnapshot, err := repository.LoadSourceWikiSkeletonSnapshot(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.NoError(t, err)
+	legacyRelations, err := wikiService.resolveSourceWikiRelations(f.ctx, f.kb.TenantID, f.kb.ID, f.ds.ID,
+		publication.SnapshotID, legacySnapshot, legacySnapshot.Relations)
+	require.NoError(t, err)
+	legacyFiles := make([]sourceWikiSkeletonFile, 0, len(legacySnapshot.Files))
+	for _, file := range legacySnapshot.Files {
+		legacyFiles = append(legacyFiles, sourceWikiSkeletonFile{Path: file.Path, Generated: file.Generated, Facts: file.Facts})
+	}
+	legacyPlan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
+		SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, Files: legacyFiles, Relations: legacyRelations,
+	}, types.SourceWikiBatchMaxInitialTopics)
+	capture := &sourceWikiBatchSQLCapture{Interface: logger.Default.LogMode(logger.Silent)}
+	wikiService.db = f.db.Session(&gorm.Session{Logger: capture})
+	result, err := preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.NoError(t, err)
 	require.True(t, result.PreflightPassed)
 	require.True(t, result.StartAvailable, "the T17-backed bounded topic runner is available for a confirmed context window")
 	require.Equal(t, f.ds.ID, result.SourceID)
@@ -486,6 +519,30 @@ func TestSourceWikiBatchPreflightPinsPublishedInputsWithoutCreatingOrDispatching
 	require.LessOrEqual(t, len(result.InitialTopics), types.SourceWikiBatchMaxInitialTopics)
 	require.NotEmpty(t, result.SourceConfigFingerprint)
 	require.NotEmpty(t, result.ModelSettingsFingerprint)
+	var legacyModules, preflightModules []types.SourceWikiTopic
+	for _, topic := range legacyPlan.Topics {
+		if topic.Kind == sourceWikiTopicModule {
+			legacyModules = append(legacyModules, topic)
+		}
+	}
+	for _, topic := range result.PlannedTopics {
+		if topic.Kind == sourceWikiTopicModule {
+			preflightModules = append(preflightModules, topic)
+		}
+	}
+	require.Equal(t, legacyModules, preflightModules, "projection seeds preserve the ordinary module candidate plan")
+	pageQueries, fullFactQueries := 0, 0
+	for _, query := range capture.snapshot() {
+		normalized := strings.ToLower(strings.Join(strings.Fields(query), " "))
+		if strings.Contains(normalized, "jsonb_array_elements") && strings.Contains(normalized, "limit 128") {
+			pageQueries++
+		}
+		if strings.Contains(normalized, "sm.generated, sv.facts") {
+			fullFactQueries++
+		}
+	}
+	require.NotZero(t, pageQueries, "public preflight uses the bounded module projection")
+	require.Zero(t, fullFactQueries, "module planning does not load full parser facts without an HTTP route")
 	encoded, err := json.Marshal(result)
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "source_config_fingerprint")
@@ -528,6 +585,130 @@ func TestSourceWikiBatchPreflightPinsPublishedInputsWithoutCreatingOrDispatching
 	require.NoError(t, f.db.Where("id = ?", previous.ID).Take(&persistedPrevious).Error)
 	require.Equal(t, "failed", persistedPrevious.Status, "restart planning never resets or resumes the prior budget")
 	require.Zero(t, providerCalls.Load())
+}
+
+func TestSourceWikiBatchPreflightRejectsIncompleteInventoriesWithoutWikiWrites(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var providerCalls atomic.Int32
+	_, generator := newSourceWikiFixture(t, f, func(bool) string {
+		providerCalls.Add(1)
+		return `{}`
+	})
+	preflight := generator.(interface {
+		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
+	})
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	var snapshot types.SourceSnapshot
+	require.NoError(t, f.db.Where("id = ?", publication.SnapshotID).Take(&snapshot).Error)
+	assertNoWikiWrites := func() {
+		t.Helper()
+		for _, table := range []string{"source_wiki_batches", "source_wiki_topics", "wiki_pages", "wiki_page_revisions"} {
+			var count int64
+			require.NoError(t, f.db.Table(table).Where("knowledge_base_id = ?", f.kb.ID).Count(&count).Error)
+			require.Zero(t, count, "%s must remain untouched by preflight", table)
+		}
+		require.Zero(t, providerCalls.Load(), "preflight failures do not dispatch a model call")
+	}
+
+	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", snapshot.ID).
+		Update("relation_count", types.SourceWikiSkeletonMaxRelations+1).Error)
+	_, err := preflight.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationDeferred)
+	assertNoWikiWrites()
+	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", snapshot.ID).
+		Update("relation_count", snapshot.RelationCount).Error)
+
+	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", snapshot.ID).
+		Update("relation_count", snapshot.RelationCount+1).Error)
+	_, err = preflight.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationUnavailable)
+	assertNoWikiWrites()
+	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", snapshot.ID).
+		Update("relation_count", snapshot.RelationCount).Error)
+
+	var member types.SourceSnapshotMember
+	require.NoError(t, f.db.Where("snapshot_id = ? AND status = 'parsed'", snapshot.ID).Order("path ASC").Take(&member).Error)
+	require.NoError(t, f.db.Exec(`UPDATE source_file_versions SET facts = (
+		SELECT jsonb_agg(jsonb_build_object('kind','irrelevant','name','irrelevant','quality','structural'))
+		FROM generate_series(1, ?) AS fact_ordinal
+	) WHERE id = ?`, types.SourceWikiImpactMaxFacts+1, member.FileVersionID).Error)
+	_, err = preflight.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationDeferred)
+	require.ErrorContains(t, err, "200000-fact hard bound")
+	assertNoWikiWrites()
+
+	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
+		QueryText: "getPushSchedule", MatchCount: 10, DisableVectorMatch: true, SourceIDs: []string{f.ds.ID},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits, "a Wiki preflight inventory failure must not disable source search")
+}
+
+func TestSourceWikiBatchCannotStartWithOnlySystemOverview(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	syncSourceFixture(t, f)
+	var providerCalls atomic.Int32
+	_, generator := newSourceWikiFixture(t, f, func(bool) string {
+		providerCalls.Add(1)
+		return `{}`
+	})
+	var publication types.SourcePublication
+	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
+	// Keep the real searchable publication and manifest, but remove its only
+	// structural seeds so this fixture exercises a genuinely system-only plan.
+	require.NoError(t, f.db.Model(&types.SourceFileVersion{}).Where("snapshot_id = ?", publication.SnapshotID).
+		Update("facts", types.JSON(`[]`)).Error)
+	require.NoError(t, f.db.Where("tenant_id = ? AND data_source_id = ? AND snapshot_id = ?", f.kb.TenantID, f.ds.ID, publication.SnapshotID).
+		Delete(&types.SourceCodeRelation{}).Error)
+	require.NoError(t, f.db.Model(&types.SourceSnapshot{}).Where("id = ?", publication.SnapshotID).
+		Update("relation_count", 0).Error)
+
+	service := generator.(*sourceWikiService)
+	readCtx, release, err := beginSourceRead(f.ctx, service.kb, types.SearchTargets{&types.SearchTarget{
+		Type: types.SearchTargetTypeKnowledgeBase, KnowledgeBaseID: f.kb.ID, SourceIDs: []string{f.ds.ID},
+	}})
+	require.NoError(t, err)
+	defer release()
+	projection, err := repository.LoadSourceWikiModuleProjection(readCtx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
+	require.NoError(t, err)
+	require.NotEmpty(t, projection.Members)
+	seedFiles := make([]sourceWikiSkeletonFile, 0, len(projection.Members))
+	for _, member := range projection.Members {
+		require.Nil(t, member.Seed)
+		seedFiles = append(seedFiles, sourceWikiSkeletonFile{Path: member.Path, Generated: member.Generated})
+	}
+	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
+		SourceID: f.ds.ID, SnapshotID: publication.SnapshotID, Files: seedFiles, ModuleSeedFiles: seedFiles,
+	}, types.SourceWikiBatchMaxInitialTopics)
+	require.Len(t, plan.Topics, 1)
+	require.Equal(t, "system", plan.Topics[0].TopicKey)
+	require.Zero(t, plan.ModuleCount)
+	require.Zero(t, plan.FlowCount)
+
+	preflightService := generator.(interface {
+		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
+	})
+	startService := generator.(interface {
+		StartSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatch, error)
+	})
+	_, err = preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationUnavailable)
+	require.ErrorContains(t, err, "no structural module or HTTP flow candidates")
+	_, err = startService.StartSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationUnavailable)
+	for _, table := range []string{"source_wiki_batches", "source_wiki_topics", "wiki_pages", "wiki_page_revisions"} {
+		var count int64
+		require.NoError(t, f.db.Table(table).Where("knowledge_base_id = ?", f.kb.ID).Count(&count).Error)
+		require.Zero(t, count, "%s must remain untouched by a system-only plan", table)
+	}
+	require.Zero(t, providerCalls.Load(), "a system-only plan must not invoke the model")
+	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{
+		QueryText: "getPushSchedule", MatchCount: 10, DisableVectorMatch: true, SourceIDs: []string{f.ds.ID},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits, "unavailable Wiki coverage must leave source search usable")
 }
 
 func TestSourceWikiBatchLocalQAReceivesCompleteCandidateAndEvidenceFromDatabaseCheckpoint(t *testing.T) {
@@ -1533,10 +1714,12 @@ export default { methods: { loadOrders() {
 	require.NoError(t, err)
 	require.True(t, snapshot.Complete)
 	var requestFact *types.ParsedSourceFact
+	var requestFileID, requestVersionID string
 	for _, member := range snapshot.Members {
 		if member.Path != "src/web/Orders.vue" {
 			continue
 		}
+		requestFileID, requestVersionID = member.FileID, member.VersionID
 		for i := range member.Facts {
 			if member.Facts[i].Kind == "api_request" && member.Facts[i].RoutePath == "/api/orders" {
 				requestFact = &member.Facts[i]
@@ -1554,12 +1737,48 @@ export default { methods: { loadOrders() {
 	}
 	require.NotNil(t, publishedAnchor, "whole-repository sync must publish a request-only relation anchor")
 	require.Equal(t, "uncertain", publishedAnchor.Determinacy)
+	require.Equal(t, requestFileID, publishedAnchor.FromFileID)
+	require.Equal(t, requestVersionID, publishedAnchor.FromVersionID)
+	require.Equal(t, "src/web/Orders.vue", publishedAnchor.FromPath)
 	require.Empty(t, publishedAnchor.ToFileID, "the unmatched request must not invent a backend edge")
 	require.Empty(t, publishedAnchor.ToKey)
 	require.Equal(t, "No statically validated backend route relationship was found for this request", publishedAnchor.ResolutionReason)
 	var publishedRange types.SourceRange
 	require.NoError(t, json.Unmarshal(publishedAnchor.FromRange, &publishedRange))
 	require.Equal(t, requestFact.Range, publishedRange)
+
+	preflightService := generator.(interface {
+		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
+	})
+	publicPreview, err := preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.NoError(t, err)
+	var publicFlow *types.SourceWikiTopic
+	for i := range publicPreview.PlannedTopics {
+		if publicPreview.PlannedTopics[i].TopicKey == "flow/GET /api/orders" {
+			publicFlow = &publicPreview.PlannedTopics[i]
+			break
+		}
+	}
+	require.NotNil(t, publicFlow, "public preflight must preserve the unmatched request flow")
+	require.True(t, publicFlow.Uncertain)
+	require.Contains(t, publicFlow.UncertaintyReasons, "No statically validated backend route relationship was found for this request")
+	require.Len(t, publicFlow.Relations, 1)
+	require.Equal(t, "uncertain", publicFlow.Relations[0].Determinacy)
+	var publicRefs []types.SourceRelationFactRef
+	require.NoError(t, json.Unmarshal(publicFlow.Relations[0].Context, &publicRefs))
+	require.Empty(t, publicRefs, "request-only anchors keep causal configuration refs empty; request identity is carried by the relation endpoint")
+	require.Equal(t, publishedAnchor.FromFileID, publicFlow.Relations[0].FromFileID)
+	require.Equal(t, publishedAnchor.FromVersionID, publicFlow.Relations[0].FromVersionID)
+	require.Equal(t, publishedAnchor.FromPath, publicFlow.Relations[0].FromPath)
+	require.Equal(t, publishedAnchor.FromRange, publicFlow.Relations[0].FromRange)
+	var publicRequestRange types.SourceRange
+	require.NoError(t, json.Unmarshal(publicFlow.Relations[0].FromRange, &publicRequestRange))
+	require.Equal(t, requestFact.Range, publicRequestRange)
+	for _, table := range []string{"source_wiki_batches", "source_wiki_topics", "wiki_pages", "wiki_page_revisions"} {
+		var count int64
+		require.NoError(t, f.db.Table(table).Where("knowledge_base_id = ?", f.kb.ID).Count(&count).Error)
+		require.Zero(t, count, "%s must remain untouched by public preflight", table)
+	}
 
 	service := generator.(*sourceWikiService)
 	relations, err := service.resolveSourceWikiRelations(f.ctx, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID, snapshot, []types.SourceCodeRelation{*publishedAnchor})
@@ -1748,6 +1967,47 @@ func TestSourceWikiFlowEvidencePinsParticipatingCrossFileConfigurationFacts(t *t
 	}
 	require.NoError(t, f.db.Where("snapshot_id = ?", publication.SnapshotID).Delete(&types.SourceCodeRelation{}).Error)
 	require.NoError(t, f.db.Create(&route).Error)
+
+	preflightService := generator.(interface {
+		PreflightSourceWikiBatch(context.Context, string, string, types.SourceWikiBatchPreflightRequest) (*types.SourceWikiBatchPreflight, error)
+	})
+	originalRouteContext := append(types.JSON(nil), route.Context...)
+	var tamperedRefs []types.SourceRelationFactRef
+	require.NoError(t, json.Unmarshal(route.Context, &tamperedRefs))
+	require.NotEmpty(t, tamperedRefs)
+	tamperedRefs[0].FileID = uuid.NewString()
+	tamperedContext, err := json.Marshal(tamperedRefs)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Model(&types.SourceCodeRelation{}).Where("id = ?", route.ID).
+		Update("context", types.JSON(tamperedContext)).Error)
+	_, err = preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.ErrorIs(t, err, repository.ErrSourceWikiDerivationUnavailable,
+		"public preflight must resolve exact fact references instead of trusting relation JSON")
+	for _, table := range []string{"source_wiki_batches", "source_wiki_topics", "wiki_pages", "wiki_page_revisions"} {
+		var count int64
+		require.NoError(t, f.db.Table(table).Where("knowledge_base_id = ?", f.kb.ID).Count(&count).Error)
+		require.Zero(t, count, "%s must remain untouched after a failed public preflight", table)
+	}
+	require.NoError(t, f.db.Model(&types.SourceCodeRelation{}).Where("id = ?", route.ID).
+		Update("context", originalRouteContext).Error)
+	publicPreview, err := preflightService.PreflightSourceWikiBatch(f.ctx, f.kb.ID, f.ds.ID, types.SourceWikiBatchPreflightRequest{})
+	require.NoError(t, err)
+	var publicFlow *types.SourceWikiTopic
+	for i := range publicPreview.PlannedTopics {
+		if publicPreview.PlannedTopics[i].TopicKey == "flow/GET /detail" {
+			publicFlow = &publicPreview.PlannedTopics[i]
+			break
+		}
+	}
+	require.NotNil(t, publicFlow, "public preflight must preserve the cross-file HTTP flow candidate")
+	require.Len(t, publicFlow.Relations, 1)
+	require.JSONEq(t, string(originalRouteContext), string(publicFlow.Relations[0].Context),
+		"public preflight must carry the exact resolved relation references")
+	for _, table := range []string{"source_wiki_batches", "source_wiki_topics", "wiki_pages", "wiki_page_revisions"} {
+		var count int64
+		require.NoError(t, f.db.Table(table).Where("knowledge_base_id = ?", f.kb.ID).Count(&count).Error)
+		require.Zero(t, count, "%s must remain untouched after a successful preflight", table)
+	}
 
 	snapshotEvidence, err := repository.LoadSourceWikiSkeletonSnapshot(f.ctx, f.db, f.kb.TenantID, f.kb.ID, f.ds.ID, publication.SnapshotID)
 	require.NoError(t, err)

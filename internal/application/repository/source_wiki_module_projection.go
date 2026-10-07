@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -19,6 +20,10 @@ const (
 	sourceWikiModuleProjectionMaxSeedStringSize = 16 << 10
 	sourceWikiModuleProjectionMaxSeedBytes      = types.SourceWikiImpactMaxFactBytes
 )
+
+// ErrSourceWikiModuleProjectionBudgetExceeded marks a deterministic capacity
+// limit that should defer Wiki generation without affecting source search.
+var ErrSourceWikiModuleProjectionBudgetExceeded = errors.New("source Wiki module projection budget exceeded")
 
 // SourceWikiModuleProjection is a bounded projection of one fixed current
 // publication. Paths are limited to 4096 UTF-8 bytes each and 8 MiB total.
@@ -170,7 +175,7 @@ func LoadSourceWikiModuleProjection(
 			return fmt.Errorf("source Wiki module projection manifest counts are invalid")
 		}
 		if snapshot.MemberCount > types.SourceWikiSkeletonMaxFiles {
-			return fmt.Errorf("source Wiki module projection exceeds the %d-member inventory bound", types.SourceWikiSkeletonMaxFiles)
+			return fmt.Errorf("%w: manifest exceeds the %d-member inventory bound", ErrSourceWikiModuleProjectionBudgetExceeded, types.SourceWikiSkeletonMaxFiles)
 		}
 		if len(snapshot.ManifestDigest) != 64 {
 			return fmt.Errorf("source Wiki module projection manifest digest identifier is malformed")
@@ -184,16 +189,16 @@ func LoadSourceWikiModuleProjection(
 			return fmt.Errorf("validate source Wiki module projection manifest inventory: %w", err)
 		}
 		if bounds.MaxPathBytes > sourceWikiModuleProjectionMaxPathBytes {
-			return fmt.Errorf("source Wiki module projection path exceeds the %d-byte hard bound", sourceWikiModuleProjectionMaxPathBytes)
+			return fmt.Errorf("%w: path exceeds the %d-byte hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, sourceWikiModuleProjectionMaxPathBytes)
 		}
 		if bounds.TotalPathBytes > sourceWikiModuleProjectionMaxTotalPathBytes {
-			return fmt.Errorf("source Wiki module projection paths exceed the %d-byte aggregate hard bound", sourceWikiModuleProjectionMaxTotalPathBytes)
+			return fmt.Errorf("%w: paths exceed the %d-byte aggregate hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, sourceWikiModuleProjectionMaxTotalPathBytes)
 		}
 		if bounds.FactCount > types.SourceWikiImpactMaxFacts {
-			return fmt.Errorf("source Wiki module projection candidate facts exceed the %d-fact hard bound", types.SourceWikiImpactMaxFacts)
+			return fmt.Errorf("%w: candidate facts exceed the %d-fact hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, types.SourceWikiImpactMaxFacts)
 		}
 		if bounds.FactBytes > types.SourceWikiImpactMaxFactBytes {
-			return fmt.Errorf("source Wiki module projection candidate facts exceed the %d-byte hard bound", types.SourceWikiImpactMaxFactBytes)
+			return fmt.Errorf("%w: candidate facts exceed the %d-byte hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, types.SourceWikiImpactMaxFactBytes)
 		}
 		if bounds.MemberCount != int64(snapshot.MemberCount) || bounds.DistinctPathCount != bounds.MemberCount || bounds.EmptyPathCount != 0 ||
 			bounds.ParsedCount != int64(snapshot.FileCount) || bounds.SupportedStatusCount != bounds.MemberCount ||
@@ -224,7 +229,7 @@ func LoadSourceWikiModuleProjection(
 			}
 			for _, row := range rows {
 				if row.SeedOversized != nil && *row.SeedOversized {
-					return fmt.Errorf("source Wiki module projection selected seed exceeds the %d-byte per-field hard bound", sourceWikiModuleProjectionMaxSeedStringSize)
+					return fmt.Errorf("%w: selected seed exceeds the %d-byte per-field hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, sourceWikiModuleProjectionMaxSeedStringSize)
 				}
 				nextPathBytes, pathErr := addSourceWikiModuleProjectionPathBytes(pathBytes, row.Path)
 				if pathErr != nil {
@@ -267,7 +272,7 @@ func LoadSourceWikiModuleProjection(
 						if len(*row.SeedKind) > sourceWikiModuleProjectionMaxSeedStringSize ||
 							len(*row.SeedName) > sourceWikiModuleProjectionMaxSeedStringSize ||
 							len(*row.SeedQuality) > sourceWikiModuleProjectionMaxSeedStringSize {
-							return fmt.Errorf("source Wiki module projection seed string exceeds its hard bound")
+							return fmt.Errorf("%w: seed string exceeds its hard bound", ErrSourceWikiModuleProjectionBudgetExceeded)
 						}
 						seed := types.ParsedSourceFact{Kind: *row.SeedKind, Name: *row.SeedName, Quality: *row.SeedQuality}
 						priority := source.SourceWikiModuleFactPriority(seed)
@@ -276,7 +281,7 @@ func LoadSourceWikiModuleProjection(
 						}
 						seedBytes += int64(len(*row.SeedKind) + len(*row.SeedName) + len(*row.SeedQuality))
 						if seedBytes > sourceWikiModuleProjectionMaxSeedBytes {
-							return fmt.Errorf("source Wiki module projection seed inventory exceeds the %d-byte hard bound", sourceWikiModuleProjectionMaxSeedBytes)
+							return fmt.Errorf("%w: seed inventory exceeds the %d-byte hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, sourceWikiModuleProjectionMaxSeedBytes)
 						}
 						member.Seed = &SourceWikiModuleSeed{
 							Kind: *row.SeedKind, Name: *row.SeedName, Quality: *row.SeedQuality,
@@ -438,10 +443,10 @@ func addSourceWikiModuleProjectionPathBytes(total int64, path string) (int64, er
 		return total, fmt.Errorf("source Wiki module projection contains an empty manifest path")
 	}
 	if pathBytes > sourceWikiModuleProjectionMaxPathBytes {
-		return total, fmt.Errorf("source Wiki module projection path exceeds the %d-byte hard bound", sourceWikiModuleProjectionMaxPathBytes)
+		return total, fmt.Errorf("%w: path exceeds the %d-byte hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, sourceWikiModuleProjectionMaxPathBytes)
 	}
 	if pathBytes > sourceWikiModuleProjectionMaxTotalPathBytes-total {
-		return total, fmt.Errorf("source Wiki module projection paths exceed the %d-byte aggregate hard bound", sourceWikiModuleProjectionMaxTotalPathBytes)
+		return total, fmt.Errorf("%w: paths exceed the %d-byte aggregate hard bound", ErrSourceWikiModuleProjectionBudgetExceeded, sourceWikiModuleProjectionMaxTotalPathBytes)
 	}
 	return total + pathBytes, nil
 }

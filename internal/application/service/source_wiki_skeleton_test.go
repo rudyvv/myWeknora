@@ -62,6 +62,31 @@ func TestSourceWikiSkeletonPlansSystemEntrypointModulesAndEvidenceBackedFlows(t 
 	require.Equal(t, "planned", byKey["system"].Status)
 }
 
+func TestSourceWikiSkeletonUsesModuleSeedProjection(t *testing.T) {
+	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
+		SourceID: "source-a", SnapshotID: "snapshot-a",
+		Files: []sourceWikiSkeletonFile{
+			{Path: "src/controller/OrdersController.java", Facts: []types.ParsedSourceFact{{
+				Kind: "java_type", Name: "OrdersController", OwnerKind: "class", Quality: "structural",
+			}}},
+			{Path: "src/service/OrdersService.java", Facts: []types.ParsedSourceFact{{
+				Kind: "java_type", Name: "OrdersService", OwnerKind: "interface", Quality: "structural",
+			}}},
+		},
+		ModuleSeedFiles: []sourceWikiSkeletonFile{{Path: "src/service/OrdersService.java", Facts: []types.ParsedSourceFact{{
+			Kind: "java_type", Name: "OrdersService", OwnerKind: "interface", Quality: "structural",
+		}}}},
+	}, 40)
+	var modulePaths []string
+	for _, topic := range plan.Topics {
+		if topic.Kind == sourceWikiTopicModule {
+			modulePaths = append(modulePaths, topic.ModulePath)
+		}
+	}
+	require.Equal(t, []string{"src/service"}, modulePaths,
+		"module planning must use only the selected projection seed, not full per-file facts")
+}
+
 func TestSourceWikiSkeletonCapsInitialBatchAndKeepsStableSourceTopicKeys(t *testing.T) {
 	input := sourceWikiSkeletonInput{SourceID: "source-a", SnapshotID: "snapshot-9"}
 	for i := 0; i < 55; i++ {
@@ -95,6 +120,65 @@ func TestSourceWikiSkeletonCapsInitialBatchAndKeepsStableSourceTopicKeys(t *test
 	require.Equal(t, plan.Topics[1].TopicKey, other.Topics[1].TopicKey,
 		"canonical theme identity stays stable across publications; source ID is its owner namespace")
 	require.NotEqual(t, plan.Topics[1].SourceID, other.Topics[1].SourceID)
+}
+
+func TestSourceWikiSkeletonDefersAtCandidateLimitWhileBuildingFlows(t *testing.T) {
+	input := sourceWikiSkeletonInput{SourceID: "source-a", SnapshotID: "snapshot-bounded"}
+	for _, route := range []string{"/one", "/two", "/three"} {
+		input.Files = append(input.Files, sourceWikiSkeletonFile{Path: "web/" + strings.TrimPrefix(route, "/") + ".ts", Facts: []types.ParsedSourceFact{{
+			Kind: "api_request", RoutePath: route, HTTPMethod: "GET", Quality: "structural",
+		}}})
+	}
+
+	plan, exceeded := buildSourceWikiSkeletonWithLimit(input, 40, 3)
+	require.True(t, exceeded, "system plus three distinct routes exceeds a three-topic candidate budget")
+	require.Empty(t, plan.Topics, "overflow must defer without returning a partial plan")
+
+	plan, exceeded = buildSourceWikiSkeletonWithLimit(input, 40, 4)
+	require.False(t, exceeded)
+	require.Len(t, plan.Topics, 4)
+}
+
+func TestSourceWikiSkeletonDefersAtAggregateFlowEvidenceLimit(t *testing.T) {
+	input := sourceWikiSkeletonInput{SourceID: "source-a", SnapshotID: "snapshot-evidence"}
+	for _, route := range []string{"/one", "/two"} {
+		input.Relations = append(input.Relations, types.SourceCodeRelation{
+			Kind: "http_route", FromPath: "web/" + strings.TrimPrefix(route, "/") + ".ts",
+			FromKey: "GET " + route, Determinacy: "certain", Quality: "structural",
+		})
+	}
+
+	plan, exceeded := buildSourceWikiSkeletonWithBudgets(input, 40, 10, 1, 1<<20)
+	require.True(t, exceeded, "the second flow must be deferred when it would exceed the aggregate evidence relation budget")
+	require.Empty(t, plan.Topics, "overflow must not return a partially planned skeleton")
+
+	plan, exceeded = buildSourceWikiSkeletonWithBudgets(input, 40, 10, 2, 1<<20)
+	require.False(t, exceeded)
+	require.Len(t, plan.Topics, 3)
+
+	plan, exceeded = buildSourceWikiSkeletonWithBudgets(input, 40, 10, 10, 1)
+	require.True(t, exceeded, "serialized relation evidence must be budgeted before tracing a new flow")
+	require.Empty(t, plan.Topics)
+}
+
+func TestSourceWikiFlowRelationPayloadBudgetCoversEscapedJSONFields(t *testing.T) {
+	relation := types.SourceCodeRelation{Context: types.JSON(`{"path":"<&>"}`)}
+	wantFloor := int64(512 + len(relation.Context)*6)
+	require.GreaterOrEqual(t, sourceWikiFlowRelationPayloadBytes(relation), wantFloor,
+		"HTML-sensitive characters inside raw JSON may expand when the relation is serialized")
+}
+
+func TestSourceWikiMergeRelationsChecksCapBeforeAppending(t *testing.T) {
+	existing := make([]types.SourceCodeRelation, sourceWikiMaxFlowRelations+1)
+	for i := range existing {
+		existing[i] = types.SourceCodeRelation{Kind: "method_call", FromKey: fmt.Sprintf("existing-%02d", i)}
+	}
+	incoming := types.SourceCodeRelation{Kind: "method_call", FromKey: "extra-anchor"}
+
+	merged := sourceWikiMergeRelations(existing, []types.SourceCodeRelation{incoming})
+	require.Len(t, merged, sourceWikiMaxFlowRelations+1)
+	require.Equal(t, existing[len(existing)-1].FromKey, merged[len(merged)-1].FromKey,
+		"a saturated flow keeps its stable first evidence set without appending a later route anchor")
 }
 
 func TestSourceWikiSkeletonDoesNotPromoteUncertainRouteIntoCertainFlow(t *testing.T) {

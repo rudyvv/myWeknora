@@ -1,10 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -81,11 +84,37 @@ func TestSourceWikiRelationFactResolutionHydratesVerifiedRefsAndFailsClosed(t *t
 	if _, err := sourceWikiResolveRelationFactRefs(incomplete, []types.SourceCodeRelation{relation}); err == nil {
 		t.Fatal("an incomplete snapshot was accepted as verified configuration evidence")
 	}
+	oversized := relation
+	oversized.Context = types.JSON(bytes.Repeat([]byte{' '}, (1<<20)+1))
+	partial, err := sourceWikiResolveRelationFactRefs(resolver, []types.SourceCodeRelation{relation, oversized})
+	var capacityErr *source.SourceRelationFactCapacityError
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("oversized persisted route context should preserve its typed capacity error: %v", err)
+	}
+	if partial != nil {
+		t.Fatalf("relation resolution must discard prior work instead of returning a partial slice: %#v", partial)
+	}
 
 	ordinary := types.SourceCodeRelation{Kind: "method_call", Context: types.JSON(`{"legacy":"context"}`)}
 	unchanged, err := sourceWikiResolveRelationFactRefs(nil, []types.SourceCodeRelation{ordinary})
 	if err != nil || !reflect.DeepEqual(unchanged, []types.SourceCodeRelation{ordinary}) {
 		t.Fatalf("non-route relations should retain their existing validation path: %#v, %v", unchanged, err)
+	}
+}
+
+func TestSourceWikiRelationResolutionCapacityIsDeferred(t *testing.T) {
+	capacityErr := &source.SourceRelationFactCapacityError{Budget: "cumulative refs", Requested: 1, Limit: 0}
+	deferred := sourceWikiRelationResolutionError(capacityErr)
+	if !errors.Is(deferred, repository.ErrSourceWikiDerivationDeferred) || errors.Is(deferred, repository.ErrSourceWikiDerivationUnavailable) {
+		t.Fatalf("capacity exhaustion must defer Wiki derivation: %v", deferred)
+	}
+	var got *source.SourceRelationFactCapacityError
+	if !errors.As(deferred, &got) || got != capacityErr {
+		t.Fatalf("deferred error should preserve the typed capacity cause: %#v", deferred)
+	}
+	unavailable := sourceWikiRelationResolutionError(errors.New("reference identity mismatch"))
+	if !errors.Is(unavailable, repository.ErrSourceWikiDerivationUnavailable) || errors.Is(unavailable, repository.ErrSourceWikiDerivationDeferred) {
+		t.Fatalf("invalid reference evidence must remain unavailable: %v", unavailable)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -101,26 +102,87 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 		return nil, apperrors.NewBadRequestError("Wiki model context window must fit the bounded prompt and completion budgets")
 	}
 
-	skeletonSnapshot, err := repository.LoadSourceWikiSkeletonSnapshot(ctx, s.db, kb.TenantID, kb.ID, sourceID, snapshot.ID)
+	projection, err := repository.LoadSourceWikiModuleProjection(ctx, s.db, kb.TenantID, kb.ID, sourceID, snapshot.ID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, repository.ErrSourceWikiModuleProjectionBudgetExceeded) {
+			return nil, fmt.Errorf("%w: source Wiki module inventory exceeded a hard bound: %w", repository.ErrSourceWikiDerivationDeferred, err)
+		}
+		return nil, fmt.Errorf("%w: source Wiki module inventory is unavailable: %w", repository.ErrSourceWikiDerivationUnavailable, err)
 	}
-	relations, err := s.resolveSourceWikiRelations(ctx, kb.TenantID, kb.ID, sourceID, snapshot.ID, skeletonSnapshot, skeletonSnapshot.Relations)
+	if projection == nil || projection.TenantID != kb.TenantID || projection.KnowledgeBaseID != kb.ID ||
+		projection.DataSourceID != sourceID || projection.SnapshotID != snapshot.ID || !projection.InventoryComplete ||
+		projection.RelationsComplete || !projection.RelationsDeferred || len(projection.Members) != projection.MemberCount {
+		return nil, fmt.Errorf("%w: source Wiki module projection is incomplete or belongs to another publication", repository.ErrSourceWikiDerivationUnavailable)
+	}
+	moduleSeedFiles := make([]sourceWikiSkeletonFile, 0, projection.ParsedFileCount)
+	for _, member := range projection.Members {
+		file := sourceWikiSkeletonFile{Path: member.Path, Generated: member.Generated, Facts: []types.ParsedSourceFact{}}
+		if member.Seed != nil {
+			file.Facts = append(file.Facts, types.ParsedSourceFact{Kind: member.Seed.Kind, Name: member.Seed.Name, Quality: member.Seed.Quality})
+		}
+		moduleSeedFiles = append(moduleSeedFiles, file)
+	}
+
+	relationInventory, err := repository.LoadSourceWikiRelationInventory(ctx, s.db, kb.TenantID, kb.ID, sourceID, snapshot.ID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, repository.ErrSourceWikiDerivationDeferred) || errors.Is(err, repository.ErrSourceWikiDerivationUnavailable) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: source Wiki relation inventory is unavailable: %w", repository.ErrSourceWikiDerivationUnavailable, err)
 	}
-	skeletonFiles := make([]sourceWikiSkeletonFile, len(skeletonSnapshot.Files))
-	for i, file := range skeletonSnapshot.Files {
-		skeletonFiles[i] = sourceWikiSkeletonFile{Path: file.Path, Generated: file.Generated, Facts: file.Facts}
+	if relationInventory == nil || relationInventory.TenantID != kb.TenantID || relationInventory.KnowledgeBaseID != kb.ID ||
+		relationInventory.DataSourceID != sourceID || relationInventory.SnapshotID != snapshot.ID ||
+		!relationInventory.RelationsComplete || len(relationInventory.Relations) != relationInventory.ExpectedCount {
+		return nil, fmt.Errorf("%w: source Wiki relation inventory is incomplete or belongs to another publication", repository.ErrSourceWikiDerivationUnavailable)
 	}
-	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
-		SourceID: sourceID, SnapshotID: snapshot.ID, Files: skeletonFiles, Relations: relations,
-	}, types.SourceWikiBatchMaxInitialTopics)
-	if len(plan.Topics) > types.SourceWikiBatchMaxCandidates {
-		return nil, fmt.Errorf("%w: candidate inventory exceeds the %d-topic preflight bound", repository.ErrSourceWikiBatchInvalidState, types.SourceWikiBatchMaxCandidates)
+	var skeletonFiles []sourceWikiSkeletonFile
+	var factSnapshot *repository.SourceWikiSkeletonSnapshot
+	if sourceWikiHasHTTPRoute(relationInventory.Relations) {
+		impact, loaded, loadErr := repository.LoadSourceWikiImpactSnapshotWithRelationInventory(
+			s.db.WithContext(ctx), kb.TenantID, kb.ID, sourceID, snapshot.ID,
+			types.SourceWikiImpactPublishedComplete, relationInventory)
+		if loadErr != nil {
+			switch {
+			case errors.Is(loadErr, repository.ErrSourceWikiImpactLoadBudgetExceeded):
+				return nil, fmt.Errorf("%w: complete source facts for HTTP route resolution exceed a hard bound: %w", repository.ErrSourceWikiDerivationDeferred, loadErr)
+			case errors.Is(loadErr, repository.ErrSourceWikiImpactProofIncomplete), errors.Is(loadErr, repository.ErrSourceWikiImpactSnapshotInvalid):
+				return nil, fmt.Errorf("%w: complete source facts for HTTP route resolution are unavailable: %w", repository.ErrSourceWikiDerivationUnavailable, loadErr)
+			default:
+				return nil, fmt.Errorf("%w: complete source facts for HTTP route resolution are unavailable: %w", repository.ErrSourceWikiDerivationUnavailable, loadErr)
+			}
+		}
+		if impact.TenantID != kb.TenantID || impact.KnowledgeBaseID != kb.ID || impact.SourceID != sourceID || impact.SnapshotID != snapshot.ID ||
+			impact.Stage != types.SourceWikiImpactPublishedComplete || !impact.ManifestComplete || !impact.RelationsComplete ||
+			impact.ExpectedMemberCount != projection.MemberCount || impact.ExpectedRelationCount != relationInventory.ExpectedCount ||
+			loaded == nil || !loaded.Complete || loaded.TenantID != kb.TenantID || loaded.DataSourceID != sourceID || loaded.SnapshotID != snapshot.ID ||
+			!reflect.DeepEqual(relationInventory.Relations, impact.Relations) || !reflect.DeepEqual(relationInventory.Relations, loaded.Relations) {
+			return nil, fmt.Errorf("%w: complete HTTP route facts do not match the current published relation inventory", repository.ErrSourceWikiDerivationUnavailable)
+		}
+		factSnapshot = loaded
+		skeletonFiles = make([]sourceWikiSkeletonFile, len(loaded.Files))
+		for i, file := range loaded.Files {
+			skeletonFiles[i] = sourceWikiSkeletonFile{Path: file.Path, Generated: file.Generated, Facts: file.Facts}
+		}
+	} else {
+		// Without route anchors, the planner does not need full parser facts for
+		// flow correlation; projection seeds still preserve module candidates.
+		skeletonFiles = moduleSeedFiles
+	}
+	relations, err := s.resolveSourceWikiRelations(ctx, kb.TenantID, kb.ID, sourceID, snapshot.ID, factSnapshot, relationInventory.Relations)
+	if err != nil {
+		return nil, sourceWikiRelationResolutionError(err)
+	}
+	plan, candidateLimitExceeded := buildSourceWikiSkeletonWithLimit(sourceWikiSkeletonInput{
+		SourceID: sourceID, SnapshotID: snapshot.ID, Files: skeletonFiles, ModuleSeedFiles: moduleSeedFiles, Relations: relations,
+	}, types.SourceWikiBatchMaxInitialTopics, types.SourceWikiBatchMaxCandidates)
+	if candidateLimitExceeded {
+		return nil, fmt.Errorf("%w: candidate inventory exceeds the %d-topic preflight bound", repository.ErrSourceWikiDerivationDeferred, types.SourceWikiBatchMaxCandidates)
 	}
 	if err := validateSourceWikiSkeletonPlan(plan); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: source Wiki candidate plan is invalid: %w", repository.ErrSourceWikiDerivationUnavailable, err)
+	}
+	if plan.ModuleCount == 0 && plan.FlowCount == 0 {
+		return nil, fmt.Errorf("%w: the published source has no structural module or HTTP flow candidates for Wiki coverage", repository.ErrSourceWikiDerivationUnavailable)
 	}
 	if err := source.ValidateReadScope(ctx); err != nil {
 		return nil, err
@@ -194,6 +256,14 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 	}, nil
 }
 
+func sourceWikiRelationResolutionError(err error) error {
+	var capacityErr *source.SourceRelationFactCapacityError
+	if errors.As(err, &capacityErr) {
+		return fmt.Errorf("%w: HTTP route relation reference replay exceeded a hard bound: %w", repository.ErrSourceWikiDerivationDeferred, err)
+	}
+	return fmt.Errorf("%w: HTTP route relation references could not be verified: %w", repository.ErrSourceWikiDerivationUnavailable, err)
+}
+
 func loadCurrentSourceWikiPublication(ctx context.Context, db *gorm.DB, kb *types.KnowledgeBase, sourceID string) (*types.SourcePublication, *types.SourceSnapshot, error) {
 	var publication types.SourcePublication
 	if err := db.WithContext(ctx).Where("data_source_id = ? AND tenant_id = ? AND knowledge_base_id = ?", sourceID, kb.TenantID, kb.ID).Take(&publication).Error; err != nil {
@@ -227,6 +297,15 @@ func sourceWikiBatchModelID(kb *types.KnowledgeBase) string {
 		return kb.WikiConfig.SynthesisModelID
 	}
 	return kb.SummaryModelID
+}
+
+func sourceWikiHasHTTPRoute(relations []types.SourceCodeRelation) bool {
+	for _, relation := range relations {
+		if relation.Kind == "http_route" {
+			return true
+		}
+	}
+	return false
 }
 
 func rejectActiveSourceWikiBatch(ctx context.Context, db *gorm.DB, kb *types.KnowledgeBase, sourceID string) error {
