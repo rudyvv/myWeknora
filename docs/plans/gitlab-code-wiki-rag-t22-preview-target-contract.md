@@ -19,3 +19,11 @@
 实际5b/144测试均在fixture连接证明失败，尚非竞态red：安全诊断确认clone/schema/role均正确、非管理角色/publicCREATEfalse，但“全部public对象无SELECT”过严。根只读ACL核验得到public扩展只读授权5、应用只读授权0、所有写授权0、测试schema/role残留0、clone121clean/全局静默；因此将证明区分扩展元数据与应用数据，并增加public sequence拒绝，不降低实际应用数据隔离。再次审查后才可重跑该测试。
 
 测试fixture的额外导出只存在于integration测试二进制。第一产品slice仅handler的有界JSON/完整SHA校验与typed context条件：公开API malformed expected commit测试先真实FAIL400vs200，再PASS3.619s；服务验证与协调器持久化尚待后续slice，不能启动或称race修复。integration编译4.286s/no tests to run不是行为通过。后续冻结代码需独立Standards/Spec与安全Sol审查，测试命令/结果和准确SHA分别记录；最后整票完成时才一次全套测试。
+
+## 2026-10-07 服务slice实际进度（TRAE接手）
+
+在 `553afa0` 基线上，三个未提交产品文件（service expected-commit验证、repository `RegisterSourceTrigger` 持久化 `target_commit_sha`、types 内部传递字段）与真实竞态red（`t22-preview-target-red-553afa0.txt`：worker发布新HEAD而非旧预览SHA）一致。定向candidate一度失败 `unable to fetch the fixed GitLab commit`。
+
+根因诊断（非GitLab token权限）：fixture本地upload-pack默认拒绝分支推进后非tip的unadvertised want。根以只读Git凭据对真实 `gitlab.p.it/zhangruiliang/nsb` 实测：产品同款 `git fetch --no-tags --no-write-fetch-head --depth=1 <url> <非tip可达SHA>` exit 0，证明真实GitLab服务端允许按可达SHA fetch。修复为fixture基础设施对齐真实服务器行为：repo配置 `uploadpack.allowReachableSHA1InWant=true`；同时fixture Git HTTP handler不再因upload-pack按设计写ERR包后非零退出而判死测试。产品三文件未改动。
+
+定向green后补充四个真实回归（均通过，日志 `t22-isolated-runtime-logs/t22-preview-target-trae.txt` 与五测合并运行 exit0）：登记前HEAD已变拒绝且不留sync log/run；目标因force-push不可达时明确失败并保留上一发布；崩溃后 `RecoverSourceTriggers` 重投仍发布登记的固定目标；配置更新通过公开 `UpdateDataSource` seam使queued expected-commit run被fence取消、迟到投递不发布、新trigger在新配置下发布。最终冻结SHA与独立双轴/安全审查见后续记录；审查为TRAE子代理，不冒称Sol。

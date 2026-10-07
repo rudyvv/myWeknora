@@ -15,7 +15,7 @@ T09真实专用clone升级120→121/clean、6423条NULL缓存元数据回填完�
 
 ## 必须继续的工作
 
-1. 解决source-preview与worker分别解析master的竞态：不能假定只读GitLab token能冻结远端分支。需要产品将预览确认的expected commit持久化到durable source run，并在worker中尊重固定target；核验实际HEAD并发变化、恢复/重投以及租约/配置代数，冻结提交后双轴/安全Sol审查。此产品补强尚未实施，不能把adapter事后SHA检查当阻止错误提交发布。在它通过之前不能解开公开publish拒绝。
+1. 解决source-preview与worker分别解析master的竞态：不能假定只读GitLab token能冻结远端分支。需要产品将预览确认的expected commit持久化到durable source run，并在worker中尊重固定target；核验实际HEAD并发变化、恢复/重投以及租约/配置代数，冻结提交后双轴/安全Sol审查。**2026-10-07 TRAE接手后产品slice已实施并定向green**：expected commit经公开API→service验证→`source_sync_runs.target_commit_sha`持久化→worker按固定target发布；fixture对齐真实GitLab按可达SHA fetch行为（真实gitlab.p.it只读实测exit 0）。五个定向回归（竞态、登记前变化拒绝、目标不可达保留上一发布、崩溃恢复重投、配置fence）全部通过，详见preview-target-contract文档。冻结SHA与独立审查待完成；在它通过之前不能解开公开publish拒绝。
 2. 用户对policy-rejected具体隔离启动动作的回答到达后，由根核验新ACL/clone121clean/no tasks/queue、固定backend哈希、精确GitLab TLS截止，并只启动专用Redis与57825应用；不能触原8080。到期自动恢复正常TLS验证；需要新窗口时重新明确冻结截止并审查，不能复用过期helper。固定凭据窗口到期后不能盲--extend：先只读核对artifact/DB一致，再准备新固定窗口审过helper。
 3. 以批准完整清单重跑nsb：5448文件/88273936 bytes；其余dashboard61/mobile102，总5611/92352148 bytes（约92.35MB）。原私有metadata SHA508CCECC713C612D67F362BB6FCA7E31932C6444BAE25CAF56632A952825D676；题集仍C8E527D3CAD34DFD5D4FD2ED54853F1BABCBA17DFB78EB96A170F2A876AE1B44。不得缩范围、修改评分题集或把工具/旧发布当这次成功。
 4. 之后严格顺序完成大仓Wiki/mobileQA、真实前端引用、固定30题Wiki/RAG/混合评分、增量/性能/故障/现场证据。已接受T06/T10回归不重复。全部通过前#30保持Open。只有新有效验收里程碑/最终完成才更新GitHub；本轮仅T09里程碑已有comment。

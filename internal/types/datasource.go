@@ -164,6 +164,9 @@ type SyncLog struct {
 	// Source-only fencing metadata is hidden from the public log API.
 	SourceConfigGeneration int64 `json:"-" gorm:"column:source_config_generation"`
 	SourceFencingToken     int64 `json:"-" gorm:"column:source_fencing_token"`
+	// Only ManualSync may populate a verified preview condition for the
+	// coordinator transaction. It is not mutable log persistence or API data.
+	SourceExpectedCommitSHA string `json:"-" gorm:"-"`
 
 	// Sync status: running, success, partial, failed, canceled
 	Status string `json:"status" gorm:"type:varchar(32);index"`

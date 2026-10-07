@@ -26,9 +26,10 @@ type SourceIntegrationFixture struct {
 	Sync         func()
 	DataSources  interfaces.DataSourceService
 	AdvanceFiles func(map[string][]byte) string
+	ForcePush    func() string
 }
 
 func NewSourceIntegrationFixture(t *testing.T, extraFiles ...map[string][]byte) *SourceIntegrationFixture {
 	f := newJavaSourceFixture(t, extraFiles...)
-	return &SourceIntegrationFixture{Ctx: f.ctx, DB: f.db, KBs: f.kbs.(interfaces.KnowledgeBaseService), KB: f.kb, Source: f.ds, Knowledge: f.knowledge, Chunks: f.chunks, Shares: f.shares, AgentShares: f.agentShares, Sync: func() { syncSourceFixture(t, f) }, DataSources: f.service, AdvanceFiles: f.advanceFiles}
+	return &SourceIntegrationFixture{Ctx: f.ctx, DB: f.db, KBs: f.kbs.(interfaces.KnowledgeBaseService), KB: f.kb, Source: f.ds, Knowledge: f.knowledge, Chunks: f.chunks, Shares: f.shares, AgentShares: f.agentShares, Sync: func() { syncSourceFixture(t, f) }, DataSources: f.service, AdvanceFiles: f.advanceFiles, ForcePush: f.forcePush}
 }

@@ -265,6 +265,14 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 	if trigger == "" {
 		trigger = "manual"
 	}
+	if log.SourceExpectedCommitSHA != "" {
+		if trigger != "manual" {
+			return false, 0, errors.New("expected commit requires a manual source trigger")
+		}
+		if _, err := types.WithSourceSyncExpectedCommit(ctx, log.SourceExpectedCommitSHA); err != nil {
+			return false, 0, err
+		}
+	}
 	var shouldDispatch bool
 	var deliveryGeneration int64
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -305,8 +313,8 @@ func (r *SyncLogRepository) RegisterSourceTrigger(ctx context.Context, ds *types
 		state.PendingSyncLogID = stringPointer(log.ID)
 		state.PendingDeliveryGeneration = deliveryGeneration
 		state.PendingTrigger = trigger
-		if err := tx.Exec(`INSERT INTO source_sync_runs(sync_log_id,data_source_id,tenant_id,config_generation,delivery_generation,trigger,phase,updated_at)
-			VALUES(?,?,?,?,?,?,?,?)`, log.ID, ds.ID, ds.TenantID, state.ConfigGeneration, deliveryGeneration, trigger, phase, time.Now().UTC()).Error; err != nil {
+		if err := tx.Exec(`INSERT INTO source_sync_runs(sync_log_id,data_source_id,tenant_id,config_generation,delivery_generation,trigger,phase,target_commit_sha,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?)`, log.ID, ds.ID, ds.TenantID, state.ConfigGeneration, deliveryGeneration, trigger, phase, log.SourceExpectedCommitSHA, time.Now().UTC()).Error; err != nil {
 			return err
 		}
 		shouldDispatch = state.ActiveSyncLogID == nil

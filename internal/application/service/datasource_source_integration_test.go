@@ -3480,6 +3480,11 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 	}
 	git("init", "--initial-branch=main")
 	git("config", "core.autocrlf", "false")
+	// Real GitLab (verified read-only against gitlab.p.it on 2026-10-07) serves
+	// fetch-by-SHA for commits reachable from a ref; fixed preview targets are
+	// non-tip once the branch advances. The fixture upload-pack must mirror
+	// that server capability or those targets are wrongly rejected.
+	git("config", "uploadpack.allowReachableSHA1InWant", "true")
 	git("config", "user.email", "fixture@example.invalid")
 	git("config", "user.name", "Source integration")
 	if includeDefaultJava {
@@ -3563,7 +3568,12 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 			}
 			cmd := exec.Command("git", append(args, repoDir)...)
 			cmd.Stdin, cmd.Stdout = r.Body, w
-			require.NoError(t, cmd.Run())
+			// upload-pack exits non-zero after writing its ERR packet when it
+			// rejects a request, for example a want for a commit that is no
+			// longer reachable after a force push. The client-visible fetch
+			// failure is the behavior under test, so a rejected server-side
+			// request must not fail the fixture itself.
+			_ = cmd.Run()
 		default:
 			http.NotFound(w, r)
 		}

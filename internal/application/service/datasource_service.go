@@ -698,6 +698,10 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		return nil, err
 	}
 	sourceMode := mode == datasource.ContentModeSource
+	expectedCommit := types.SourceSyncExpectedCommitFromContext(ctx)
+	if expectedCommit != "" && !sourceMode {
+		return nil, fmt.Errorf("expected commit is only supported for source-mode sync")
+	}
 	if sourceMode && !sourceLifecycleAllowsConnection(ds) {
 		return nil, fmt.Errorf("unbound or cleared source cannot be synchronized")
 	}
@@ -723,12 +727,33 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		return nil, datasource.ErrDataSourceNotActive
 	}
 
+	if expectedCommit != "" {
+		if _, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); !ok {
+			return nil, fmt.Errorf("expected commit requires durable source coordination")
+		}
+		connector, err := s.connectorRegistry.Get(ds.Type)
+		if err != nil {
+			return nil, err
+		}
+		resolver, ok := connector.(datasource.SourceRepositoryResolver)
+		if !ok {
+			return nil, datasource.ErrSourcePipelineUnavailable
+		}
+		repository, err := resolver.ResolveSourceRepository(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		if repository == nil || repository.CommitSHA != expectedCommit {
+			return nil, fmt.Errorf("source branch changed since preview; refresh preview")
+		}
+	}
 	// Create sync log
 	syncLog := &types.SyncLog{
-		DataSourceID: dsID,
-		TenantID:     ds.TenantID,
-		Status:       types.SyncLogStatusRunning,
-		StartedAt:    time.Now().UTC(),
+		DataSourceID:            dsID,
+		TenantID:                ds.TenantID,
+		Status:                  types.SyncLogStatusRunning,
+		StartedAt:               time.Now().UTC(),
+		SourceExpectedCommitSHA: expectedCommit,
 	}
 	if sourceMode {
 		syncLog.Status = types.SyncLogStatusQueued
