@@ -179,6 +179,9 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 	if err := validateSourceWikiSkeletonPlan(plan); err != nil {
 		return nil, fmt.Errorf("%w: source Wiki candidate plan is invalid: %w", repository.ErrSourceWikiDerivationUnavailable, err)
 	}
+	if plan.ModuleCount == 0 && plan.FlowCount == 0 {
+		return nil, fmt.Errorf("%w: the published source has no structural module or HTTP flow candidates for Wiki coverage", repository.ErrSourceWikiDerivationUnavailable)
+	}
 	if err := source.ValidateReadScope(ctx); err != nil {
 		return nil, err
 	}
