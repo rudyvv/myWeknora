@@ -51,8 +51,8 @@ const (
 	keyID           = uint64(1)
 	tenantID        = uint64(10000)
 	keyName         = "t22-rehearsal-20261006"
-	oldKeyExpiryISO = "2026-10-06T18:00:00Z"
-	newKeyExpiryISO = "2026-10-07T10:45:00Z"
+	oldKeyExpiryISO = "2026-10-07T10:45:00Z"
+	newKeyExpiryISO = "2026-10-07T16:30:00Z"
 
 	dotenvPath = `D:\Project-Weknora\WeKnora\.env`
 	localEnv   = `D:\Project-Weknora\WeKnora\.env.local`

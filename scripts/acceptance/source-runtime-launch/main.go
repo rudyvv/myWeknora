@@ -49,7 +49,7 @@ const (
 	parserURL     = "http://127.0.0.1:57823"
 
 	maxDotenvBytes    = 1 << 20
-	frozenTLSDeadline = "2026-10-07T10:45:00Z"
+	frozenTLSDeadline = "2026-10-07T16:30:00Z"
 )
 
 var knownAsynqQueues = map[string]struct{}{

@@ -25,7 +25,7 @@ const (
 	privateDir     = `C:\Users\28211\.codex\test-runners\t22-isolated-runtime-logs`
 	apiBase        = "http://127.0.0.1:57825/api/v1"
 	maxResponse    = 16 << 20
-	windowEnd      = "2026-10-07T10:45:00Z"
+	windowEnd      = "2026-10-07T16:30:00Z"
 )
 
 var uuidPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
@@ -144,7 +144,7 @@ func run() int {
 	var progress func(report) error
 	if publishMode {
 		// The exclusive journal makes any uncertain mutating request non-repeatable.
-		output, err = os.OpenFile(filepath.Join(privateDir, "nsb-full-publication-20261007.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		output, err = os.OpenFile(filepath.Join(privateDir, "nsb-full-publication-20261007-attempt2.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
 			fmt.Println(`{"status":"existing_journal_refuse_rerun"}`)
 			return 2

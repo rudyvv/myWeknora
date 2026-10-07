@@ -6,7 +6,7 @@ import "testing"
 
 func TestRuntimeTLSRejectsExtensionBeyondFrozenWindow(t *testing.T) {
 	t.Setenv("GITLAB_TLS_INSECURE_ORIGIN", "https://gitlab.p.it")
-	t.Setenv("GITLAB_TLS_INSECURE_UNTIL", "2026-10-07T10:46:00Z")
+	t.Setenv("GITLAB_TLS_INSECURE_UNTIL", "2026-10-07T16:31:00Z")
 	if _, err := rootGitLabTLS(); err == nil {
 		t.Fatal("TLS exception exceeded frozen runtime window")
 	}
