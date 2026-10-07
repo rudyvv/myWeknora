@@ -122,13 +122,6 @@ func run() int {
 		fmt.Println(`{"status":"arguments_rejected"}`)
 		return 2
 	}
-	// Preview and sync currently resolve the branch independently. Keep the
-	// mutating entry point closed until the product can persist the preview's
-	// expected commit in the durable run before the worker processes it.
-	if publishMode {
-		fmt.Println(`{"status":"conditional_sync_required_no_mutation"}`)
-		return 2
-	}
 	if os.Getenv("T22_RUNTIME_ACL_GATE") != "verified" {
 		fmt.Println(`{"status":"root_acl_attestation_required"}`)
 		return 2
@@ -333,7 +326,11 @@ func publish(ctx context.Context, client *http.Client, base, token string, expec
 			return result, err
 		}
 		var log syncLog
-		if err := request(ctx, client, base, token, "POST", "/datasource/"+sourceID+"/sync", nil, &log); err != nil {
+		// Submit the just-verified preview commit as the sync condition: the
+		// service rejects the request before registration when the branch has
+		// advanced, and the durable run publishes only that fixed target.
+		if err := request(ctx, client, base, token, "POST", "/datasource/"+sourceID+"/sync",
+			[]byte(`{"expected_commit_sha":"`+expected.Commit+`"}`), &log); err != nil {
 			return result, err
 		}
 		if !uuidPattern.MatchString(log.ID) || log.Source != sourceID || log.Tenant != 10000 {
