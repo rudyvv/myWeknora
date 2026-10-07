@@ -15,15 +15,41 @@ import (
 
 type expectedCommitDataSourceAPI struct {
 	interfaces.DataSourceService
-	calls int
+	calls    int
+	expected string
 }
 
 func (s *expectedCommitDataSourceAPI) GetDataSource(context.Context, string) (*types.DataSource, error) {
 	return &types.DataSource{ID: "source-one", TenantID: 1, KnowledgeBaseID: "kb-one"}, nil
 }
-func (s *expectedCommitDataSourceAPI) ManualSync(context.Context, string) (*types.SyncLog, error) {
+func (s *expectedCommitDataSourceAPI) ManualSync(ctx context.Context, _ string) (*types.SyncLog, error) {
 	s.calls++
+	s.expected = types.SourceSyncExpectedCommitFromContext(ctx)
 	return &types.SyncLog{ID: "log-one"}, nil
+}
+
+func TestManualSourceSyncForwardsPreviewConditionAndKeepsAuthorization(t *testing.T) {
+	sha := "1111111111111111111111111111111111111111"
+	for _, tenant := range []uint64{1, 2} {
+		t.Run(map[uint64]string{1: "owned", 2: "foreign"}[tenant], func(t *testing.T) {
+			ds := &expectedCommitDataSourceAPI{}
+			h := NewDataSourceHandler(ds, expectedCommitKBAPI{})
+			router := gin.New()
+			router.Use(func(c *gin.Context) { c.Set(types.TenantIDContextKey.String(), tenant) })
+			router.POST("/datasource/:id/sync", h.ManualSync)
+			request := httptest.NewRequest(http.MethodPost, "/datasource/source-one/sync", strings.NewReader(`{"expected_commit_sha":"`+sha+`"}`))
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if tenant == 2 {
+				require.Equal(t, http.StatusForbidden, response.Code)
+				require.Zero(t, ds.calls)
+				return
+			}
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, 1, ds.calls)
+			require.Equal(t, sha, ds.expected)
+		})
+	}
 }
 
 type expectedCommitKBAPI struct {

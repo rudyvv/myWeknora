@@ -3246,7 +3246,7 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 		t.Fatal("integration requires SOURCE_TEST_POSTGRES_DSN, a parser runtime and prefetched SOURCE_PARSER_CACHE")
 	}
 	address, err := url.Parse(dsn)
-	require.NoError(t, err)
+	require.True(t, err == nil && address != nil, "source test DSN URI invalid")
 	// These fixtures can create/drop schemas only in the dedicated test database.
 	require.Equal(t, "/source_test", address.Path)
 	require.Equal(t, "127.0.0.1", address.Hostname())
@@ -3256,6 +3256,7 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 		// This opt-in is used only by the Root-reviewed acceptance regression.
 		// No arbitrary database, endpoint, credentials or public rows are allowed.
 		require.Equal(t, "source_t22_live_rehearsal_20261006", cloneFixture)
+		require.True(t, externalParserURL == "http://127.0.0.1:57823", "clone fixture requires the dedicated parser")
 		cloneConfig = fixedCloneFixtureConfig(t, dsn)
 		address.Path = "/" + cloneFixture
 		dsn = address.String()
