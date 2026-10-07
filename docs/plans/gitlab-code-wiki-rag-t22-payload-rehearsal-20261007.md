@@ -30,7 +30,7 @@
 
 ## 可复现命令和证据限制
 
-凭据只由既定受保护runner注入进程，不打印环境。定向 `go test -count=1 ./scripts/acceptance/source-artifact-payload` PASS2.030s；`go vet` PASS；`go test -tags=integration -count=1 ./scripts/acceptance/source-artifact-payload -run '^TestPreflightChecksRealMigrationTransactionReadOnly$'` 真实只读红42601后PASS2.544s。Windows构建成功；初冻Linux/amd64交叉构建成功，后续修复版本须另核实，不能沿用初冻结果。未跑最终全套测试。
+凭据只由既定受保护runner注入进程，不打印环境。定向 `go test -count=1 ./scripts/acceptance/source-artifact-payload` PASS2.030s；`go vet` PASS；`go test -tags=integration -count=1 ./scripts/acceptance/source-artifact-payload -run '^TestPreflightChecksRealMigrationTransactionReadOnly$'` 真实只读红42601后PASS2.544s。Windows构建成功；最终修复版Linux/amd64交叉构建也已成功（2026-10-07根独立执行，产物t22-payload-backfill-fixed-20261007-linux）。未跑最终全套测试。
 
 真实顺序为公开 `--preflight`，根外部180秒watchdog执行 `--upgrade-only --stop-proof=process-and-clone-sessions`，只读账本核验，再同watchdog执行 `--backfill --confirm-app-stopped --stop-proof=process-and-clone-sessions`，只读确认NULL0，最后 `--measure --confirm-app-stopped`。升级已到121，不可再次执行120→121；若watchdog/提交结果不明，先只读核态、审查再决定，禁止盲重跑。
 
