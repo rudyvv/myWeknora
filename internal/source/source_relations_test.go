@@ -38,6 +38,38 @@ func TestBoundedRouteCorrelationCapsZeroRefScansAndCandidateCopies(t *testing.T)
 	if !errors.As(err, &capacityErr) || capacityErr.Budget != "route candidate copies" || capacityErr.Used > capacityErr.Limit {
 		t.Fatalf("dedup candidate allocations must be checked before map/slice growth: %v", err)
 	}
+
+	proxy := relationFact("api_proxy", "/api", "", 1, 20)
+	proxy.OwnerName = "web"
+	proxy.RoutePath, proxy.TargetName, proxy.Certainty = "/service", "^/api", "certain"
+	proxyMember := SourceRelationMember{Path: "web/config.js", FileID: "proxy-file", VersionID: "proxy-v1",
+		Facts: []types.ParsedSourceFact{proxy}}
+
+	proxyScanBudget := newSourceRelationFactCapacityBudget(0, 0)
+	proxyScanBudget.maxRouteWork = 0
+	_, err = correlateSourceFacts(1, "source", "snapshot", append(append([]SourceRelationMember{}, members...), proxyMember), proxyScanBudget)
+	if !errors.As(err, &capacityErr) || capacityErr.Budget != "route correlation work" {
+		t.Fatalf("api_proxy filtering scans must be charged before inspection: %v", err)
+	}
+
+	proxyCopyBudget := newSourceRelationFactCapacityBudget(0, 0)
+	proxyCopyBudget.maxRouteCandidates = 0
+	_, err = correlateSourceFacts(1, "source", "snapshot", append(append([]SourceRelationMember{}, members...), proxyMember), proxyCopyBudget)
+	if !errors.As(err, &capacityErr) || capacityErr.Budget != "route candidate copies" {
+		t.Fatalf("module proxy copies must be charged before append: %v", err)
+	}
+
+	invalidPrefix := relationFact("api_prefix", "", "", 1, 10)
+	invalidPrefix.Dynamic = true
+	invalidPrefixMember := SourceRelationMember{Path: "web/config.js", FileID: "prefix-file", VersionID: "prefix-v1",
+		Facts: []types.ParsedSourceFact{invalidPrefix}}
+	prefixScanBudget := newSourceRelationFactCapacityBudget(0, 0)
+	prefixScanBudget.maxRouteWork = 1 // one unit for the matching proxy scan, none for prefix inspection
+	_, err = correlateSourceFacts(1, "source", "snapshot",
+		append(append(append([]SourceRelationMember{}, members...), proxyMember), invalidPrefixMember), prefixScanBudget)
+	if !errors.As(err, &capacityErr) || capacityErr.Budget != "route correlation work" || capacityErr.Used != 1 {
+		t.Fatalf("api_prefix filtering scans must be charged before filtering invalid prefixes: %v", err)
+	}
 }
 
 func relationFact(kind, name, namespace string, start, end int) types.ParsedSourceFact {

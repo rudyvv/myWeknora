@@ -631,8 +631,14 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 		requestRoutes := []sourceRequestRoute{{path: normalizeSourceRoute(fact.RoutePath)}}
 		var moduleProxies []factOwner
 		for _, proxy := range apiProxies {
+			if err := budget.addRouteWork(1); err != nil {
+				return nil, err
+			}
 			root := proxy.fact.OwnerName
 			if root != "" && sourcePathWithin(request.member.Path, root) {
+				if err := budget.reserveRouteCandidateCopies(1); err != nil {
+					return nil, err
+				}
 				moduleProxies = append(moduleProxies, proxy)
 			}
 		}
@@ -641,6 +647,9 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 			// Configurations in sibling applications must not rewrite this request.
 			requestRoutes = nil
 			for _, prefix := range apiPrefixes {
+				if err := budget.addRouteWork(1); err != nil {
+					return nil, err
+				}
 				prefixFact := prefix.fact
 				if prefixFact.RoutePath == "" || prefixFact.Dynamic || !strings.HasPrefix(prefixFact.RoutePath, "/") {
 					continue
