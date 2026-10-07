@@ -1,8 +1,7 @@
-# T22 artifact-payload helper — frozen source, no DB mode executed
+# T22 artifact-payload helper — guarded clone rehearsal
 
-The original plan and helper were ignored under `.cache/`. This byte-preserving copy of the Go source is now tracked under `scripts/acceptance/source-artifact-payload/`. Helper source
-and pure tests are frozen here for Root review. The original helper author did not execute a live mode or database
-connection, backend, or service was run. Pure tests use a dummy DSN with an
+The original plan and helper were ignored under `.cache/`. The reviewed helper is now tracked under `scripts/acceptance/source-artifact-payload/`. Helper source
+and pure tests are frozen here for Root review. The original helper author did not execute a database mode. Pure tests use a dummy DSN with an
 injected connector.
 
 ## Fixed execution contract
