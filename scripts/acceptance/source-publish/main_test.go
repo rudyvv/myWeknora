@@ -20,7 +20,10 @@ func TestApprovedPreviewMismatchCannotResumeOrSync(t *testing.T) {
 	}))
 	defer server.Close()
 	expected := approvedScope{Commit: approvedCommit, Files: []approvedFile{{Path: "synthetic.java", Blob: "synthetic", Size: 8}}, Count: 1, Bytes: 8}
-	_, err := publish(context.Background(), server.Client(), server.URL, "synthetic-token", expected, false, "", nil)
+	result, err := publish(context.Background(), server.Client(), server.URL, "synthetic-token", expected, false, "", nil)
+	if result.SelectedFiles != 0 || result.SelectedBytes != 0 {
+		t.Fatal("failed preview reported approved plan values as observed counts")
+	}
 	if err == nil || writes != 0 {
 		t.Fatalf("mismatch permitted writes: error=%v writes=%d", err, writes)
 	}

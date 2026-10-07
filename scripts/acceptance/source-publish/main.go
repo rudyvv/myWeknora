@@ -93,8 +93,8 @@ type syncLog struct {
 }
 type report struct {
 	Status          string           `json:"status"`
-	SelectedFiles   int              `json:"selected_files"`
-	SelectedBytes   int64            `json:"selected_bytes"`
+	SelectedFiles   int              `json:"selected_files,omitempty"`
+	SelectedBytes   int64            `json:"selected_bytes,omitempty"`
 	LogID           string           `json:"sync_log_id,omitempty"`
 	SnapshotID      string           `json:"snapshot_id,omitempty"`
 	Commit          string           `json:"commit_sha,omitempty"`
@@ -122,6 +122,13 @@ func run() int {
 		fmt.Println(`{"status":"arguments_rejected"}`)
 		return 2
 	}
+	// Preview and sync currently resolve the branch independently. Keep the
+	// mutating entry point closed until the product can persist the preview's
+	// expected commit in the durable run before the worker processes it.
+	if publishMode {
+		fmt.Println(`{"status":"conditional_sync_required_no_mutation"}`)
+		return 2
+	}
 	if os.Getenv("T22_RUNTIME_ACL_GATE") != "verified" {
 		fmt.Println(`{"status":"root_acl_attestation_required"}`)
 		return 2
@@ -132,11 +139,12 @@ func run() int {
 		return 2
 	}
 	end, _ := time.Parse(time.RFC3339, windowEnd)
-	if !time.Now().Before(end) {
+	workEnd := end.Add(-time.Minute)
+	if !time.Now().Before(workEnd) {
 		fmt.Println(`{"status":"runtime_window_expired"}`)
 		return 2
 	}
-	ctx, cancel := context.WithDeadline(context.Background(), end.Add(-time.Minute))
+	ctx, cancel := context.WithDeadline(context.Background(), workEnd)
 	defer cancel()
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect_rejected") }}
 	var output *os.File
@@ -266,7 +274,7 @@ func request(ctx context.Context, client *http.Client, base, token, method, path
 }
 func publish(ctx context.Context, client *http.Client, base, token string, expected approvedScope, previewOnly bool, watchID string, progress func(report) error) (report, error) {
 	started := time.Now()
-	result := report{Status: "running", SelectedFiles: expected.Count, SelectedBytes: expected.Bytes}
+	result := report{Status: "running"}
 	fail := errors.New("publication_not_verified")
 	if watchID == "" {
 		var envelope struct {
@@ -307,6 +315,7 @@ func publish(ctx context.Context, client *http.Client, base, token string, expec
 			return result, fail
 		}
 		result.Status = "preview_complete"
+		result.SelectedFiles, result.SelectedBytes = selected, size
 		if previewOnly {
 			return result, nil
 		}
@@ -360,12 +369,14 @@ func publish(ctx context.Context, client *http.Client, base, token string, expec
 			result.SnapshotID = s.ID
 			result.Commit = s.Commit
 			result.Chunks = s.ChunkCount
+			result.SelectedFiles = s.FileCount
 			result.ElapsedMS = time.Since(started).Milliseconds()
 			result.PhaseMS = map[string]int64{}
 			if t := log.Result.Source.Telemetry; t != nil {
 				if t.Bytes == nil || *t.Bytes != expected.Bytes {
 					return result, fail
 				}
+				result.SelectedBytes = *t.Bytes
 				for _, name := range []string{"fetching", "parsing", "indexing", "publishing"} {
 					if n, ok := t.Phase[name]; ok && n >= 0 {
 						result.PhaseMS[name] = n
