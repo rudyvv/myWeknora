@@ -62,6 +62,31 @@ func TestSourceWikiSkeletonPlansSystemEntrypointModulesAndEvidenceBackedFlows(t 
 	require.Equal(t, "planned", byKey["system"].Status)
 }
 
+func TestSourceWikiSkeletonUsesModuleSeedProjection(t *testing.T) {
+	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
+		SourceID: "source-a", SnapshotID: "snapshot-a",
+		Files: []sourceWikiSkeletonFile{
+			{Path: "src/controller/OrdersController.java", Facts: []types.ParsedSourceFact{{
+				Kind: "java_type", Name: "OrdersController", OwnerKind: "class", Quality: "structural",
+			}}},
+			{Path: "src/service/OrdersService.java", Facts: []types.ParsedSourceFact{{
+				Kind: "java_type", Name: "OrdersService", OwnerKind: "interface", Quality: "structural",
+			}}},
+		},
+		ModuleSeedFiles: []sourceWikiSkeletonFile{{Path: "src/service/OrdersService.java", Facts: []types.ParsedSourceFact{{
+			Kind: "java_type", Name: "OrdersService", OwnerKind: "interface", Quality: "structural",
+		}}}},
+	}, 40)
+	var modulePaths []string
+	for _, topic := range plan.Topics {
+		if topic.Kind == sourceWikiTopicModule {
+			modulePaths = append(modulePaths, topic.ModulePath)
+		}
+	}
+	require.Equal(t, []string{"src/service"}, modulePaths,
+		"module planning must use only the selected projection seed, not full per-file facts")
+}
+
 func TestSourceWikiSkeletonCapsInitialBatchAndKeepsStableSourceTopicKeys(t *testing.T) {
 	input := sourceWikiSkeletonInput{SourceID: "source-a", SnapshotID: "snapshot-9"}
 	for i := 0; i < 55; i++ {

@@ -30,10 +30,11 @@ type SourceWikiSkeletonPlan struct {
 }
 
 type sourceWikiSkeletonInput struct {
-	SourceID   string
-	SnapshotID string
-	Files      []sourceWikiSkeletonFile
-	Relations  []types.SourceCodeRelation
+	SourceID        string
+	SnapshotID      string
+	Files           []sourceWikiSkeletonFile
+	ModuleSeedFiles []sourceWikiSkeletonFile
+	Relations       []types.SourceCodeRelation
 }
 
 type sourceWikiSkeletonFile struct {
@@ -70,7 +71,19 @@ func buildSourceWikiSkeleton(input sourceWikiSkeletonInput, initialLimit int) So
 		filesByPath[clean] = file
 	}
 
-	modules := sourceWikiModuleCandidates(filesByPath)
+	moduleFilesByPath := filesByPath
+	if input.ModuleSeedFiles != nil {
+		moduleFilesByPath = make(map[string]sourceWikiSkeletonFile, len(input.ModuleSeedFiles))
+		for _, file := range input.ModuleSeedFiles {
+			clean := normalizeSourceWikiPath(file.Path)
+			if clean == "" {
+				continue
+			}
+			file.Path = clean
+			moduleFilesByPath[clean] = file
+		}
+	}
+	modules := sourceWikiModuleCandidates(moduleFilesByPath)
 	flows := sourceWikiFlowCandidates(input.Relations, filesByPath)
 	topics := make([]SourceWikiTopic, 0, 1+len(modules)+len(flows))
 	topics = append(topics, SourceWikiTopic{
