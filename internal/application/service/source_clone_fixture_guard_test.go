@@ -5,7 +5,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -77,17 +79,41 @@ func fixedCloneFixtureDatabase(t *testing.T, admin *gorm.DB, config *pgx.ConnCon
    (SELECT count(*) FROM pg_roles WHERE rolname=current_user AND
     (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls OR rolinherit))::text`
 		result, err := conn.Exec(ctx, sql).ReadAll()
-		if err != nil || len(result) != 1 || len(result[0].Rows) != 1 || len(result[0].Rows[0]) != 6 {
+		if err != nil {
+			var pgError *pgconn.PgError
+			code := "unknown"
+			if errors.As(err, &pgError) {
+				code = pgError.Code
+			}
+			return fmt.Errorf("restricted_fixture_proof_query_%s", code)
+		}
+		if len(result) != 1 || len(result[0].Rows) != 1 || len(result[0].Rows[0]) != 6 {
 			return errors.New("restricted fixture identity unavailable")
 		}
 		values := result[0].Rows[0]
 		if string(values[0]) != fixedSourceAcceptanceClone || string(values[1]) != schema || string(values[2]) != role || string(values[3]) != "f" || string(values[4]) != "0" || string(values[5]) != "0" {
-			return errors.New("restricted fixture identity or permissions rejected")
+			return fmt.Errorf("restricted_fixture_proof_database_%t_schema_%t_role_%t_public_create_%t_public_privilege_zero_%t_role_flags_zero_%t",
+				string(values[0]) == fixedSourceAcceptanceClone, string(values[1]) == schema, string(values[2]) == role, string(values[3]) != "f", string(values[4]) == "0", string(values[5]) == "0")
 		}
 		return nil
 	}
 	pool := stdlib.OpenDB(*worker)
 	db, err := gorm.Open(pgdriver.New(pgdriver.Config{Conn: pool}), &gorm.Config{Logger: quietSourceIntegrationLogger{}})
+	if err != nil {
+		var pgError *pgconn.PgError
+		code := "unknown"
+		if errors.As(err, &pgError) {
+			code = pgError.Code
+		}
+		proof := "no_validation_diagnostic"
+		for _, part := range strings.Fields(err.Error()) {
+			if strings.HasPrefix(part, "restricted_fixture_proof_") {
+				proof = part
+				break
+			}
+		}
+		t.Logf("restricted_fixture_connection sqlstate=%s proof=%s", code, proof)
+	}
 	require.True(t, err == nil, "restricted fixture session failed")
 	t.Cleanup(func() { _ = pool.Close() })
 	return db
