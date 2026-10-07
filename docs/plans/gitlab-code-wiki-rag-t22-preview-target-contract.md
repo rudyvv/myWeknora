@@ -26,4 +26,12 @@
 
 根因诊断（非GitLab token权限）：fixture本地upload-pack默认拒绝分支推进后非tip的unadvertised want。根以只读Git凭据对真实 `gitlab.p.it/zhangruiliang/nsb` 实测：产品同款 `git fetch --no-tags --no-write-fetch-head --depth=1 <url> <非tip可达SHA>` exit 0，证明真实GitLab服务端允许按可达SHA fetch。修复为fixture基础设施对齐真实服务器行为：repo配置 `uploadpack.allowReachableSHA1InWant=true`；同时fixture Git HTTP handler不再因upload-pack按设计写ERR包后非零退出而判死测试。产品三文件未改动。
 
-定向green后补充四个真实回归（均通过，日志 `t22-isolated-runtime-logs/t22-preview-target-trae.txt` 与五测合并运行 exit0）：登记前HEAD已变拒绝且不留sync log/run；目标因force-push不可达时明确失败并保留上一发布；崩溃后 `RecoverSourceTriggers` 重投仍发布登记的固定目标；配置更新通过公开 `UpdateDataSource` seam使queued expected-commit run被fence取消、迟到投递不发布、新trigger在新配置下发布。最终冻结SHA与独立双轴/安全审查见后续记录；审查为TRAE子代理，不冒称Sol。
+定向green后补充四个真实回归（均通过，日志 `t22-isolated-runtime-logs/t22-preview-target-trae.txt` 与五测合并运行 exit0）：登记前HEAD已变拒绝且不留sync log/run；目标因force-push不可达时明确失败并保留上一发布；崩溃后 `RecoverSourceTriggers` 重投仍发布登记的固定目标；配置更新通过公开 `UpdateDataSource` seam使queued expected-commit run被fence取消、迟到投递不发布、新trigger在新配置下发布。
+
+## 2026-10-07 冻结与三轴审查（TRAE子代理，非Sol）
+
+首冻 `49f0238b`（产品三文件+fixture对齐+四回归+文档）。并行独立子代理三轴审查：Standards 0硬违规（判断项：connector→resolve形状在包内第三次出现、repository层弃用ctx返回值仅作校验、兄弟测试fixture未同步align、CONTEXT.md缺"expected commit"词条，均非阻断）；Spec 1缺口——document模式与无durable协调器两条拒绝路径已实现未验证；安全 0阻断/0 major（授权链完整、SHA格式处处强制、argv无注入面、TOCTOU符合合同设计、错误信息仅泄露1位HEAD漂移oracle且预览本可见、租约/代数fencing完整）。
+
+Spec缺口以两个新回归修复（document模式400且不留log；接口裁剪掉SourceSyncControlRepository的服务拒绝该选项），七测合并 `^TestSourceManualSync(…)$` exit0（日志 `t22-preview-target-all-seven-trae.txt`）。**最终冻结 `4e4fc3b425935eddf334823e5ea226cf042db568`**，树clean。
+
+全量service integration包（-timeout=45m）与基线对照：超时前9个失败（rules-10/11 parser版本漂移、cron entry、indexing状态等）在干净 `553afa0` 基线同样失败（`%TEMP%/t22-baseline-head-nine.txt`），为预存环境/树内不一致，非本slice回归；首次运行10分钟默认超时中断后续为连锁损伤。整票结束时的最终全套测试仍待执行。
