@@ -228,6 +228,32 @@ func (f *sourceWikiModuleProjectionPG) setCounts(t *testing.T, members, parsed i
 	}
 }
 
+func (f *sourceWikiModuleProjectionPG) addMaxPathMembers(t *testing.T, count int) {
+	t.Helper()
+	const pathSQL = `WITH paths AS (
+		SELECT i, 'p'||lpad(i::text,6,'0')||repeat('x',4089) AS path
+		FROM generate_series(1,?) AS series(i)
+	)`
+	if err := f.db.Exec(pathSQL+` INSERT INTO source_files(id,tenant_id,knowledge_base_id,data_source_id,path)
+		SELECT md5('projection-file-'||i::text), ?, ?, ?, path FROM paths`, count, f.tenantID, f.kbID, f.sourceID).Error; err != nil {
+		t.Fatalf("seed max-path source files: %v", err)
+	}
+	if err := f.db.Exec(pathSQL+` INSERT INTO source_file_versions
+		(id,source_file_id,snapshot_id,blob_sha,sha256,content,parser_version,quality,symbols,facts)
+		SELECT md5('projection-version-'||i::text),md5('projection-file-'||i::text),?,?,?,''::bytea,
+			'fixture-parser','structural','[]','[]' FROM paths`,
+		count, f.snapshotID, strings.Repeat("b", 40), strings.Repeat("c", 64)).Error; err != nil {
+		t.Fatalf("seed max-path source versions: %v", err)
+	}
+	if err := f.db.Exec(pathSQL+` INSERT INTO source_snapshot_members
+		(snapshot_id,path,source_file_id,file_version_id,blob_sha,status,generated)
+		SELECT ?,path,md5('projection-file-'||i::text),md5('projection-version-'||i::text),?,'parsed',false FROM paths`,
+		count, f.snapshotID, strings.Repeat("b", 40)).Error; err != nil {
+		t.Fatalf("seed max-path manifest members: %v", err)
+	}
+	f.setCounts(t, count, count)
+}
+
 func TestLoadSourceWikiModuleProjectionPagesManifestAndSelectsOnlyBestSeed(t *testing.T) {
 	f := newSourceWikiModuleProjectionPostgres(t)
 	payload := strings.Repeat("irrelevant-fact-payload-", 90_000)
@@ -441,5 +467,49 @@ func TestLoadSourceWikiModuleProjectionRejectsOversizedSeedWithoutTruncation(t *
 	f.setCounts(t, 1, 1)
 	if _, err := LoadSourceWikiModuleProjection(f.ctx, f.db, f.tenantID, f.kbID, f.sourceID, f.snapshotID); err == nil {
 		t.Fatal("loader accepted or truncated a module seed beyond its per-string hard bound")
+	}
+}
+
+func TestLoadSourceWikiModuleProjectionAcceptsExactPathByteBudgets(t *testing.T) {
+	f := newSourceWikiModuleProjectionPostgres(t)
+	f.addMaxPathMembers(t, (8<<20)/4096)
+	projection, err := LoadSourceWikiModuleProjection(f.ctx, f.db, f.tenantID, f.kbID, f.sourceID, f.snapshotID)
+	if err != nil {
+		t.Fatalf("load projection at exact aggregate path-byte limit: %v", err)
+	}
+	if !projection.InventoryComplete || len(projection.Members) != (8<<20)/4096 || len(projection.Members[0].Path) != 4096 {
+		t.Fatalf("exact-boundary projection is incomplete: complete=%t members=%d first-path-bytes=%d",
+			projection.InventoryComplete, len(projection.Members), len(projection.Members[0].Path))
+	}
+}
+
+func TestLoadSourceWikiModuleProjectionRejectsPathByteOveragesWithoutPartialResult(t *testing.T) {
+	tests := []struct {
+		name string
+		seed func(*testing.T, *sourceWikiModuleProjectionPG)
+	}{
+		{
+			name: "single path exceeds 4096 bytes",
+			seed: func(t *testing.T, f *sourceWikiModuleProjectionPG) {
+				f.addParsed(t, strings.Repeat("p", 4097), false, nil, nil)
+				f.setCounts(t, 1, 1)
+			},
+		},
+		{
+			name: "aggregate paths exceed 8 MiB",
+			seed: func(t *testing.T, f *sourceWikiModuleProjectionPG) {
+				f.addMaxPathMembers(t, (8<<20)/4096+1)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSourceWikiModuleProjectionPostgres(t)
+			tt.seed(t, f)
+			projection, err := LoadSourceWikiModuleProjection(f.ctx, f.db, f.tenantID, f.kbID, f.sourceID, f.snapshotID)
+			if err == nil || projection != nil {
+				t.Fatalf("over-budget path inventory returned projection=%v, err=%v; want nil projection and error", projection, err)
+			}
+		})
 	}
 }
