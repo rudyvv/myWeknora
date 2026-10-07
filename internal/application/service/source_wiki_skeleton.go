@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -210,23 +211,7 @@ func sourceWikiModuleCandidates(files map[string]sourceWikiSkeletonFile) []sourc
 }
 
 func sourceWikiModuleFactPriority(fact types.ParsedSourceFact) int {
-	if fact.Quality != "" && fact.Quality != "structural" {
-		return 0
-	}
-	switch fact.Kind {
-	case "spring_mapping":
-		return 110
-	case "mybatis_mapper", "mybatis_statement", "mybatis_result_map":
-		return 75
-	case "java_type":
-		name := strings.ToLower(fact.Name)
-		for _, role := range []string{"controller", "service", "serviceimpl", "mapper", "repository", "configuration", "config", "application"} {
-			if strings.HasSuffix(name, role) {
-				return 90
-			}
-		}
-	}
-	return 0
+	return source.SourceWikiModuleFactPriority(fact)
 }
 
 func sourceWikiModuleTitle(modulePath string, fact types.ParsedSourceFact) string {
