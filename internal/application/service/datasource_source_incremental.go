@@ -7,6 +7,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -208,12 +209,41 @@ func (s *DataSourceService) newSourceIndexBatchStager(ctx context.Context, ds *t
 		indexProfile: indexProfile, dimension: dimension}, nil
 }
 
-// sourceEmbeddingBatchWithQuotaBackoff embeds one batch, waiting out provider
-// quota windows instead of failing the run while the quota can still recover.
-// Vectors banked by earlier batches stay cached, so repeated quota windows
-// converge; when a backoff no longer fits before the run deadline the stage
-// fails explicitly and the durable retry path resumes from the cache.
+// Volcengine dispatches each text independently. Keep successful results within
+// this bounded batch so a quota error in another text does not charge them again
+// on every backoff. This cache belongs only to this call and model instance.
+type sourceQuotaRetryEmbedder struct {
+	model   sourceBatchEmbedder
+	mu      sync.Mutex
+	vectors map[string][]float32
+}
+
+func (m *sourceQuotaRetryEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) != 1 {
+		return m.model.BatchEmbed(ctx, texts)
+	}
+	m.mu.Lock()
+	vector, found := m.vectors[texts[0]]
+	m.mu.Unlock()
+	if found {
+		return [][]float32{vector}, nil
+	}
+	vectors, err := m.model.BatchEmbed(ctx, texts)
+	if err == nil && len(vectors) == 1 && len(vectors[0]) > 0 {
+		m.mu.Lock()
+		m.vectors[texts[0]] = vectors[0]
+		m.mu.Unlock()
+	}
+	return vectors, err
+}
+
+// sourceEmbeddingBatchWithQuotaBackoff embeds one batch within the fixed run
+// budget. Earlier batches remain persisted; successful Volcengine texts in the
+// current batch also survive a quota backoff without another provider request.
 func sourceEmbeddingBatchWithQuotaBackoff(embedCtx context.Context, runCtx context.Context, provider string, model sourceBatchEmbedder, texts []string) ([][]float32, error) {
+	if provider == string(types.ModelSourceVolcengine) {
+		model = &sourceQuotaRetryEmbedder{model: model, vectors: make(map[string][]float32, len(texts))}
+	}
 	for attempt := 0; ; attempt++ {
 		vectors, err := sourceBatchEmbed(embedCtx, provider, model, texts)
 		if err == nil {

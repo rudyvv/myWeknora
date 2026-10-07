@@ -1,11 +1,50 @@
 package tools
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestSourceReferenceIdentitySurvivesToolReplayWithoutSourceBodies(t *testing.T) {
+	evidence := &types.SourceEvidence{DataSourceID: "source", SnapshotID: "snapshot", FileVersionID: "version", ProjectID: "project", CommitSHA: strings.Repeat("a", 40), Path: "src/Service.java", Quality: "structural", Range: types.SourceRange{StartByte: 0, EndByte: 25, StartLine: 1, EndLine: 2}, Context: []types.SourceContext{{Text: "secret-source-context"}}}
+	for _, display := range []string{"knowledge_chunks_list", "grep_results"} {
+		field := "chunks"
+		if display == "grep_results" {
+			field = "chunk_results"
+		}
+		data := map[string]interface{}{"display_type": display, field: []map[string]interface{}{{"chunk_id": "chunk", "knowledge_id": "file", "knowledge_base": "kb", "knowledge_base_id": "kb", "source_evidence": evidence, "content": "secret-source-body", "match_snippet": "secret-source-snippet"}}}
+		stored := SanitizeToolDataForPersist(ToolListKnowledgeChunks, data)
+		raw, err := json.Marshal(stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "secret-source") {
+			t.Fatalf("tool replay must omit raw source and context: %s", raw)
+		}
+		var replay map[string]interface{}
+		if err := json.Unmarshal(raw, &replay); err != nil {
+			t.Fatal(err)
+		}
+		refs, ok := replay["source_references"].([]interface{})
+		if !ok || len(refs) != 1 {
+			t.Fatalf("fixed source identity was lost for %s", display)
+		}
+		ref := refs[0].(map[string]interface{})
+		if ref["knowledge_id"] != "file" || ref["knowledge_base_id"] != "kb" || ref["source_evidence"].(map[string]interface{})["file_version_id"] != "version" {
+			t.Fatalf("source reference identity changed: %#v", ref)
+		}
+		if len(evidence.Context) != 1 {
+			t.Fatal("sanitization must not mutate live model evidence")
+		}
+		client := SanitizeToolResultForClient(ToolListKnowledgeChunks, &types.ToolResult{Success: true, Data: data})
+		if client["source_references"] == nil {
+			t.Fatal("live SSE must retain the same source navigation metadata")
+		}
+	}
+}
 
 func TestShouldOmitRawToolOutput(t *testing.T) {
 	if !ShouldOmitRawToolOutput(ToolListKnowledgeChunks, map[string]interface{}{"display_type": "knowledge_chunks_list"}) {

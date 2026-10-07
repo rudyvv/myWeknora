@@ -532,7 +532,9 @@ func TestSourceUpdateKeepsPublishedVersionDuringParsingAndVectorFailure(t *testi
 	running, err = f.service.GetSyncLog(f.ctx, log.ID)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(running.Result, &progress))
-	require.Equal(t, "indexing", progress.Source.Snapshot.State)
+	// Index batches are flushed while files are streamed through parsing. The
+	// snapshot stays in parsing until the complete manifest has been processed.
+	require.Equal(t, "parsing", progress.Source.Snapshot.State)
 	f.embedRelease <- struct{}{}
 	require.ErrorContains(t, <-done, "zero norm")
 	assertIncrementalOldPublication(t, f, oldFile.SourceFileID, old.Snapshot.CommitSHA)

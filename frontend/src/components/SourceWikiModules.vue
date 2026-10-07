@@ -40,7 +40,7 @@ async function load() {
       listSourceWikiAttempts(props.kbId),
     ])
     if (current !== generation) return
-    sources.value = (sourceRes.data || []).filter((source: DataSource) => source.config?.settings?.content_mode === 'source')
+    sources.value = (Array.isArray(sourceRes) ? sourceRes : sourceRes.data || []).filter((source: DataSource) => source.config?.settings?.content_mode === 'source')
     attempts.value = attemptRes.data || []
     if (!sources.value.some(source => source.id === sourceID.value)) sourceID.value = sources.value[0]?.id || ''
   } catch {

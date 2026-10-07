@@ -9,8 +9,25 @@ export function getAgentDrawerReferences(
   mapToolReferenceItems: (event: any) => KnowledgeReferenceLike[],
 ): KnowledgeReferenceLike[] {
   const messageReferences = refsOverride?.length ? refsOverride : aggregatedReferences
-  if (messageReferences?.length) return messageReferences
-  return (events || []).flatMap((event) => mapToolReferenceItems(event))
+  const toolReferences = (events || []).flatMap((event: any) => [
+    ...mapToolReferenceItems(event),
+    ...(Array.isArray(event?.tool_data?.source_references) ? event.tool_data.source_references.map((item: any) => ({
+      id: item.chunk_id,
+      knowledge_id: item.knowledge_id,
+      knowledge_base_id: item.knowledge_base_id,
+      knowledge_title: item.knowledge_title || item.source_evidence?.path,
+      source_evidence: item.source_evidence,
+    })) : []),
+  ])
+  if (!messageReferences?.length) return toolReferences
+  return messageReferences.map((reference) => {
+    if (!reference.knowledge_id || !reference.knowledge_base_id ||
+      (Array.isArray(reference.source_evidence) ? reference.source_evidence.length > 0 : reference.source_evidence)) return reference
+    const evidence = toolReferences
+      .filter((item) => item.knowledge_id === reference.knowledge_id && item.knowledge_base_id === reference.knowledge_base_id)
+      .flatMap((item) => Array.isArray(item.source_evidence) ? item.source_evidence : item.source_evidence ? [item.source_evidence] : [])
+    return evidence.length ? { ...reference, source_evidence: evidence } : reference
+  })
 }
 
 export function getKnowledgeSearchToolReferences(event: any): KnowledgeReferenceLike[] {

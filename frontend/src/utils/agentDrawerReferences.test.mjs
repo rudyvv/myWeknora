@@ -7,6 +7,43 @@ import {
 import { buildReferenceList, isNavigableSourceEvidence } from './referenceSources.ts'
 import * as agentDrawerReferences from './agentDrawerReferences.ts'
 
+test('aggregate document references retain matching source evidence from completed tools', () => {
+  const evidence = {
+    data_source_id: 'source-1', snapshot_id: 'snapshot-1', file_version_id: 'version-1',
+    project_id: 'project-1', commit_sha: 'a'.repeat(40), path: 'src/service.ts',
+    range: { start_byte: 0, end_byte: 8, start_line: 1, end_line: 1 },
+    symbols: null, quality: 'structural', gitlab_url: '', context: null,
+  }
+  const aggregate = [{ id: 'chunk-1', knowledge_id: 'file-1', knowledge_base_id: 'kb-1', content: 'Existing snippet' }]
+  const tools = [
+    { knowledge_id: 'file-1', knowledge_base_id: 'kb-1', source_evidence: evidence },
+    { knowledge_id: 'file-1', knowledge_base_id: 'other-kb', source_evidence: { ...evidence, snapshot_id: 'other-snapshot' } },
+    { knowledge_id: 'other-file', knowledge_base_id: 'kb-1', source_evidence: { ...evidence, path: 'src/other.ts' } },
+  ]
+  const references = getAgentDrawerReferences(null, aggregate, [tools], event => event)
+  assert.equal(references.length, 1)
+  assert.deepEqual(references[0].source_evidence, [evidence])
+  assert.equal(references[0].content, 'Existing snippet')
+  assert.equal(aggregate[0].source_evidence, undefined, 'input references must not be mutated')
+  assert.equal(isNavigableSourceEvidence(references[0].knowledge_id, buildReferenceList(references)[0].sourceEvidence[0]), true)
+  const pinned = [{ ...aggregate[0], source_evidence: { ...evidence, snapshot_id: 'pinned-snapshot' } }]
+  assert.deepEqual(getAgentDrawerReferences(pinned, aggregate, [tools], event => event), pinned)
+})
+
+test('metadata-only source references restore fixed-version navigation after a history reload', () => {
+  const evidence = {
+    data_source_id: 'source-1', snapshot_id: 'snapshot-1', file_version_id: 'version-1',
+    project_id: 'project-1', commit_sha: 'a'.repeat(40), path: 'src/service.ts',
+    range: { start_byte: 0, end_byte: 8, start_line: 1, end_line: 1 },
+    symbols: null, quality: 'structural', gitlab_url: '', context: null,
+  }
+  const event = { tool_name: 'list_knowledge_chunks', tool_data: { source_references: [{ chunk_id: 'chunk-1', knowledge_id: 'file-1', knowledge_base_id: 'kb-1', source_evidence: evidence }] } }
+  const aggregate = [{ knowledge_id: 'file-1', knowledge_base_id: 'kb-1' }]
+  const refs = getAgentDrawerReferences(null, aggregate, [event], () => [])
+  assert.deepEqual(buildReferenceList(refs)[0].sourceEvidence, [evidence])
+  assert.equal(isNavigableSourceEvidence(refs[0].knowledge_id, buildReferenceList(refs)[0].sourceEvidence[0]), true)
+})
+
 test('empty aggregate references fall back to knowledge_search tool_result source evidence', () => {
   const sourceEvidence = {
     data_source_id: 'source-1',

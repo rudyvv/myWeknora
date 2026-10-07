@@ -537,6 +537,11 @@
       <div v-if="showRequestInfo && isConversationDone && !hasDoneAnswerContent" class="answer-toolbar">
         <ChatRequestInfoButton :session="session" :session-id="sessionId" />
       </div>
+      <div v-if="isConversationDone && getReferencesForDrawer().length" class="answer-toolbar">
+        <t-button size="small" variant="text" @click="openReferencesDrawer()">
+          {{ t('chat.referencesDrawerTitle') }}
+        </t-button>
+      </div>
       <!-- Loading Indicator (inside container so it scrolls into view) -->
       <div v-if="showAgentActivityIndicator" class="tree-child tree-child-last streaming-loading-node">
         <div class="tree-branch"></div>
@@ -591,6 +596,9 @@
       </div>
     </template>
   </t-drawer>
+  <t-drawer v-if="wikiSourceVisible" v-model:visible="wikiSourceVisible" header="固定版本源码证据" size="720px" :footer="false" destroy-on-close>
+    <SourceCodeView v-if="wikiSourceTarget" :knowledge-id="wikiSourceTarget.evidence.knowledge_id" :file-version-id="wikiSourceTarget.evidence.file_version_id" :wiki-evidence="wikiSourceTarget.owner" :evidence-range="wikiSourceTarget.evidence.range" />
+  </t-drawer>
   <ChatArtifactsDrawer
     v-if="hasArtifacts && embeddedMode && sessionIdForArtifacts && messageIdForArtifacts"
     v-model:visible="showArtifactDrawer"
@@ -630,6 +638,8 @@ import type { KnowledgeReferenceLike, ReferenceHighlightTarget } from '@/utils/r
 import { getAgentDrawerReferences, getGrepChunkToolReferences, getKnowledgeSearchToolReferences } from '@/utils/agentDrawerReferences';
 import { resolveCitationChunkId } from '@/utils/citationMarkdown';
 import { getWikiPage, type WikiPage } from '@/api/wiki';
+import SourceCodeView from '@/components/SourceCodeView.vue';
+import { resolveWikiSourceEvidence } from '@/utils/wikiSourceEvidence';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useUIStore } from '@/stores/ui';
 import { useSettingsStore } from '@/stores/settings';
@@ -834,6 +844,8 @@ const wikiDrawerVisible = ref(false);
 const wikiDrawerPage = ref<WikiPage | null>(null);
 const wikiDrawerBodyRef = ref<HTMLElement | null>(null);
 const currentWikiKbId = ref<string>('');
+const wikiSourceVisible = ref(false);
+const wikiSourceTarget = ref<ReturnType<typeof resolveWikiSourceEvidence>>(null);
 
 function getTypeTheme(type: string): string {
   const map: Record<string, string> = {
@@ -912,6 +924,15 @@ const openRouteInNewTab = (path: string) => {
 
 const handleWikiDrawerClick = (e: MouseEvent) => {
   const target = e.target as HTMLElement;
+  const anchor = target.closest('a');
+  const sourceTarget = anchor && resolveWikiSourceEvidence(anchor.getAttribute('href') || '', currentWikiKbId.value, wikiDrawerPage.value, window.location.origin);
+  if (sourceTarget) {
+    e.preventDefault();
+    e.stopPropagation();
+    wikiSourceTarget.value = sourceTarget;
+    wikiSourceVisible.value = true;
+    return;
+  }
   if (target.closest('.citation-wiki')) {
     e.preventDefault();
     e.stopPropagation();

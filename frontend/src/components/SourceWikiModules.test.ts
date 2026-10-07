@@ -21,6 +21,37 @@ function component(name: string, apis: Record<string, any>) {
  new Function('require', 'module', 'exports', compiled)((name: string) => apis[name] || require(name), module, module.exports)
  return module.exports.default
 }
+test('source repository selector accepts the datasource API array and submits module generation', async () => {
+ const requests: any[] = []
+ const view = component('./SourceWikiModules.vue', {
+  '@/api/datasource': { async listDataSources() { return [
+   { id: 'source-repo', name: 'Source repository', config: { settings: { content_mode: 'source' } } },
+   { id: 'document-repo', name: 'Document repository', config: { settings: { content_mode: 'document' } } }
+  ] } },
+  '@/api/wiki': {
+   async listSourceWikiAttempts() { return { data: [] } },
+   async listSourceWikiCoverage() { return { data: [] } },
+   async listSourceWikiBatches() { return { data: [] } },
+   async generateSourceWikiModule(_kb: string, request: any) { requests.push(request); return { data: { status: 'ready', slug: 'module-new' } } }
+  }
+ })
+ const host = document.createElement('div'); document.body.append(host)
+ const app = createApp({ render: () => h(view, { kbId: 'kb-one', canEdit: true }) }); app.mount(host)
+ try {
+  await settle()
+  const select = host.querySelector<HTMLSelectElement>('[aria-label="技术卡片仓库"]')
+  assert.ok(select, 'the generation form must remain available with a datasource API array')
+  assert.deepEqual(Array.from(select.options).map(option => option.value), ['source-repo'])
+  for (const [selector, value] of [['[aria-label="模块目录"]', 'src/module'], ['[aria-label="技术卡片主题"]', 'Module responsibilities']]) {
+   const input = host.querySelector<HTMLInputElement>(selector)!; input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  }
+  await settle()
+  const generate = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '生成模块卡片')!
+  assert.equal(generate.disabled, false)
+  host.querySelector('form')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle()
+  assert.deepEqual(requests, [{ source_id: 'source-repo', module_path: 'src/module', title: 'Module responsibilities' }])
+ } finally { app.unmount(); host.remove() }
+})
 test('module failure reason is visible and manual retry uses a fresh bounded attempt', async () => {
  let attempts = [{ id: 'failed-one', source_id: 'repo-one', module_path: 'src/scheduling', title: 'Scheduling', slug: 'module-one', status: 'failed', reason: 'fabricated evidence e999', calls: 3, tokens: 8000, repairs: 2 }]
  const requests: any[] = [], ready: string[] = []
@@ -49,6 +80,8 @@ test('module failure reason is visible and manual retry uses a fresh bounded att
 test('Wiki body owner opens exact evidence in the source viewer and rejects SHA substitution', async () => {
  const requests: any[] = []
  const view = component('./SourceCodeView.vue', {
+  '@/utils/sourceQuality': require('../utils/sourceQuality.ts'),
+  '@/utils/referenceSources': require('../utils/referenceSources.ts'),
   '@/components/SourceRegionBadge.vue': { render: () => null },
   '@/api/knowledge-base': { async getSourceFile() { throw new Error('unexpected ordinary source read') } },
   '@/api/wiki': { async readSourceWikiEvidence(...args: any[]) { requests.push(args); return { data: { knowledge_id: 'file-one', file_version_id: 'version-one', commit_sha: 'a'.repeat(40), path: 'src/Service.java', repository_url: 'https://gitlab.local/team/repo', content: 'class Service {\r\n String getPushSchedule() { return "scheduled"; }\r\n}', symbols: [], encoding: 'utf-8', quality: 'structural' } } } }

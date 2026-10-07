@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -70,12 +71,63 @@ func sanitizeToolData(data map[string]interface{}, extraOmit []string) map[strin
 	}
 	displayType := stringField(data, "display_type")
 	for _, key := range persistStripFields[displayType] {
+		if refs := sourceReferencesForReplay(data[key]); len(refs) > 0 {
+			out["source_references"] = refs
+		}
 		delete(out, key)
 	}
 	for _, key := range extraOmit {
 		delete(out, key)
 	}
 	return out
+}
+
+type sourceReplayReference struct {
+	ChunkID         string                `json:"chunk_id"`
+	KnowledgeID     string                `json:"knowledge_id"`
+	KnowledgeBaseID string                `json:"knowledge_base_id"`
+	KnowledgeBase   string                `json:"knowledge_base,omitempty"`
+	KnowledgeTitle  string                `json:"knowledge_title,omitempty"`
+	SourceEvidence  *types.SourceEvidence `json:"source_evidence"`
+}
+
+// Source navigation must survive live SSE and history reload, while source
+// bodies and the evidence's raw context remain omitted from replay payloads.
+func sourceReferencesForReplay(value interface{}) []sourceReplayReference {
+	const maxReferences = 200
+	switch items := value.(type) {
+	case []grepChunkResult:
+		value = items[:min(len(items), maxReferences)]
+	case []map[string]interface{}:
+		value = items[:min(len(items), maxReferences)]
+	case []interface{}:
+		value = items[:min(len(items), maxReferences)]
+	default:
+		return nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var entries []sourceReplayReference
+	if json.Unmarshal(raw, &entries) != nil {
+		return nil
+	}
+	refs := make([]sourceReplayReference, 0, len(entries))
+	for _, ref := range entries {
+		if ref.KnowledgeBaseID == "" {
+			ref.KnowledgeBaseID = ref.KnowledgeBase
+		}
+		ref.KnowledgeBase = ""
+		evidence := ref.SourceEvidence
+		if evidence == nil || ref.KnowledgeID == "" || ref.KnowledgeBaseID == "" || evidence.FileVersionID == "" || evidence.SnapshotID == "" {
+			continue
+		}
+		evidence.Context = nil
+		evidence.Diagnostics = nil
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 // SanitizeToolResultForClient builds stream / persistence metadata for the UI.

@@ -1,6 +1,6 @@
 //go:build windows
 
-// launch is a narrow launcher for the already accepted T22 feature binary.
+// launch is a narrow launcher for the pinned CodeWiki MVP feature binary.
 // Its default mode is filesystem-stat-only. --start is reserved for Root after
 // the isolated runtime, database and ACL gates have been independently met.
 package main
@@ -30,8 +30,8 @@ import (
 )
 
 const (
-	acceptedExe = `C:/Users/28211/.codex/test-runners/weknora-t22-acceptance-8f1fa40a.exe`
-	acceptedSHA = "0724ff7ae19e0fde27a754fef8bfa278875f4d3adec4cb660584fdcf3ba7c5bd"
+	acceptedExe = `C:/Users/28211/.codex/test-runners/weknora-basic-source-replay-20261007.exe`
+	acceptedSHA = "a7da80a02e6e39b469427cece2180ffc7120a0a5bc76ebcc59c4c64af56744f8"
 	workRoot    = `C:\Users\28211\.codex\worktrees\source-integration\WeKnora`
 	primaryEnv  = `D:\Project-Weknora\WeKnora\.env`
 	localEnv    = `D:\Project-Weknora\WeKnora\.env.local`
@@ -48,8 +48,9 @@ const (
 	serverAddress = "127.0.0.1:57825"
 	parserURL     = "http://127.0.0.1:57823"
 
-	maxDotenvBytes    = 1 << 20
-	frozenTLSDeadline = "2026-10-07T16:30:00Z"
+	maxDotenvBytes = 1 << 20
+	// User approved this origin-only extension on 2026-10-07 for next-day demo.
+	frozenTLSDeadline = "2026-10-08T10:00:00Z"
 )
 
 var knownAsynqQueues = map[string]struct{}{

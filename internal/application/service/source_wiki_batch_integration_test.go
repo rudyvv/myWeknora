@@ -1277,9 +1277,6 @@ func TestManualModulePublishCompletesMatchingExpansionCoverageWithoutAdvancingBa
 		}
 		return `{"title":"Scheduling module","summary":"The source declares a schedule.","sections":[{"text":"The module declares the cited component.","evidence_ids":["e001"],"uncertain":false}]}`
 	})
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 	var publication types.SourcePublication
 	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
 	ledger := repository.NewSourceWikiBatchLedger(f.db)
@@ -1551,9 +1548,6 @@ func TestSourceWikiManualRetryRepairsTerminalFailedInitialCoverage(t *testing.T)
 		}
 		return `{"title":"Scheduling module","summary":"The source declares a schedule.","sections":[{"text":"The module declares the cited component.","evidence_ids":["e001"],"uncertain":false}]}`
 	})
-	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "versioned", "000114_source_wiki_batches.up.sql"))
-	require.NoError(t, err)
-	require.NoError(t, f.db.Exec(string(migration)).Error)
 	var publication types.SourcePublication
 	require.NoError(t, f.db.Where("data_source_id = ?", f.ds.ID).Take(&publication).Error)
 	ledger := repository.NewSourceWikiBatchLedger(f.db)
