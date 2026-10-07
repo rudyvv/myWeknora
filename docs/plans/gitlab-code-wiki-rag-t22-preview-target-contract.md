@@ -34,4 +34,4 @@
 
 Spec缺口以两个新回归修复（document模式400且不留log；接口裁剪掉SourceSyncControlRepository的服务拒绝该选项），七测合并 `^TestSourceManualSync(…)$` exit0（日志 `t22-preview-target-all-seven-trae.txt`）。**最终冻结 `4e4fc3b425935eddf334823e5ea226cf042db568`**，树clean。
 
-全量service integration包（-timeout=45m）与基线对照：超时前9个失败（rules-10/11 parser版本漂移、cron entry、indexing状态等）在干净 `553afa0` 基线同样失败（`%TEMP%/t22-baseline-head-nine.txt`），为预存环境/树内不一致，非本slice回归；首次运行10分钟默认超时中断后续为连锁损伤。整票结束时的最终全套测试仍待执行。
+全量service integration包与基线对照（最终修正）：45m超时完整重跑共37个失败。其中9个在干净 `553afa0` stash基线同样失败；其余28个（Wiki batch 42P07顺序依赖、AES-key/Python-verifier/sandbox环境依赖、parser rules漂移类）经**已验证真正切换**的 `553afa0` 工作区基线（fixture的allowReachableSHA1InWant改动确认已从工作区消失）同样失败——**37个全部为预存失败，非本slice回归**。注意：一次先前的28测“基线”因后台沙箱阻止checkout文件写入、工作区实际仍是新代码而无效，已作废并用前台强制切换重做；全包此前从未整体运行，这些预存失败属既有树内/环境问题，留待整票最终全套时归口处理，不在本slice顺手修。整票结束时的最终全套测试仍待执行。
