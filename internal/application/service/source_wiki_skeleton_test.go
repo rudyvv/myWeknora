@@ -139,6 +139,28 @@ func TestSourceWikiSkeletonDefersAtCandidateLimitWhileBuildingFlows(t *testing.T
 	require.Len(t, plan.Topics, 4)
 }
 
+func TestSourceWikiSkeletonDefersAtAggregateFlowEvidenceLimit(t *testing.T) {
+	input := sourceWikiSkeletonInput{SourceID: "source-a", SnapshotID: "snapshot-evidence"}
+	for _, route := range []string{"/one", "/two"} {
+		input.Relations = append(input.Relations, types.SourceCodeRelation{
+			Kind: "http_route", FromPath: "web/" + strings.TrimPrefix(route, "/") + ".ts",
+			FromKey: "GET " + route, Determinacy: "certain", Quality: "structural",
+		})
+	}
+
+	plan, exceeded := buildSourceWikiSkeletonWithBudgets(input, 40, 10, 1, 1<<20)
+	require.True(t, exceeded, "the second flow must be deferred when it would exceed the aggregate evidence relation budget")
+	require.Empty(t, plan.Topics, "overflow must not return a partially planned skeleton")
+
+	plan, exceeded = buildSourceWikiSkeletonWithBudgets(input, 40, 10, 2, 1<<20)
+	require.False(t, exceeded)
+	require.Len(t, plan.Topics, 3)
+
+	plan, exceeded = buildSourceWikiSkeletonWithBudgets(input, 40, 10, 10, 1)
+	require.True(t, exceeded, "serialized relation evidence must be budgeted before tracing a new flow")
+	require.Empty(t, plan.Topics)
+}
+
 func TestSourceWikiSkeletonDoesNotPromoteUncertainRouteIntoCertainFlow(t *testing.T) {
 	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
 		SourceID: "source-a", SnapshotID: "snapshot-1",
