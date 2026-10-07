@@ -1739,6 +1739,9 @@ export default { methods: { loadOrders() {
 	}
 	require.NotNil(t, publishedAnchor, "whole-repository sync must publish a request-only relation anchor")
 	require.Equal(t, "uncertain", publishedAnchor.Determinacy)
+	require.Equal(t, requestFileID, publishedAnchor.FromFileID)
+	require.Equal(t, requestVersionID, publishedAnchor.FromVersionID)
+	require.Equal(t, "src/web/Orders.vue", publishedAnchor.FromPath)
 	require.Empty(t, publishedAnchor.ToFileID, "the unmatched request must not invent a backend edge")
 	require.Empty(t, publishedAnchor.ToKey)
 	require.Equal(t, "No statically validated backend route relationship was found for this request", publishedAnchor.ResolutionReason)
@@ -1765,14 +1768,14 @@ export default { methods: { loadOrders() {
 	require.Equal(t, "uncertain", publicFlow.Relations[0].Determinacy)
 	var publicRefs []types.SourceRelationFactRef
 	require.NoError(t, json.Unmarshal(publicFlow.Relations[0].Context, &publicRefs))
-	require.Len(t, publicRefs, 1)
-	require.Equal(t, f.ds.ID, publicRefs[0].DataSourceID)
-	require.Equal(t, publication.SnapshotID, publicRefs[0].SnapshotID)
-	require.Equal(t, requestFileID, publicRefs[0].FileID)
-	require.Equal(t, requestVersionID, publicRefs[0].FileVersionID)
-	require.Equal(t, "src/web/Orders.vue", publicRefs[0].Path)
-	require.Equal(t, "api_request", publicRefs[0].Kind)
-	require.Equal(t, requestFact.Range, publicRefs[0].Range)
+	require.Empty(t, publicRefs, "request-only anchors keep causal configuration refs empty; request identity is carried by the relation endpoint")
+	require.Equal(t, publishedAnchor.FromFileID, publicFlow.Relations[0].FromFileID)
+	require.Equal(t, publishedAnchor.FromVersionID, publicFlow.Relations[0].FromVersionID)
+	require.Equal(t, publishedAnchor.FromPath, publicFlow.Relations[0].FromPath)
+	require.Equal(t, publishedAnchor.FromRange, publicFlow.Relations[0].FromRange)
+	var publicRequestRange types.SourceRange
+	require.NoError(t, json.Unmarshal(publicFlow.Relations[0].FromRange, &publicRequestRange))
+	require.Equal(t, requestFact.Range, publicRequestRange)
 	for _, table := range []string{"source_wiki_batches", "source_wiki_topics", "wiki_pages", "wiki_page_revisions"} {
 		var count int64
 		require.NoError(t, f.db.Table(table).Where("knowledge_base_id = ?", f.kb.ID).Count(&count).Error)

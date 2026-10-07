@@ -20,6 +20,36 @@ func LoadSourceWikiImpactSnapshot(
 	knowledgeBaseID, sourceID, snapshotID string,
 	stage types.SourceWikiImpactSnapshotStage,
 ) (types.SourceWikiImpactSnapshot, *SourceWikiSkeletonSnapshot, error) {
+	return loadSourceWikiImpactSnapshot(db, tenantID, knowledgeBaseID, sourceID, snapshotID, stage, nil)
+}
+
+// LoadSourceWikiImpactSnapshotWithRelationInventory reuses a previously
+// bounded relation inventory and compares it to the fixed snapshot by streaming
+// the database rows one at a time. This preserves exact inventory equality
+// without retaining a second complete relation collection.
+func LoadSourceWikiImpactSnapshotWithRelationInventory(
+	db *gorm.DB,
+	tenantID uint64,
+	knowledgeBaseID, sourceID, snapshotID string,
+	stage types.SourceWikiImpactSnapshotStage,
+	inventory *SourceWikiRelationInventory,
+) (types.SourceWikiImpactSnapshot, *SourceWikiSkeletonSnapshot, error) {
+	if inventory == nil || inventory.TenantID != tenantID || inventory.KnowledgeBaseID != knowledgeBaseID ||
+		inventory.DataSourceID != sourceID || inventory.SnapshotID != snapshotID || !inventory.RelationsComplete ||
+		inventory.ExpectedCount != len(inventory.Relations) || inventory.ExpectedCount > types.SourceWikiSkeletonMaxRelations {
+		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+			SourceWikiImpactLoadFailureInvalid, SourceWikiImpactReasonRelationInventoryChanged)
+	}
+	return loadSourceWikiImpactSnapshot(db, tenantID, knowledgeBaseID, sourceID, snapshotID, stage, inventory)
+}
+
+func loadSourceWikiImpactSnapshot(
+	db *gorm.DB,
+	tenantID uint64,
+	knowledgeBaseID, sourceID, snapshotID string,
+	stage types.SourceWikiImpactSnapshotStage,
+	relationInventory *SourceWikiRelationInventory,
+) (types.SourceWikiImpactSnapshot, *SourceWikiSkeletonSnapshot, error) {
 	if db == nil || tenantID == 0 || knowledgeBaseID == "" || sourceID == "" || snapshotID == "" {
 		return types.SourceWikiImpactSnapshot{}, nil, fmt.Errorf("source Wiki impact read requires a fixed tenant, KB, source, and snapshot")
 	}
@@ -72,14 +102,21 @@ func LoadSourceWikiImpactSnapshot(
 		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
 			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonFactCountExceeded)
 	}
-	var contextBytes int64
-	if err := db.Table("source_code_relations").Select("COALESCE(SUM(OCTET_LENGTH(context::text)), 0)").
-		Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenantID, sourceID, snapshotID).Scan(&contextBytes).Error; err != nil {
-		return types.SourceWikiImpactSnapshot{}, nil, fmt.Errorf("read source Wiki impact relation context bounds: %w", err)
+	var relationBounds struct {
+		ContextBytes  int64
+		RelationBytes int64
 	}
-	if contextBytes > types.SourceWikiImpactMaxContextBytes {
+	if err := db.Table("source_code_relations").Select(sourceWikiRelationBoundsSelect).
+		Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenantID, sourceID, snapshotID).Scan(&relationBounds).Error; err != nil {
+		return types.SourceWikiImpactSnapshot{}, nil, fmt.Errorf("read source Wiki impact relation byte bounds: %w", err)
+	}
+	if relationBounds.ContextBytes > types.SourceWikiImpactMaxContextBytes {
 		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
 			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonRelationBytesExceeded)
+	}
+	if relationBounds.RelationBytes > types.SourceWikiImpactMaxRelationBytes {
+		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonRelationTotalBytesExceeded)
 	}
 	result := types.SourceWikiImpactSnapshot{
 		TenantID: tenantID, KnowledgeBaseID: knowledgeBaseID, SourceID: sourceID, SnapshotID: snapshotID,
@@ -209,20 +246,78 @@ func LoadSourceWikiImpactSnapshot(
 	}
 	loaded.Complete = true
 	var relations []types.SourceCodeRelation
-	if err := db.Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenantID, sourceID, snapshotID).
-		Order("from_path ASC, kind ASC, from_key ASC, to_path ASC, to_key ASC, id ASC").
-		Limit(types.SourceWikiSkeletonMaxRelations + 1).Find(&relations).Error; err != nil {
-		return types.SourceWikiImpactSnapshot{}, nil, fmt.Errorf("load source Wiki impact relations: %w", err)
-	}
-	if len(relations) > types.SourceWikiSkeletonMaxRelations {
-		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
-			SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonRelationCountExceeded)
-	}
-	if len(relations) != snapshot.RelationCount {
-		return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
-			SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonRelationCountMismatch)
+	if relationInventory != nil {
+		relations = relationInventory.Relations
+		if len(relations) != snapshot.RelationCount {
+			return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+				SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonRelationCountMismatch)
+		}
+		if err := verifySourceWikiRelationInventoryRows(db, tenantID, sourceID, snapshotID, relations); err != nil {
+			return types.SourceWikiImpactSnapshot{}, nil, err
+		}
+	} else {
+		if err := db.Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenantID, sourceID, snapshotID).
+			Order("from_path ASC, kind ASC, from_key ASC, to_path ASC, to_key ASC, id ASC").
+			Limit(types.SourceWikiSkeletonMaxRelations + 1).Find(&relations).Error; err != nil {
+			return types.SourceWikiImpactSnapshot{}, nil, fmt.Errorf("load source Wiki impact relations: %w", err)
+		}
+		if len(relations) > types.SourceWikiSkeletonMaxRelations {
+			return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+				SourceWikiImpactLoadFailureBudgetExceeded, SourceWikiImpactReasonRelationCountExceeded)
+		}
+		if len(relations) != snapshot.RelationCount {
+			return types.SourceWikiImpactSnapshot{}, nil, newSourceWikiImpactLoadError(
+				SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonRelationCountMismatch)
+		}
 	}
 	result.Relations = relations
 	loaded.Relations = relations
 	return result, loaded, nil
+}
+
+func verifySourceWikiRelationInventoryRows(
+	db *gorm.DB,
+	tenantID uint64,
+	sourceID, snapshotID string,
+	expected []types.SourceCodeRelation,
+) error {
+	rows, err := db.Model(&types.SourceCodeRelation{}).
+		Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenantID, sourceID, snapshotID).
+		Order("from_path ASC, kind ASC, from_key ASC, to_path ASC, to_key ASC, id ASC").Rows()
+	if err != nil {
+		return fmt.Errorf("stream source Wiki impact relations for inventory equality: %w", err)
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		if index >= len(expected) {
+			return newSourceWikiImpactLoadError(SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonRelationInventoryChanged)
+		}
+		var actual types.SourceCodeRelation
+		if err := db.ScanRows(rows, &actual); err != nil {
+			return fmt.Errorf("scan source Wiki impact relation for inventory equality: %w", err)
+		}
+		if !sourceWikiRelationEqual(actual, expected[index]) {
+			return newSourceWikiImpactLoadError(SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonRelationInventoryChanged)
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("stream source Wiki impact relations for inventory equality: %w", err)
+	}
+	if index != len(expected) {
+		return newSourceWikiImpactLoadError(SourceWikiImpactLoadFailureProofIncomplete, SourceWikiImpactReasonRelationInventoryChanged)
+	}
+	return nil
+}
+
+func sourceWikiRelationEqual(left, right types.SourceCodeRelation) bool {
+	return left.ID == right.ID && left.TenantID == right.TenantID && left.DataSourceID == right.DataSourceID &&
+		left.SnapshotID == right.SnapshotID && left.Kind == right.Kind && left.FromFileID == right.FromFileID &&
+		left.FromVersionID == right.FromVersionID && left.FromPath == right.FromPath && left.FromKey == right.FromKey &&
+		bytes.Equal(left.FromRange, right.FromRange) && left.ToFileID == right.ToFileID &&
+		left.ToVersionID == right.ToVersionID && left.ToPath == right.ToPath && left.ToKey == right.ToKey &&
+		bytes.Equal(left.ToRange, right.ToRange) && left.Determinacy == right.Determinacy &&
+		left.Quality == right.Quality && left.ResolutionReason == right.ResolutionReason &&
+		bytes.Equal(left.Context, right.Context) && left.CreatedAt.Equal(right.CreatedAt)
 }

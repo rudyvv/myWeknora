@@ -138,7 +138,9 @@ func (s *sourceWikiService) PreflightSourceWikiBatch(
 	var skeletonFiles []sourceWikiSkeletonFile
 	var factSnapshot *repository.SourceWikiSkeletonSnapshot
 	if sourceWikiHasHTTPRoute(relationInventory.Relations) {
-		impact, loaded, loadErr := repository.LoadSourceWikiImpactSnapshot(s.db.WithContext(ctx), kb.TenantID, kb.ID, sourceID, snapshot.ID, types.SourceWikiImpactPublishedComplete)
+		impact, loaded, loadErr := repository.LoadSourceWikiImpactSnapshotWithRelationInventory(
+			s.db.WithContext(ctx), kb.TenantID, kb.ID, sourceID, snapshot.ID,
+			types.SourceWikiImpactPublishedComplete, relationInventory)
 		if loadErr != nil {
 			switch {
 			case errors.Is(loadErr, repository.ErrSourceWikiImpactLoadBudgetExceeded):

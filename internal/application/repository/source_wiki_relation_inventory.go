@@ -10,6 +10,15 @@ import (
 	"gorm.io/gorm"
 )
 
+const sourceWikiRelationBoundsSelect = `
+	COALESCE(SUM(OCTET_LENGTH(COALESCE(context::text, ''))), 0) AS context_bytes,
+	COALESCE(SUM(
+		OCTET_LENGTH(COALESCE(from_path, '')) + OCTET_LENGTH(COALESCE(from_key, '')) +
+		OCTET_LENGTH(COALESCE(to_path, '')) + OCTET_LENGTH(COALESCE(to_key, '')) +
+		OCTET_LENGTH(COALESCE(resolution_reason, '')) + OCTET_LENGTH(COALESCE(from_range::text, '')) +
+		OCTET_LENGTH(COALESCE(to_range::text, '')) + OCTET_LENGTH(COALESCE(context::text, ''))
+	), 0) AS relation_bytes`
+
 // SourceWikiRelationInventory is a complete, bounded relation inventory for
 // one authorized current publication. It deliberately contains no file facts.
 type SourceWikiRelationInventory struct {
@@ -36,6 +45,7 @@ type sourceWikiRelationInventorySnapshotRow struct {
 type sourceWikiRelationInventoryBounds struct {
 	RelationCount int64
 	ContextBytes  int64
+	RelationBytes int64
 }
 
 // LoadSourceWikiRelationInventory reads only relation rows for the fixed
@@ -93,7 +103,7 @@ func LoadSourceWikiRelationInventory(
 
 		var bounds sourceWikiRelationInventoryBounds
 		if err := tx.Table("source_code_relations").
-			Select("COUNT(*) AS relation_count, COALESCE(SUM(OCTET_LENGTH(context::text)), 0) AS context_bytes").
+			Select("COUNT(*) AS relation_count, "+sourceWikiRelationBoundsSelect).
 			Where("tenant_id=? AND data_source_id=? AND snapshot_id=?", tenantID, sourceID, snapshotID).
 			Scan(&bounds).Error; err != nil {
 			return fmt.Errorf("read source Wiki relation inventory bounds: %w", err)
@@ -103,6 +113,9 @@ func LoadSourceWikiRelationInventory(
 		}
 		if bounds.ContextBytes > types.SourceWikiImpactMaxContextBytes {
 			return fmt.Errorf("%w: source Wiki relation contexts exceed the %d-byte bound", ErrSourceWikiDerivationDeferred, types.SourceWikiImpactMaxContextBytes)
+		}
+		if bounds.RelationBytes > types.SourceWikiImpactMaxRelationBytes {
+			return fmt.Errorf("%w: source Wiki relation fields exceed the %d-byte bound", ErrSourceWikiDerivationDeferred, types.SourceWikiImpactMaxRelationBytes)
 		}
 		if bounds.RelationCount != int64(snapshot.RelationCount) {
 			return fmt.Errorf("%w: source Wiki relation inventory does not match its published count", ErrSourceWikiDerivationUnavailable)
@@ -121,7 +134,7 @@ func LoadSourceWikiRelationInventory(
 			return fmt.Errorf("%w: source Wiki relation inventory changed while being read", ErrSourceWikiDerivationUnavailable)
 		}
 		seen := make(map[string]struct{}, len(relations))
-		var contextBytes int64
+		var contextBytes, relationBytes int64
 		for _, relation := range relations {
 			if relation.ID == "" || relation.TenantID != tenantID || relation.DataSourceID != sourceID || relation.SnapshotID != snapshotID {
 				return fmt.Errorf("%w: source Wiki relation identity is outside the fixed publication", ErrSourceWikiDerivationUnavailable)
@@ -134,8 +147,12 @@ func LoadSourceWikiRelationInventory(
 			if contextBytes > types.SourceWikiImpactMaxContextBytes {
 				return fmt.Errorf("%w: source Wiki relation contexts exceed the %d-byte bound", ErrSourceWikiDerivationDeferred, types.SourceWikiImpactMaxContextBytes)
 			}
+			relationBytes += sourceWikiRelationVariableBytes(relation)
+			if relationBytes > types.SourceWikiImpactMaxRelationBytes {
+				return fmt.Errorf("%w: source Wiki relation fields exceed the %d-byte bound", ErrSourceWikiDerivationDeferred, types.SourceWikiImpactMaxRelationBytes)
+			}
 		}
-		if int64(len(relations)) != bounds.RelationCount || contextBytes > bounds.ContextBytes {
+		if int64(len(relations)) != bounds.RelationCount || contextBytes > bounds.ContextBytes || relationBytes > bounds.RelationBytes {
 			return fmt.Errorf("%w: source Wiki relation inventory is incomplete", ErrSourceWikiDerivationUnavailable)
 		}
 		inventory = &SourceWikiRelationInventory{
@@ -151,4 +168,10 @@ func LoadSourceWikiRelationInventory(
 		return nil, fmt.Errorf("source Wiki relation inventory read scope changed: %w", err)
 	}
 	return inventory, nil
+}
+
+func sourceWikiRelationVariableBytes(relation types.SourceCodeRelation) int64 {
+	return int64(len(relation.FromPath)) + int64(len(relation.FromKey)) + int64(len(relation.ToPath)) +
+		int64(len(relation.ToKey)) + int64(len(relation.ResolutionReason)) + int64(len(relation.FromRange)) +
+		int64(len(relation.ToRange)) + int64(len(relation.Context))
 }
