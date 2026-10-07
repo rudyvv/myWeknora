@@ -61,9 +61,9 @@ func fixedCloneFixtureConfig(t *testing.T, raw string) *pgx.ConnConfig {
 func fixedCloneFixtureAdmin(t *testing.T, config *pgx.ConnConfig) *gorm.DB {
 	t.Helper()
 	pool := stdlib.OpenDB(*config)
+	t.Cleanup(func() { _ = pool.Close() })
 	db, err := gorm.Open(pgdriver.New(pgdriver.Config{Conn: pool}), &gorm.Config{Logger: quietSourceIntegrationLogger{}})
 	require.True(t, err == nil, "fixed clone admin connection failed")
-	t.Cleanup(func() { _ = pool.Close() })
 	return db
 }
 
@@ -91,24 +91,30 @@ func fixedCloneFixtureDatabase(t *testing.T, admin *gorm.DB, config *pgx.ConnCon
    has_schema_privilege(current_user,'public','CREATE'),
    (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f')
-    AND has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))::text,
+    AND (has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+     OR (has_table_privilege(current_user,c.oid,'SELECT') AND NOT EXISTS (
+      SELECT 1 FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e'))))::text,
    (SELECT count(*) FROM pg_roles WHERE rolname=current_user AND
-    (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls OR rolinherit))::text`
+    (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls OR rolinherit))::text,
+   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relkind='S'
+    AND has_sequence_privilege(current_user,c.oid,'USAGE,SELECT,UPDATE'))::text`
 		result, err := conn.Exec(ctx, sql).ReadAll()
 		if err != nil {
 			return cloneProofDiagnosticError("restricted_fixture_proof_query_" + safeCloneSQLState(err))
 		}
-		if len(result) != 1 || len(result[0].Rows) != 1 || len(result[0].Rows[0]) != 6 {
+		if len(result) != 1 || len(result[0].Rows) != 1 || len(result[0].Rows[0]) != 7 {
 			return errors.New("restricted fixture identity unavailable")
 		}
 		values := result[0].Rows[0]
-		if string(values[0]) != fixedSourceAcceptanceClone || string(values[1]) != schema || string(values[2]) != role || string(values[3]) != "f" || string(values[4]) != "0" || string(values[5]) != "0" {
-			return cloneProofDiagnosticError(fmt.Sprintf("restricted_fixture_proof_database_%t_schema_%t_role_%t_public_create_%t_public_privilege_zero_%t_role_flags_zero_%t",
-				string(values[0]) == fixedSourceAcceptanceClone, string(values[1]) == schema, string(values[2]) == role, string(values[3]) != "f", string(values[4]) == "0", string(values[5]) == "0"))
+		if string(values[0]) != fixedSourceAcceptanceClone || string(values[1]) != schema || string(values[2]) != role || string(values[3]) != "f" || string(values[4]) != "0" || string(values[5]) != "0" || string(values[6]) != "0" {
+			return cloneProofDiagnosticError(fmt.Sprintf("restricted_fixture_proof_database_%t_schema_%t_role_%t_public_create_%t_application_privilege_zero_%t_role_flags_zero_%t_public_sequences_zero_%t",
+				string(values[0]) == fixedSourceAcceptanceClone, string(values[1]) == schema, string(values[2]) == role, string(values[3]) != "f", string(values[4]) == "0", string(values[5]) == "0", string(values[6]) == "0"))
 		}
 		return nil
 	}
 	pool := stdlib.OpenDB(*worker)
+	t.Cleanup(func() { _ = pool.Close() })
 	db, err := gorm.Open(pgdriver.New(pgdriver.Config{Conn: pool}), &gorm.Config{Logger: quietSourceIntegrationLogger{}})
 	if err != nil {
 		proof := "no_validation_diagnostic"
@@ -119,6 +125,5 @@ func fixedCloneFixtureDatabase(t *testing.T, admin *gorm.DB, config *pgx.ConnCon
 		t.Logf("restricted_fixture_connection sqlstate=%s proof=%s", safeCloneSQLState(err), proof)
 	}
 	require.True(t, err == nil, "restricted fixture session failed")
-	t.Cleanup(func() { _ = pool.Close() })
 	return db
 }
