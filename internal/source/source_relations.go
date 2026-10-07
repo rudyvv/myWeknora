@@ -574,12 +574,18 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 		methodSet, methodRestricted, methodUncertain := springMethodConstraint(fact)
 		prefixes := classRoutes[fact.Namespace]
 		if len(prefixes) == 0 {
+			if err := budget.reserveRouteCandidateCopies(1); err != nil {
+				return nil, err
+			}
 			endpoints = append(endpoints, sourceRouteEndpoint{owner: mapping, path: normalizeSourceRoute(fact.RoutePath),
 				methods: methodSet, methodRestricted: methodRestricted, methodUncertain: methodUncertain,
 				uncertain: fact.Dynamic || fact.Certainty == "uncertain"})
 			continue
 		}
 		for _, prefix := range prefixes {
+			if err := budget.addRouteWork(1); err != nil {
+				return nil, err
+			}
 			if prefix.fact.RoutePath == "" {
 				continue
 			}
@@ -588,6 +594,9 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 				classMethods, classRestricted, classUncertain, methodSet, methodRestricted, methodUncertain)
 			if !hasMethods {
 				continue
+			}
+			if err := budget.reserveRouteCandidateCopies(1); err != nil {
+				return nil, err
 			}
 			var supportingFacts []types.SourceRelationFactRef
 			if !sourceFactRangeCoveredBySameMember(mapping, prefix) {
@@ -637,6 +646,9 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 					continue
 				}
 				for _, proxy := range moduleProxies {
+					if err := budget.addRouteWork(1); err != nil {
+						return nil, err
+					}
 					proxyFact := proxy.fact
 					if !sourcePathWithin(prefix.member.Path, proxyFact.OwnerName) {
 						continue
@@ -660,6 +672,9 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 					if err != nil {
 						return nil, err
 					}
+					if err := budget.reserveRouteCandidateCopies(1); err != nil {
+						return nil, err
+					}
 					requestRoutes = append(requestRoutes, sourceRequestRoute{path: resolvedPath, uncertain: prefixFact.Certainty != "certain",
 						reason:          "frontend prefix or proxy transformation is conditional or unverified",
 						supportingFacts: supportingFacts})
@@ -679,11 +694,17 @@ func correlateStaticBusinessFlow(tenant uint64, sourceID, snapshotID string, mem
 		var candidates []sourceRouteEndpoint
 		for _, requestRoute := range requestRoutes {
 			for _, endpoint := range endpoints {
+				if err := budget.addRouteWork(1); err != nil {
+					return nil, err
+				}
 				exactRoute := endpoint.path == requestRoute.path
 				legacySuffix := endpoint.path == normalizeSourceRoute(strings.TrimSuffix(requestRoute.path, ".do"))
 				methodMatches, methodUncertain := springRouteMethodMatch(endpoint, fact.HTTPMethod)
 				if (!exactRoute && !legacySuffix) || !methodMatches {
 					continue
+				}
+				if err := budget.reserveRouteCandidateCopies(1); err != nil {
+					return nil, err
 				}
 				candidate := endpoint
 				candidate.uncertain = endpoint.uncertain || requestRoute.uncertain || methodUncertain || (legacySuffix && !exactRoute)
@@ -871,6 +892,9 @@ func sourceMemberVersionKey(member SourceRelationMember) string {
 }
 
 func uniqueRequestRoutes(routes []sourceRequestRoute, budget *sourceRelationFactCapacityBudget) ([]sourceRequestRoute, error) {
+	if err := budget.reserveRouteCandidateCopies(int64(len(routes))); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]int, len(routes))
 	unique := make([]sourceRequestRoute, 0, len(routes))
 	for _, route := range routes {
@@ -894,6 +918,9 @@ func uniqueRequestRoutes(routes []sourceRequestRoute, budget *sourceRelationFact
 }
 
 func uniqueRouteEndpoints(endpoints []sourceRouteEndpoint, budget *sourceRelationFactCapacityBudget) ([]sourceRouteEndpoint, error) {
+	if err := budget.reserveRouteCandidateCopies(int64(len(endpoints))); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]int, len(endpoints))
 	unique := make([]sourceRouteEndpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {

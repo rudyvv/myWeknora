@@ -234,6 +234,9 @@ func TestBoundedSourceRelationReplayDefersBeforeRefBudgetIsExceeded(t *testing.T
 	if len(resolution.Refs) != 0 {
 		t.Fatalf("an over-budget replay must not return a partial ref set: %#v", resolution.Refs)
 	}
+	if len(resolution.Context) != 0 {
+		t.Fatalf("an over-budget replay must not return a partial serialized context: %q", resolution.Context)
+	}
 
 	resolver = newSourceRelationFactRefResolverWithLimits(snapshot, 100, 1)
 	resolution = resolver.Resolve(relation)

@@ -24,6 +24,8 @@ const (
 
 	sourceRelationFactReplayMaxRefs         int64 = 100_000
 	sourceRelationFactReplayMaxContextBytes int64 = 32 << 20
+	sourceRelationReplayMaxRouteWork        int64 = 1_000_000
+	sourceRelationReplayMaxRouteCandidates  int64 = 100_000
 )
 
 // SourceRelationFactCapacityError identifies bounded replay or resolution
@@ -44,14 +46,21 @@ func (err *SourceRelationFactCapacityError) Error() string {
 }
 
 type sourceRelationFactCapacityBudget struct {
-	refs         int64
-	contextBytes int64
-	maxRefs      int64
-	maxContext   int64
+	refs                 int64
+	contextBytes         int64
+	routeWork            int64
+	routeCandidateCopies int64
+	maxRefs              int64
+	maxContext           int64
+	maxRouteWork         int64
+	maxRouteCandidates   int64
 }
 
 func newSourceRelationFactCapacityBudget(maxRefs, maxContextBytes int64) *sourceRelationFactCapacityBudget {
-	return &sourceRelationFactCapacityBudget{maxRefs: maxRefs, maxContext: maxContextBytes}
+	return &sourceRelationFactCapacityBudget{
+		maxRefs: maxRefs, maxContext: maxContextBytes,
+		maxRouteWork: sourceRelationReplayMaxRouteWork, maxRouteCandidates: sourceRelationReplayMaxRouteCandidates,
+	}
 }
 
 func (budget *sourceRelationFactCapacityBudget) addRefs(requested int64) error {
@@ -86,6 +95,32 @@ func (budget *sourceRelationFactCapacityBudget) addContextBytes(requested int64)
 	if budget != nil {
 		budget.contextBytes += requested
 	}
+	return nil
+}
+
+func (budget *sourceRelationFactCapacityBudget) addRouteWork(requested int64) error {
+	if budget == nil || requested == 0 {
+		return nil
+	}
+	if requested < 0 || requested > budget.maxRouteWork-budget.routeWork {
+		return &SourceRelationFactCapacityError{
+			Budget: "route correlation work", Used: budget.routeWork, Requested: requested, Limit: budget.maxRouteWork,
+		}
+	}
+	budget.routeWork += requested
+	return nil
+}
+
+func (budget *sourceRelationFactCapacityBudget) reserveRouteCandidateCopies(requested int64) error {
+	if budget == nil || requested == 0 {
+		return nil
+	}
+	if requested < 0 || requested > budget.maxRouteCandidates-budget.routeCandidateCopies {
+		return &SourceRelationFactCapacityError{
+			Budget: "route candidate copies", Used: budget.routeCandidateCopies, Requested: requested, Limit: budget.maxRouteCandidates,
+		}
+	}
+	budget.routeCandidateCopies += requested
 	return nil
 }
 

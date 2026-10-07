@@ -2,11 +2,43 @@ package source
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestBoundedRouteCorrelationCapsZeroRefScansAndCandidateCopies(t *testing.T) {
+	request := relationFact("api_request", "detail", "", 1, 8)
+	request.RoutePath, request.HTTPMethod = "/detail", "GET"
+	handler := relationFact("spring_mapping", "detail", "demo.Controller", 20, 30)
+	handler.RoutePath, handler.OwnerKind, handler.OwnerName, handler.HTTPMethod = "/detail", "method", "detail", "GET"
+	members := []SourceRelationMember{
+		{Path: "web/detail.js", FileID: "request-file", VersionID: "request-v1", Facts: []types.ParsedSourceFact{request}},
+		{Path: "server/Controller.java", FileID: "controller-file", VersionID: "controller-v1", Facts: []types.ParsedSourceFact{handler}},
+	}
+
+	normal := CorrelateSourceFacts(1, "source", "snapshot", members)
+	if len(normal) != 1 || normal[0].Kind != "http_route" || string(normal[0].Context) != "[]" {
+		t.Fatalf("unbounded correlation behavior for a zero-ref route changed: %#v", normal)
+	}
+
+	workBudget := newSourceRelationFactCapacityBudget(0, 0)
+	workBudget.maxRouteWork = 0
+	_, err := correlateSourceFacts(1, "source", "snapshot", members, workBudget)
+	var capacityErr *SourceRelationFactCapacityError
+	if !errors.As(err, &capacityErr) || capacityErr.Budget != "route correlation work" || capacityErr.Used > capacityErr.Limit {
+		t.Fatalf("zero-ref request×endpoint scans must have an independent work limit: %v", err)
+	}
+
+	candidateBudget := newSourceRelationFactCapacityBudget(0, 0)
+	candidateBudget.maxRouteCandidates = 2
+	_, err = correlateSourceFacts(1, "source", "snapshot", members, candidateBudget)
+	if !errors.As(err, &capacityErr) || capacityErr.Budget != "route candidate copies" || capacityErr.Used > capacityErr.Limit {
+		t.Fatalf("dedup candidate allocations must be checked before map/slice growth: %v", err)
+	}
+}
 
 func relationFact(kind, name, namespace string, start, end int) types.ParsedSourceFact {
 	fact := types.ParsedSourceFact{Kind: kind, Name: name, Namespace: namespace, Quality: "structural",

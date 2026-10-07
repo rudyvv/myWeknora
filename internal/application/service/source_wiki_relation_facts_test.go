@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -82,6 +83,16 @@ func TestSourceWikiRelationFactResolutionHydratesVerifiedRefsAndFailsClosed(t *t
 	})
 	if _, err := sourceWikiResolveRelationFactRefs(incomplete, []types.SourceCodeRelation{relation}); err == nil {
 		t.Fatal("an incomplete snapshot was accepted as verified configuration evidence")
+	}
+	oversized := relation
+	oversized.Context = types.JSON(bytes.Repeat([]byte{' '}, (1<<20)+1))
+	partial, err := sourceWikiResolveRelationFactRefs(resolver, []types.SourceCodeRelation{relation, oversized})
+	var capacityErr *source.SourceRelationFactCapacityError
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("oversized persisted route context should preserve its typed capacity error: %v", err)
+	}
+	if partial != nil {
+		t.Fatalf("relation resolution must discard prior work instead of returning a partial slice: %#v", partial)
 	}
 
 	ordinary := types.SourceCodeRelation{Kind: "method_call", Context: types.JSON(`{"legacy":"context"}`)}
