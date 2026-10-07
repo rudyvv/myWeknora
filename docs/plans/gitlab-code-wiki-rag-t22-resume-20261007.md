@@ -36,6 +36,20 @@ source-publish adapter：`--preview` 真实通过，**恰好 5448 文件/8827393
 
 **第二次发布尝试（attempt 2）已启动**：19:45 Redis 57824 启动（队列 idle）→ launcher `--start` 全门禁通过（backend PID 27384，57825，2 秒监听就绪）→ 19:46 `--publish`：journal attempt2 创建，preview 精确匹配 **5448 文件/88,273,936 字节**，resume 成功，sync 登记（新 run `5ff2060a-0b02-45df-9e04-8e197eeee044`，target_commit_sha=c5e12803 固定 ✓）。19:49 phase=parsing、retry=0、无 lease recovery。发布在 TPM 退避下慢速收敛中（窗口至北京 00:29）。
 
+**attempt 2 用户决策终止（21:00 前后，用户："mobile QA 立即开始，nsb 停掉"）**：TPM 配额持续饱和（嵌入冻结在 6292 缓存条目/2016 staged 行 ≈ 8.4%，配额窗口间穿插恢复），按用户决定经产品 API `POST /datasource/{id}/pause` 干净收尾（与恢复 helper 的 PauseSourceSync 同一产品语义，未强杀进程）：run `5ff2060a` 终态 canceled（"source was paused; this run was fenced off"，retry=0 未耗预算）、20:00 cron 触发的 pending `d0c466c1` 同批 canceled、协调器 active/pending/lease 全清、nsb 源回 paused、adapter 轮询到 canceled 后按合同自然退出（journal 终态 `failed_or_unknown_no_blind_retry`）。**向量缓存 6292 条（含今晚新增 2016）全部保留**——明天新窗口续跑时 parse/向量缓存断点续传零浪费。首份诚实进度实测：staged 2016 chunks/7.40MB 内容（embeddings 表 attempt2 行），TPM 限速下平均 302-400KB/min。
+
+## mobile Wiki QA 执行（2026-10-07 晚，用户批准立即开始）
+
+**前置状态核验**：dashboard（61 文件/2011 chunks）与 mobile（102 文件/675 chunks）两源于 10-06 09:50/09:53 已全量发布（与批准范围一致）；三 gitlab 源共用 KB 65658207。
+
+**mobile wiki 实际状态：0 张卡片（36 次 attempt 全部 failed）**。`wiki_derivation_state=complete` 指推导流程走完（带着全拒结束），非生成成功。失败原因单一：批 QA 拒绝 `flow/GET /qywx/refund/getStatusList.do` 卡片——"presents two different call sites as a single flow and makes a composition claim not supported by the evidence"，整批拒绝，且该卡在每次重试中反复再生（36 attempts 同一 reason），一张坏卡拖死全部批次直至预算耗尽。
+
+**QA 拒绝正确性核验（对照已发布 mobile chunks 的真实源码证据）**：`getStatusList` 命中 3 个启用 chunks——`src/pages/RefundAudit/index/script.js`（含 `methods.getState` + `methods.onStateConfirm` 两个调用点：mounted 初始请求与筛选确认刷新）、`src/pages/RefundAudit/detail/script.js`（第三个独立调用点，卡片未提及）、`src/service/interceptor.js`。卡片 draft 的 flow 级组合叙事（title/summary 把 mounted 加载与 filter 确认刷新串成单一流程）确实无单一证据支持，且遗漏 detail 页调用点。**QA 判定正确**。
+
+**System overview（dashboard 成功案例）引用真实性抽检**：页面 v1/published/4795 字符，16 个 source_refs（`file_id|path` 格式）经 source_files 表核验 **16/16 全部解析到真实 dashboard 源文件**（exists=true、ds_match=true）。dashboard attempt 轨迹：第 1 次失败于 QA 响应 JSON 解析错误（`json: cannot unmarshal array into Go struct field sourceWikiQA.uncertain`——provider 返回 uncertain 数组、产品期望标量），第 2 次失败于 whole-batch QA 拒绝，第 3 次 ready→published。
+
+**mobile Wiki QA 验收判定**：QA 机制本身验证通过（引用校验判定正确、成功案例引用 100% 真实、失败诚实记录）；**产品发现 2 项**（非本次验收失败）：(1) whole-batch rejection 的 omit 分支从未生效（合同语义 "rejected or omitted"），必然被拒的卡片无放弃机制，导致 mobile 0 卡片——需产品侧修复 omit 或坏卡剔除后重跑 mobile wiki 才能完成产出验收；(2) QA 响应 schema 对 provider 变体不健壮（uncertain 字段数组/标量不匹配即解析失败，靠重试碰运气恢复）。mobile 源 0 卡片是 omit 缺陷的结果而非语料不值得生成，产出验收保留至 omit 修复后重跑。
+
 1. 解决source-preview与worker分别解析master的竞态：不能假定只读GitLab token能冻结远端分支。需要产品将预览确认的expected commit持久化到durable source run，并在worker中尊重固定target；核验实际HEAD并发变化、恢复/重投以及租约/配置代数，冻结提交后双轴/安全Sol审查。**2026-10-07 TRAE接手后已完成**：产品slice冻结 `4e4fc3b4`（首冻49f0238b+审查补充），真实竞态red在553afa0复现后green；fixture对齐真实GitLab按可达SHA fetch行为（真实gitlab.p.it只读实测exit 0）；七个定向回归（竞态、登记前HEAD变化拒绝、document模式拒绝、无协调器拒绝、目标不可达保留上一发布、崩溃恢复重投、配置fence）全部通过。独立TRAE子代理三轴审查：Standards 0硬违规、Security 0阻断、Spec缺口（两条拒绝路径未验证）已补测修复。详见preview-target-contract文档。全包37个失败经553afa0已验证工作区基线确认全部预存，非本slice回归。
 2. 用户对policy-rejected具体隔离启动动作的回答到达后，由根核验新ACL/clone121clean/no tasks/queue、固定backend哈希、精确GitLab TLS截止，并只启动专用Redis与57825应用；不能触原8080。到期自动恢复正常TLS验证；需要新窗口时重新明确冻结截止并审查，不能复用过期helper。固定凭据窗口到期后不能盲--extend：先只读核对artifact/DB一致，再准备新固定窗口审过helper。
 3. 以批准完整清单重跑nsb：5448文件/88273936 bytes；其余dashboard61/mobile102，总5611/92352148 bytes（约92.35MB）。原私有metadata SHA508CCECC713C612D67F362BB6FCA7E31932C6444BAE25CAF56632A952825D676；题集仍C8E527D3CAD34DFD5D4FD2ED54853F1BABCBA17DFB78EB96A170F2A876AE1B44。不得缩范围、修改评分题集或把工具/旧发布当这次成功。
