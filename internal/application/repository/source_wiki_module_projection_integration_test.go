@@ -342,11 +342,15 @@ func TestLoadSourceWikiModuleProjectionPagesManifestAndSelectsOnlyBestSeed(t *te
 		lower := strings.ToLower(query)
 		if strings.Contains(lower, "jsonb_array_elements") && strings.Contains(lower, "limit 128") {
 			pageQueries++
-			selectEnd := strings.Index(lower, " from ")
-			if selectEnd < 0 {
+			selectStart := strings.Index(lower, "select sm.path,")
+			if selectStart < 0 {
 				t.Fatalf("cannot identify projection select list in page SQL: %s", query)
 			}
-			selectList := lower[:selectEnd]
+			selectEnd := strings.Index(lower[selectStart:], " from ")
+			if selectEnd < 0 {
+				t.Fatalf("cannot identify projection source in page SQL: %s", query)
+			}
+			selectList := lower[selectStart : selectStart+selectEnd]
 			for _, forbidden := range []string{"sv.facts", "sv.content", "sv.symbols", "context"} {
 				if strings.Contains(selectList, forbidden) {
 					t.Fatalf("projection page selected full payload field %q: %s", forbidden, query)
@@ -366,6 +370,28 @@ func TestLoadSourceWikiModuleProjectionPagesManifestAndSelectsOnlyBestSeed(t *te
 	}
 	if stored.RelationsStaged || stored.WikiState != "deferred_capacity" {
 		t.Fatalf("module projection mutated persisted relation state: staged=%t state=%q", stored.RelationsStaged, stored.WikiState)
+	}
+}
+
+func TestLoadSourceWikiModuleProjectionRejectsExistingTransaction(t *testing.T) {
+	f := newSourceWikiModuleProjectionPostgres(t)
+	var projection *SourceWikiModuleProjection
+	var loadErr error
+	var queryCount int
+	outerErr := f.db.Transaction(func(tx *gorm.DB) error {
+		f.capture.reset()
+		projection, loadErr = LoadSourceWikiModuleProjection(f.ctx, tx, f.tenantID, f.kbID, f.sourceID, f.snapshotID)
+		queryCount = len(f.capture.snapshot())
+		return nil
+	})
+	if outerErr != nil {
+		t.Fatalf("outer transaction failed: %v", outerErr)
+	}
+	if loadErr == nil || projection != nil {
+		t.Fatalf("projection in existing transaction = %v, %v; want nil projection and error", projection, loadErr)
+	}
+	if queryCount != 0 {
+		t.Fatalf("existing transaction executed %d SQL statements before rejection; want none", queryCount)
 	}
 }
 
@@ -461,12 +487,89 @@ func TestLoadSourceWikiModuleProjectionRejectsManifestOverBound(t *testing.T) {
 
 func TestLoadSourceWikiModuleProjectionRejectsOversizedSeedWithoutTruncation(t *testing.T) {
 	f := newSourceWikiModuleProjectionPostgres(t)
-	name := strings.Repeat("x", sourceWikiModuleProjectionMaxSeedStringSize+1)
+	name := "oversized-seed-secret-" + strings.Repeat("x", sourceWikiModuleProjectionMaxSeedStringSize+1)
+	f.addParsed(t, "src/Handler.java", false,
+		[]types.ParsedSourceFact{
+			{Kind: "java_type", Name: "FallbackService", Quality: "structural"},
+			{Kind: "spring_mapping", Name: name, Quality: "structural"},
+		}, nil)
+	f.setCounts(t, 1, 1)
+	var rows []sourceWikiModuleProjectionMemberRow
+	if err := f.db.Raw(sourceWikiModuleProjectionPageSQL, sourceWikiModuleProjectionMaxSeedStringSize, f.snapshotID, "").Scan(&rows).Error; err != nil {
+		t.Fatalf("read bounded oversized-seed sentinel: %v", err)
+	}
+	if len(rows) != 1 || rows[0].SeedOversized == nil || !*rows[0].SeedOversized || rows[0].SeedKind != nil ||
+		rows[0].SeedName != nil || rows[0].SeedQuality != nil || rows[0].SeedOrdinal != nil || rows[0].SeedPriority != nil {
+		t.Fatalf("oversized best candidate escaped bounded sentinel: %+v", rows)
+	}
+	projection, err := LoadSourceWikiModuleProjection(f.ctx, f.db, f.tenantID, f.kbID, f.sourceID, f.snapshotID)
+	if err == nil || projection != nil {
+		t.Fatal("loader accepted or truncated a module seed beyond its per-string hard bound")
+	}
+}
+
+func TestLoadSourceWikiModuleProjectionAcceptsSeedAtPerFieldByteLimit(t *testing.T) {
+	f := newSourceWikiModuleProjectionPostgres(t)
+	name := strings.Repeat("x", sourceWikiModuleProjectionMaxSeedStringSize)
 	f.addParsed(t, "src/Handler.java", false,
 		[]types.ParsedSourceFact{{Kind: "spring_mapping", Name: name, Quality: "structural"}}, nil)
 	f.setCounts(t, 1, 1)
-	if _, err := LoadSourceWikiModuleProjection(f.ctx, f.db, f.tenantID, f.kbID, f.sourceID, f.snapshotID); err == nil {
-		t.Fatal("loader accepted or truncated a module seed beyond its per-string hard bound")
+	projection, err := LoadSourceWikiModuleProjection(f.ctx, f.db, f.tenantID, f.kbID, f.sourceID, f.snapshotID)
+	if err != nil {
+		t.Fatalf("load seed at exact per-field byte limit: %v", err)
+	}
+	if got := projection.Members[0].Seed; got == nil || len(got.Name) != sourceWikiModuleProjectionMaxSeedStringSize {
+		t.Fatalf("exact-boundary seed = %+v, want a %d-byte name", got, sourceWikiModuleProjectionMaxSeedStringSize)
+	}
+}
+
+func TestLoadSourceWikiModuleProjectionRejectsFactBudgetsBeforeSeedPage(t *testing.T) {
+	tests := []struct {
+		name     string
+		setFacts func(*testing.T, *sourceWikiModuleProjectionPG, string)
+	}{
+		{
+			name: "candidate fact count",
+			setFacts: func(t *testing.T, f *sourceWikiModuleProjectionPG, versionID string) {
+				if err := f.db.Exec(`UPDATE source_file_versions SET facts=(
+					SELECT jsonb_agg(jsonb_build_object('kind','java_method','name','x'))
+					FROM generate_series(1,?::integer)
+				) WHERE id=?`, types.SourceWikiImpactMaxFacts+1, versionID).Error; err != nil {
+					t.Fatalf("seed over-budget candidate fact count: %v", err)
+				}
+			},
+		},
+		{
+			name: "candidate fact JSON bytes",
+			setFacts: func(t *testing.T, f *sourceWikiModuleProjectionPG, versionID string) {
+				if err := f.db.Exec(`UPDATE source_file_versions SET facts=jsonb_build_array(repeat('x',?::integer)) WHERE id=?`,
+					types.SourceWikiImpactMaxFactBytes+1, versionID).Error; err != nil {
+					t.Fatalf("seed over-budget candidate fact bytes: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSourceWikiModuleProjectionPostgres(t)
+			_, versionID := f.addParsed(t, "src/Handler.java", false, nil, nil)
+			f.setCounts(t, 1, 1)
+			tt.setFacts(t, f, versionID)
+			f.capture.reset()
+			projection, err := LoadSourceWikiModuleProjection(f.ctx, f.db, f.tenantID, f.kbID, f.sourceID, f.snapshotID)
+			if err == nil || projection != nil {
+				t.Fatalf("over-budget candidate facts returned projection=%v, err=%v; want nil projection and error", projection, err)
+			}
+			inventorySeen, pageSeen := false, false
+			for _, query := range f.capture.snapshot() {
+				lower := strings.ToLower(query)
+				inventorySeen = inventorySeen || strings.Contains(lower, "fact_count") && strings.Contains(lower, "fact_bytes")
+				pageSeen = pageSeen || strings.Contains(lower, "jsonb_array_elements") && strings.Contains(lower, "limit 128")
+			}
+			if !inventorySeen || pageSeen {
+				t.Fatalf("fact inventory/page order = inventory:%t page:%t, want bounded inventory before any seed page", inventorySeen, pageSeen)
+			}
+		})
 	}
 }
 

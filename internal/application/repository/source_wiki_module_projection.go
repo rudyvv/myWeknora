@@ -81,6 +81,8 @@ type sourceWikiModuleProjectionBounds struct {
 	EmptyPathCount               int64
 	MaxPathBytes                 int64
 	TotalPathBytes               int64
+	FactCount                    int64
+	FactBytes                    int64
 	ParsedCount                  int64
 	ExcludedCount                int64
 	SupportedStatusCount         int64
@@ -115,6 +117,7 @@ type sourceWikiModuleProjectionMemberRow struct {
 	SeedQuality         *string
 	SeedOrdinal         *int64
 	SeedPriority        *int64
+	SeedOversized       *bool
 }
 
 // LoadSourceWikiModuleProjection pages every member of one fixed current
@@ -122,7 +125,8 @@ type sourceWikiModuleProjectionMemberRow struct {
 // most one structural seed per non-generated parsed file; parser facts,
 // source content, symbols, and relation context are never materialized in Go.
 // Path bytes are bounded at 4096 per path and 8 MiB in aggregate; any budget
-// violation fails closed without returning a partial projection.
+// violation fails closed without returning a partial projection. Candidate
+// facts use the existing impact inventory count/byte limits before seed paging.
 func LoadSourceWikiModuleProjection(
 	ctx context.Context,
 	db *gorm.DB,
@@ -131,6 +135,11 @@ func LoadSourceWikiModuleProjection(
 ) (*SourceWikiModuleProjection, error) {
 	if db == nil || tenantID == 0 || knowledgeBaseID == "" || sourceID == "" || snapshotID == "" {
 		return nil, fmt.Errorf("source Wiki module projection requires a fixed tenant, KB, source, and snapshot")
+	}
+	if db.Statement != nil {
+		if committer, ok := db.Statement.ConnPool.(gorm.TxCommitter); ok && committer != nil {
+			return nil, fmt.Errorf("source Wiki module projection does not accept an existing transaction")
+		}
 	}
 	if db.Dialector.Name() != "postgres" {
 		return nil, fmt.Errorf("source Wiki module projection requires PostgreSQL")
@@ -180,6 +189,12 @@ func LoadSourceWikiModuleProjection(
 		if bounds.TotalPathBytes > sourceWikiModuleProjectionMaxTotalPathBytes {
 			return fmt.Errorf("source Wiki module projection paths exceed the %d-byte aggregate hard bound", sourceWikiModuleProjectionMaxTotalPathBytes)
 		}
+		if bounds.FactCount > types.SourceWikiImpactMaxFacts {
+			return fmt.Errorf("source Wiki module projection candidate facts exceed the %d-fact hard bound", types.SourceWikiImpactMaxFacts)
+		}
+		if bounds.FactBytes > types.SourceWikiImpactMaxFactBytes {
+			return fmt.Errorf("source Wiki module projection candidate facts exceed the %d-byte hard bound", types.SourceWikiImpactMaxFactBytes)
+		}
 		if bounds.MemberCount != int64(snapshot.MemberCount) || bounds.DistinctPathCount != bounds.MemberCount || bounds.EmptyPathCount != 0 ||
 			bounds.ParsedCount != int64(snapshot.FileCount) || bounds.SupportedStatusCount != bounds.MemberCount ||
 			bounds.FileIdentityCount != bounds.DistinctFileIdentityCount || bounds.VersionIdentityCount != bounds.DistinctVersionIdentityCount ||
@@ -201,13 +216,16 @@ func LoadSourceWikiModuleProjection(
 		var seedBytes, pathBytes int64
 		for len(projection.Members) < snapshot.MemberCount {
 			var rows []sourceWikiModuleProjectionMemberRow
-			if err := tx.Raw(sourceWikiModuleProjectionPageSQL, snapshotID, lastPath).Scan(&rows).Error; err != nil {
+			if err := tx.Raw(sourceWikiModuleProjectionPageSQL, sourceWikiModuleProjectionMaxSeedStringSize, snapshotID, lastPath).Scan(&rows).Error; err != nil {
 				return fmt.Errorf("read source Wiki module projection page: %w", err)
 			}
 			if len(rows) == 0 || len(rows) > sourceWikiModuleProjectionPageSize || len(projection.Members)+len(rows) > snapshot.MemberCount {
 				return fmt.Errorf("source Wiki module projection pagination did not cover the fixed manifest")
 			}
 			for _, row := range rows {
+				if row.SeedOversized != nil && *row.SeedOversized {
+					return fmt.Errorf("source Wiki module projection selected seed exceeds the %d-byte per-field hard bound", sourceWikiModuleProjectionMaxSeedStringSize)
+				}
 				nextPathBytes, pathErr := addSourceWikiModuleProjectionPathBytes(pathBytes, row.Path)
 				if pathErr != nil {
 					return pathErr
@@ -310,6 +328,10 @@ SELECT
 	COUNT(*) FILTER (WHERE sm.path IS NULL OR sm.path='') AS empty_path_count,
 	COALESCE(MAX(OCTET_LENGTH(sm.path)),0) AS max_path_bytes,
 	COALESCE(SUM(OCTET_LENGTH(sm.path)),0) AS total_path_bytes,
+	COALESCE(SUM(CASE WHEN sm.status='parsed' AND sm.generated=false AND jsonb_typeof(sv.facts)='array'
+		THEN jsonb_array_length(sv.facts) ELSE 0 END),0) AS fact_count,
+	COALESCE(SUM(CASE WHEN sm.status='parsed' AND sm.generated=false AND jsonb_typeof(sv.facts)='array'
+		THEN OCTET_LENGTH(sv.facts::text) ELSE 0 END),0) AS fact_bytes,
 	COUNT(*) FILTER (WHERE sm.status='parsed') AS parsed_count,
 	COUNT(*) FILTER (WHERE sm.status='excluded') AS excluded_count,
 	COUNT(*) FILTER (WHERE sm.status IN ('parsed','excluded')) AS supported_status_count,
@@ -337,18 +359,35 @@ LEFT JOIN source_file_versions sv ON sv.id=NULLIF(sm.file_version_id,'')
 WHERE sm.snapshot_id=requested.snapshot_id`
 
 const sourceWikiModuleProjectionPageSQL = `
+WITH projection_limits AS (
+	SELECT ?::bigint AS max_seed_string_bytes
+)
 SELECT sm.path, sm.source_file_id, sm.file_version_id, sm.blob_sha, sm.status, sm.generated,
 	sf.id AS file_id, sf.tenant_id AS file_tenant_id, sf.knowledge_base_id AS file_knowledge_base_id,
 	sf.data_source_id AS file_data_source_id, sf.path AS file_path,
 	sv.id AS version_id, sv.source_file_id AS version_source_file_id, sv.snapshot_id AS version_snapshot_id,
 	sv.blob_sha AS version_blob_sha, sv.sha256 AS content_sha256,
-	seed.kind AS seed_kind, seed.name AS seed_name, seed.quality AS seed_quality,
-	seed.ordinal AS seed_ordinal, seed.priority AS seed_priority
-FROM source_snapshot_members sm
+	CASE WHEN seed.oversized THEN NULL ELSE seed.kind END AS seed_kind,
+	CASE WHEN seed.oversized THEN NULL ELSE seed.name END AS seed_name,
+	CASE WHEN seed.oversized THEN NULL ELSE seed.quality END AS seed_quality,
+	CASE WHEN seed.oversized THEN NULL ELSE seed.ordinal END AS seed_ordinal,
+	CASE WHEN seed.oversized THEN NULL ELSE seed.priority END AS seed_priority,
+	seed.oversized AS seed_oversized
+FROM (
+	SELECT source_member.*
+	FROM source_snapshot_members source_member
+	WHERE source_member.snapshot_id=? AND source_member.path COLLATE "C" > ? COLLATE "C"
+	ORDER BY source_member.path COLLATE "C" ASC
+	LIMIT 128
+) sm
+CROSS JOIN projection_limits
 LEFT JOIN source_files sf ON sf.id=NULLIF(sm.source_file_id,'')
 LEFT JOIN source_file_versions sv ON sv.id=NULLIF(sm.file_version_id,'')
 LEFT JOIN LATERAL (
-	SELECT candidate.kind, candidate.name, candidate.quality, candidate.ordinal, candidate.priority
+	SELECT candidate.kind, candidate.name, candidate.quality, candidate.ordinal, candidate.priority,
+		COALESCE(OCTET_LENGTH(candidate.kind),0)>projection_limits.max_seed_string_bytes OR
+		COALESCE(OCTET_LENGTH(candidate.name),0)>projection_limits.max_seed_string_bytes OR
+		COALESCE(OCTET_LENGTH(candidate.quality),0)>projection_limits.max_seed_string_bytes AS oversized
 	FROM (
 		SELECT parsed_fact.value->>'kind' AS kind,
 			COALESCE(parsed_fact.value->>'name','') AS name,
@@ -379,7 +418,6 @@ LEFT JOIN LATERAL (
 	ORDER BY candidate.priority DESC, candidate.ordinal ASC
 	LIMIT 1
 ) seed ON TRUE
-WHERE sm.snapshot_id=? AND sm.path COLLATE "C" > ? COLLATE "C"
 ORDER BY sm.path COLLATE "C" ASC
 LIMIT 128`
 
