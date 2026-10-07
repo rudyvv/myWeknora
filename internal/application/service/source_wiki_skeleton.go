@@ -343,16 +343,18 @@ func sourceWikiFlowCandidatesWithBudgets(relations []types.SourceCodeRelation, f
 		}
 		sort.Strings(candidate.reasons)
 		_, existed := candidates[route]
-		oldEvidenceRelations := len(candidate.relations)
-		oldEvidenceBytes := sourceWikiFlowRelationsPayloadBytes(candidate.relations)
-		candidate.relations = sourceWikiMergeRelations(candidate.relations, allRelations)
-		newEvidenceRelations := totalEvidenceRelations - oldEvidenceRelations + len(candidate.relations)
-		newEvidenceBytes := totalEvidenceBytes - oldEvidenceBytes + sourceWikiFlowRelationsPayloadBytes(candidate.relations)
-		if (maxEvidenceRelations >= 0 && newEvidenceRelations > maxEvidenceRelations) ||
-			(maxEvidenceBytes >= 0 && newEvidenceBytes > maxEvidenceBytes) {
-			return nil, true
+		if len(candidate.relations) < sourceWikiMaxFlowRelations+1 {
+			oldEvidenceRelations := len(candidate.relations)
+			oldEvidenceBytes := sourceWikiFlowRelationsPayloadBytes(candidate.relations)
+			candidate.relations = sourceWikiMergeRelations(candidate.relations, allRelations)
+			newEvidenceRelations := totalEvidenceRelations - oldEvidenceRelations + len(candidate.relations)
+			newEvidenceBytes := totalEvidenceBytes - oldEvidenceBytes + sourceWikiFlowRelationsPayloadBytes(candidate.relations)
+			if (maxEvidenceRelations >= 0 && newEvidenceRelations > maxEvidenceRelations) ||
+				(maxEvidenceBytes >= 0 && newEvidenceBytes > maxEvidenceBytes) {
+				return nil, true
+			}
+			totalEvidenceRelations, totalEvidenceBytes = newEvidenceRelations, newEvidenceBytes
 		}
-		totalEvidenceRelations, totalEvidenceBytes = newEvidenceRelations, newEvidenceBytes
 		candidates[route] = candidate
 		if maxCandidates >= 0 && !existed && len(candidates) > maxCandidates {
 			return nil, true
@@ -413,8 +415,8 @@ func sourceWikiFlowCandidatesWithBudgets(relations []types.SourceCodeRelation, f
 }
 
 // sourceWikiFlowRelationPayloadBytes estimates a conservative JSON payload
-// upper bound: quoted string bytes may expand sixfold for control characters,
-// while JSON range/context values are already encoded JSON.
+// upper bound. Direct strings and string contents inside raw JSON can expand
+// sixfold when encoding/json escapes control or HTML-sensitive characters.
 func sourceWikiFlowRelationPayloadBytes(relation types.SourceCodeRelation) int64 {
 	bytes := int64(512)
 	for _, value := range []string{
@@ -425,7 +427,7 @@ func sourceWikiFlowRelationPayloadBytes(relation types.SourceCodeRelation) int64
 	} {
 		bytes += int64(len(value)) * 6
 	}
-	return bytes + int64(len(relation.FromRange)+len(relation.ToRange)+len(relation.Context))
+	return bytes + 6*int64(len(relation.FromRange)+len(relation.ToRange)+len(relation.Context))
 }
 
 func sourceWikiFlowRelationsPayloadBytes(relations []types.SourceCodeRelation) int64 {
@@ -536,6 +538,13 @@ func sourceWikiRelationNodes(fileID, filePath string) []string {
 }
 
 func sourceWikiMergeRelations(existing, incoming []types.SourceCodeRelation) []types.SourceCodeRelation {
+	maxRelations := sourceWikiMaxFlowRelations + 1
+	if len(existing) >= maxRelations {
+		if len(existing) > maxRelations {
+			return append([]types.SourceCodeRelation(nil), existing[:maxRelations]...)
+		}
+		return existing
+	}
 	merged := append([]types.SourceCodeRelation(nil), existing...)
 	seen := make(map[string]bool, len(existing)+len(incoming))
 	identity := func(edge types.SourceCodeRelation) string {
@@ -550,11 +559,11 @@ func sourceWikiMergeRelations(existing, incoming []types.SourceCodeRelation) []t
 		if seen[key] {
 			continue
 		}
-		seen[key] = true
-		merged = append(merged, edge)
-		if len(merged) >= sourceWikiMaxFlowRelations+1 {
+		if len(merged) >= maxRelations {
 			break
 		}
+		seen[key] = true
+		merged = append(merged, edge)
 	}
 	return merged
 }

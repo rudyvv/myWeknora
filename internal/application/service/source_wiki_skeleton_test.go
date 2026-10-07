@@ -161,6 +161,26 @@ func TestSourceWikiSkeletonDefersAtAggregateFlowEvidenceLimit(t *testing.T) {
 	require.Empty(t, plan.Topics)
 }
 
+func TestSourceWikiFlowRelationPayloadBudgetCoversEscapedJSONFields(t *testing.T) {
+	relation := types.SourceCodeRelation{Context: types.JSON(`{"path":"<&>"}`)}
+	wantFloor := int64(512 + len(relation.Context)*6)
+	require.GreaterOrEqual(t, sourceWikiFlowRelationPayloadBytes(relation), wantFloor,
+		"HTML-sensitive characters inside raw JSON may expand when the relation is serialized")
+}
+
+func TestSourceWikiMergeRelationsChecksCapBeforeAppending(t *testing.T) {
+	existing := make([]types.SourceCodeRelation, sourceWikiMaxFlowRelations+1)
+	for i := range existing {
+		existing[i] = types.SourceCodeRelation{Kind: "method_call", FromKey: fmt.Sprintf("existing-%02d", i)}
+	}
+	incoming := types.SourceCodeRelation{Kind: "method_call", FromKey: "extra-anchor"}
+
+	merged := sourceWikiMergeRelations(existing, []types.SourceCodeRelation{incoming})
+	require.Len(t, merged, sourceWikiMaxFlowRelations+1)
+	require.Equal(t, existing[len(existing)-1].FromKey, merged[len(merged)-1].FromKey,
+		"a saturated flow keeps its stable first evidence set without appending a later route anchor")
+}
+
 func TestSourceWikiSkeletonDoesNotPromoteUncertainRouteIntoCertainFlow(t *testing.T) {
 	plan := buildSourceWikiSkeleton(sourceWikiSkeletonInput{
 		SourceID: "source-a", SnapshotID: "snapshot-1",
