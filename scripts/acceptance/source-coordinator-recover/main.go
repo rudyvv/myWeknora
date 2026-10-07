@@ -64,6 +64,7 @@ type safeResult struct {
 	Shape       string `json:"shape,omitempty"`
 	LogStatus   string `json:"sync_log_status,omitempty"`
 	SourceState string `json:"source_status,omitempty"`
+	RunPhase    string `json:"run_phase,omitempty"`
 	Note        string `json:"note,omitempty"`
 }
 
@@ -77,7 +78,6 @@ type coordinatorSnapshot struct {
 	LeaseExpiresAt   *time.Time
 	LogStatus        string
 	LogFinishedAt    *time.Time
-	LogErrorMessage  string
 	RunPhase         string
 	RunRetryCount    int
 }
@@ -159,6 +159,7 @@ func inspect() (safeResult, int) {
 		Shape:       shape,
 		LogStatus:   snapshot.LogStatus,
 		SourceState: snapshot.SourceStatus,
+		RunPhase:    snapshot.RunPhase,
 		Note:        "read-only inspection; no mutation performed",
 	}, 0
 }
@@ -209,7 +210,9 @@ func recoverCoordinator() (safeResult, int) {
 	}
 
 	// Post-verification is read-only: the dead run must be terminal, the
-	// coordinator quiet, and the source paused.
+	// coordinator quiet, and the source paused. The database-wide guards
+	// mirror the launcher preflight (verifyDatabaseReadOnly) so a green
+	// postcheck implies a green preflight for the affected guards.
 	var finalLogStatus string
 	if err := db.Raw(`SELECT status FROM public.sync_logs WHERE id::text = ?`, deadLogID).
 		Row().Scan(&finalLogStatus); err != nil || finalLogStatus != types.SyncLogStatusFailed {
@@ -225,9 +228,17 @@ func recoverCoordinator() (safeResult, int) {
 		return fail("postcheck", fmt.Sprintf("unexpected post-recovery state: source=%s active=%q pending=%q lease_owner=%q",
 			after.SourceStatus, after.ActiveSyncLogID, after.PendingSyncLogID, after.LeaseOwner))
 	}
-	var stray int64
-	if err := db.Raw(`SELECT count(*) FROM public.sync_logs WHERE status IN ('queued','running')`).Scan(&stray).Error; err != nil || stray != 0 {
-		return fail("postcheck", "queued or running sync logs remain after recovery")
+	guards := []string{
+		`SELECT count(*) FROM public.sync_logs WHERE status IN ('queued','running')`,
+		`SELECT count(*) FROM public.data_sources WHERE deleted_at IS NULL AND status NOT IN ('paused','deleted')`,
+		`SELECT count(*) FROM public.source_sync_states WHERE pending_sync_log_id IS NOT NULL OR active_sync_log_id IS NOT NULL OR lease_owner IS NOT NULL OR lease_expires_at IS NOT NULL`,
+		`SELECT count(*) FROM public.source_sync_runs WHERE phase IN ('queued','running','waiting_for_catch_up','retry_wait')`,
+	}
+	for _, query := range guards {
+		var count int64
+		if err := db.Raw(query).Scan(&count).Error; err != nil || count != 0 {
+			return fail("postcheck", "database is not quiet after recovery")
+		}
 	}
 	return safeResult{
 		Stage:       "recover",
@@ -335,11 +346,10 @@ func readSnapshot(db *gorm.DB) (*coordinatorSnapshot, *safeResult, int) {
 		return snapshot, nil, 0
 	}
 	var finished sql.NullTime
-	var errorMessage sql.NullString
-	if err := db.Raw(`SELECT l.status, l.finished_at, coalesce(l.error_message,''), coalesce(r.phase,''), coalesce(r.retry_count,0)
+	if err := db.Raw(`SELECT l.status, l.finished_at, coalesce(r.phase,''), coalesce(r.retry_count,0)
 		FROM public.sync_logs l LEFT JOIN public.source_sync_runs r ON r.sync_log_id = l.id
 		WHERE l.id::text = ?`, snapshot.ActiveSyncLogID).
-		Row().Scan(&snapshot.LogStatus, &finished, &errorMessage, &snapshot.RunPhase, &snapshot.RunRetryCount); err != nil {
+		Row().Scan(&snapshot.LogStatus, &finished, &snapshot.RunPhase, &snapshot.RunRetryCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			result, code := fail("active_run", "active sync log row missing")
 			return nil, &result, code
@@ -350,7 +360,6 @@ func readSnapshot(db *gorm.DB) (*coordinatorSnapshot, *safeResult, int) {
 	if finished.Valid {
 		snapshot.LogFinishedAt = &finished.Time
 	}
-	snapshot.LogErrorMessage = errorMessage.String
 	return snapshot, nil, 0
 }
 
@@ -360,6 +369,7 @@ func parseSourceDSN(raw string) (*pgx.ConnConfig, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u == nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") ||
 		u.Opaque != "" || u.Host != fmt.Sprintf("%s:%d", acceptedHost, acceptedPort) ||
+		u.EscapedPath() != "/"+seedDatabase ||
 		u.Fragment != "" || u.RawFragment != "" || u.ForceQuery || u.User == nil {
 		return nil, errors.New("invalid PostgreSQL URI")
 	}
