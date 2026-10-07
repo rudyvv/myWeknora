@@ -339,7 +339,7 @@ func TestLoadSourceWikiModuleProjectionPagesManifestAndSelectsOnlyBestSeed(t *te
 
 	pageQueries := 0
 	for _, query := range f.capture.snapshot() {
-		lower := strings.ToLower(query)
+		lower := strings.ToLower(strings.Join(strings.Fields(query), " "))
 		if strings.Contains(lower, "jsonb_array_elements") && strings.Contains(lower, "limit 128") {
 			pageQueries++
 			selectStart := strings.Index(lower, "select sm.path,")
