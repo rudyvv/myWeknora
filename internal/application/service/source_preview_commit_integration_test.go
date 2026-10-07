@@ -86,6 +86,31 @@ func sourceSyncPayload(t *testing.T, f *service.SourceIntegrationFixture, logID 
 	return payload
 }
 
+func TestSourceManualSyncExpectedCommitRejectedForDocumentMode(t *testing.T) {
+	f := service.NewSourceIntegrationFixture(t)
+	// A document-mode data source must reject the option instead of silently
+	// ignoring it, so the condition cannot be reinterpreted as a document sync.
+	var config struct {
+		Type        string          `json:"type"`
+		Credentials json.RawMessage `json:"credentials"`
+		Settings    json.RawMessage `json:"settings"`
+	}
+	require.NoError(t, json.Unmarshal(f.Source.Config, &config))
+	var settings map[string]any
+	require.NoError(t, json.Unmarshal(config.Settings, &settings))
+	settings["content_mode"] = "document"
+	document, err := json.Marshal(map[string]any{"type": config.Type, "credentials": config.Credentials, "settings": settings})
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Model(&types.DataSource{}).Where("id=?", f.Source.ID).Update("config", document).Error)
+
+	response := postSourceManualSync(t, f, strings.Repeat("a", 40))
+	require.Equal(t, http.StatusBadRequest, response.Code, "document mode must reject an expected commit condition")
+	require.Contains(t, response.Body.String(), "expected commit is only supported for source-mode sync")
+	logs, err := f.DataSources.GetSyncLogs(f.Ctx, f.Source.ID, 50, 0)
+	require.NoError(t, err)
+	require.Empty(t, logs, "a rejected document-mode request must not create a sync log")
+}
+
 func TestSourceManualSyncRejectsStaleExpectedCommitWithoutEnqueue(t *testing.T) {
 	f := service.NewSourceIntegrationFixture(t)
 	preview, err := f.DataSources.PreviewSource(f.Ctx, f.Source.ID, nil)
