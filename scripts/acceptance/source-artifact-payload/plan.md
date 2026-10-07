@@ -1,13 +1,13 @@
 # T22 artifact-payload helper — frozen source, no DB mode executed
 
 The original plan and helper were ignored under `.cache/`. This byte-preserving copy of the Go source is now tracked under `scripts/acceptance/source-artifact-payload/`. Helper source
-and pure tests are frozen here for Root review. No live helper mode, database
+and pure tests are frozen here for Root review. The original helper author did not execute a live mode or database
 connection, backend, or service was run. Pure tests use a dummy DSN with an
 injected connector.
 
 ## Fixed execution contract
 
-- Modes: default stat-only (no environment read and no DB open); `--upgrade-only`
+- Modes: default stat-only (no environment read and no DB open); `--preflight` (fixed clone, read-only transaction and guarded migration settings); `--upgrade-only`
   (fixed migration 120 clean → 121); `--backfill` (requires 121); `--measure`
   (read-only, requires 121 and zero scoped NULL cache counts).
 - Target clone: `source_t22_live_rehearsal_20261006`; admin DSN is supplied by
@@ -125,7 +125,7 @@ here.
 The complete review set is every Go file in this directory, this plan, and the
 pinned migration SQL used by `--upgrade-only`. Source and migration hashes are:
 
-- `scripts/acceptance/source-artifact-payload/main.go` — `AF61D5A8E08FA70B632A0E48C0094A800AB172222B96FCB1F502FF29E37C7447`
+- `scripts/acceptance/source-artifact-payload/main.go` — `919F7D51FA2DC755E913D9C0A2B13E34BD899F7A6BBBA1E302A8F86C3ED3E9E2`
 - `scripts/acceptance/source-artifact-payload/main_test.go` — `44F4366861B57B88CDD89254B076BFC61165D78378B483636BBE107909FDFF67`
 - `scripts/acceptance/source-artifact-payload/process_guard_windows.go` — `8E52D749BED4970D8468DE8E7B7E282B0D0FD58FE143546991C5D1983374BB96`
 - `scripts/acceptance/source-artifact-payload/process_guard_other.go` — `92850C0A979599798F8FDA7A60FA564D35E6F7AC50CA45212FB05A5784EC7052`
@@ -137,4 +137,8 @@ the final document edit, avoiding a self-referential hash.
 
 ## 2026-10-07 Root freeze
 
-Original Go hashes above match the handoff. The original plan raw SHA256 is 9E82E3185E8196698063DA8FD64BB61A6284E8098375EA065AD30E6730512510, differing from the handoff A67E92CB863637C2FD1A90F3ADDF11140455CB8FCA2B28EBD73134C295E0695F; both independent reviewers reviewed actual bytes. Migration 121 must be checked out with LF: its approved Git blob hash is unchanged. A narrow .gitattributes rule pins its working-tree bytes to the required 2D09 hash. Root read-only inspection found version120/clean, fixed scope and paused/quiescent state, zero other clone sessions/prepared transactions/pinned processes. No migration, backfill or performance measurement has run yet. The separate ignored readonly inspection adapter is not part of this write helper.
+The initial copied Go hashes matched the handoff; main.go is now revised as described below. The original plan raw SHA256 is 9E82E3185E8196698063DA8FD64BB61A6284E8098375EA065AD30E6730512510, differing from the handoff A67E92CB863637C2FD1A90F3ADDF11140455CB8FCA2B28EBD73134C295E0695F; both independent reviewers reviewed actual bytes. Migration 121 must be checked out with LF: its approved Git blob hash is unchanged. A narrow .gitattributes rule pins its working-tree bytes to the required 2D09 hash. Root read-only inspection found version120/clean, fixed scope and paused/quiescent state, zero other clone sessions/prepared transactions/pinned processes. No migration, backfill or performance measurement has run yet. The separate ignored readonly inspection adapter is not part of this write helper.
+
+## Real PostgreSQL transaction preflight repair
+
+The first reviewed upgrade exited2 with migration_upgrade_rejected before the write proof callback. Immediate read-only inspection still showed120/clean and zero sessions/tasks. A new public --preflight mode reproduced SQLSTATE42601 in a read-only transaction: PostgreSQL does not accept the former combined SET LOCAL statement. Migration and preflight now share separate valid statement_timeout=8s and lock_timeout=3s statements. The tagged integration CLI test was red with42601 and then green after the fix. It only uses the existing dedicated clone read-only; no test migration writes are allowed. All prior write proofs, locks, fixed scope, limits and quota formula remain. main.go hash in the manifest above now binds the corrected version; preflight_integration_test.go SHA256 D492C4C322659D8F05DD4B8BBC4FD5CC0F37DDA38B55B4317F18FFDAA54B794F. Root must review the new frozen commit before any write retry. No upgrade, backfill or quota performance measurement has completed yet.

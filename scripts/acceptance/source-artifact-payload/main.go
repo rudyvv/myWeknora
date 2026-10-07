@@ -63,6 +63,7 @@ const (
 	modeUpgradeOnly
 	modeBackfill
 	modeMeasure
+	modePreflight
 )
 
 type options struct {
@@ -218,6 +219,8 @@ func runWithConnector(args []string, stdout, stderr io.Writer, connect cloneConn
 		return writeJSON(stdout, result)
 	case modeMeasure:
 		return runMeasure(stdout, conn)
+	case modePreflight:
+		return runPreflight(ctx, stdout, stderr, conn)
 	default:
 		writeFailure(stderr, "mode_rejected")
 		return 2
@@ -230,6 +233,7 @@ func parseOptions(args []string) (options, error) {
 	upgrade := fs.Bool("upgrade-only", false, "atomically apply the pinned migration from version 120 to 121")
 	backfill := fs.Bool("backfill", false, "fill scoped NULL artifact byte-count metadata")
 	measure := fs.Bool("measure", false, "measure old and cached quota aggregates read-only")
+	preflight := fs.Bool("preflight", false, "check migration transaction settings and fixed clone guards read-only")
 	appStopped := fs.Bool("confirm-app-stopped", false, "confirm Root stopped the application for backfill/measurement")
 	stopProof := fs.String("stop-proof", "", "required for writes: process-and-clone-sessions")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
@@ -240,7 +244,7 @@ func parseOptions(args []string) (options, error) {
 	for _, candidate := range []struct {
 		set  bool
 		mode runMode
-	}{{*upgrade, modeUpgradeOnly}, {*backfill, modeBackfill}, {*measure, modeMeasure}} {
+	}{{*upgrade, modeUpgradeOnly}, {*backfill, modeBackfill}, {*measure, modeMeasure}, {*preflight, modePreflight}} {
 		if candidate.set {
 			selected++
 			mode = candidate.mode
@@ -254,6 +258,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if mode == modeMeasure && *stopProof != "" {
 		return options{}, errors.New("stop proof flag is not valid for read-only measurement")
+	}
+	if mode == modePreflight && (*appStopped || *stopProof != "") {
+		return options{}, errors.New("write assertions are not valid for read-only preflight")
 	}
 	return options{mode: mode, confirmAppStopped: *appStopped, stopProof: *stopProof}, nil
 }
@@ -573,7 +580,7 @@ func upgradeOnly(ctx context.Context, conn *pgx.Conn, stopProofFlag string, repo
 			_ = rollbackBounded(tx)
 		}
 	}()
-	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '8s', lock_timeout = '3s'"); err != nil {
+	if err := configureMigrationTransaction(ctx, tx); err != nil {
 		return err
 	}
 	if err := verifyCloneIdentity(ctx, tx); err != nil {
@@ -637,6 +644,56 @@ func verifyCloneIdentity(ctx context.Context, queryer queryRower) error {
 		return errors.New("clone identity mismatch")
 	}
 	return nil
+}
+
+func configureMigrationTransaction(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '8s'"); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'")
+	return err
+}
+
+func runPreflight(ctx context.Context, stdout, stderr io.Writer, conn *pgx.Conn) int {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		writeFailure(stderr, "preflight_begin_failed")
+		return 2
+	}
+	defer rollbackBounded(tx)
+	if err := configureMigrationTransaction(ctx, tx); err != nil {
+		var pgErr *pgconn.PgError
+		code := "unknown"
+		if errors.As(err, &pgErr) {
+			code = pgErr.Code
+		}
+		_ = writeJSON(stderr, map[string]string{"status": "preflight_transaction_settings_failed", "sqlstate": code})
+		return 2
+	}
+	version, dirty, err := readExactMigrationLedger(ctx, tx, false)
+	if err != nil || dirty || (version != baseMigration && version != targetMigration) {
+		writeFailure(stderr, "preflight_ledger_rejected")
+		return 2
+	}
+	if verifyCloneIdentity(ctx, tx) != nil || verifyFixedSourceScope(ctx, tx) != nil || verifyPausedFixedSources(ctx, tx) != nil || verifyGlobalQuiescence(ctx, tx) != nil {
+		writeFailure(stderr, "preflight_scope_or_quiescence_rejected")
+		return 2
+	}
+	var readOnly, statementTimeout, lockTimeout string
+	if tx.QueryRow(ctx, `SELECT current_setting('transaction_read_only'), current_setting('statement_timeout'), current_setting('lock_timeout')`).Scan(&readOnly, &statementTimeout, &lockTimeout) != nil || readOnly != "on" {
+		writeFailure(stderr, "preflight_readonly_not_confirmed")
+		return 2
+	}
+	proof, err := verifyStopProof(ctx, tx, verifyPinnedBackendProcess)
+	if err != nil {
+		writeFailure(stderr, "preflight_stop_proof_rejected")
+		return 2
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		writeFailure(stderr, "preflight_rollback_unknown")
+		return 3
+	}
+	return writeJSON(stdout, map[string]any{"status": "preflight_complete", "readonly": true, "migration_version": version, "statement_timeout": statementTimeout, "lock_timeout": lockTimeout, "stop_proof": proof})
 }
 
 func rollbackBounded(tx pgx.Tx) error {
