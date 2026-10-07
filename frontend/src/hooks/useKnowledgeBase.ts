@@ -18,6 +18,7 @@ export default function (knowledgeBaseId?: string) {
   const route = useRoute();
   const { t } = useI18n();
   const { cardList, total } = storeToRefs(usemenuStore);
+  const listLoadError = ref(false);
   let moreIndex = ref(-1);
   const details = reactive({
     title: "",
@@ -60,6 +61,7 @@ export default function (knowledgeBaseId?: string) {
     const targetKbId = kbId || knowledgeBaseId;
     if (!targetKbId) return Promise.resolve();
     const requestGeneration = query.page === 1 ? ++knowledgeListGeneration : knowledgeListGeneration;
+    listLoadError.value = false;
 
     return listKnowledgeFiles(targetKbId, query)
       .then((result: any) => {
@@ -93,7 +95,12 @@ export default function (knowledgeBaseId?: string) {
         }
         total.value = totalResult;
       })
-      .catch(() => {});
+      .catch(() => {
+        if (requestGeneration !== knowledgeListGeneration) return;
+        const currentRouteKbId = (route.params as any)?.kbId as string | undefined;
+        if (currentRouteKbId && currentRouteKbId !== targetKbId) return;
+        listLoadError.value = true;
+      });
   };
   const openMore = (index: number) => {
     moreIndex.value = index;
@@ -225,6 +232,7 @@ export default function (knowledgeBaseId?: string) {
   };
   return {
     cardList,
+    listLoadError,
     moreIndex,
     getKnowled,
     details,

@@ -649,6 +649,9 @@
             </template>
 
             <!-- No page selected -->
+            <div v-else-if="loading" class="wiki-reader-empty" role="status">
+              <p class="wiki-empty-title">{{ $t('knowledgeEditor.wikiBrowser.loading') }}</p>
+            </div>
             <div v-else class="wiki-reader-empty">
               <div class="wiki-empty-icon">
                 <t-icon name="browse" size="48px" />
@@ -1023,7 +1026,7 @@ const graphSearchValue = ref('')
 const graphRef = ref<HTMLElement | null>(null)
 const readerBodyRef = ref<HTMLElement | null>(null)
 const drawerBodyRef = ref<HTMLElement | null>(null)
-const loading = ref(false)
+const loading = ref(true)
 const graphLoading = ref(false)
 const graphReady = ref(false)
 const showArrows = ref(true)

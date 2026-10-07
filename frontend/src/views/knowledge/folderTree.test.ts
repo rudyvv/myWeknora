@@ -6,6 +6,7 @@ import {
   buildUploadFileName,
   canMoveFolderTo,
   childFolders,
+  visibleChildFolders,
   folderAncestorPaths,
   folderBreadcrumbs,
   folderOptionFromPath,
@@ -43,6 +44,15 @@ const folders = [
 ]
 
 const tree = { root_document_count: 2, total_document_count: 7, folders }
+
+test('a folder containing only subfolders still shows navigable contents with the sidebar open', () => {
+  const sourceTree = { ...tree, root_document_count: 0 }
+  assert.deepEqual(visibleChildFolders(sourceTree, '', { filtering: false, sidebarOpen: true, documentCount: 0 }), folders)
+  assert.deepEqual(visibleChildFolders(sourceTree, 'handbook', { filtering: false, sidebarOpen: true, documentCount: 0 }), folders[0].children)
+  assert.deepEqual(visibleChildFolders(sourceTree, '', { filtering: true, sidebarOpen: true, documentCount: 0 }), [])
+  assert.deepEqual(visibleChildFolders(sourceTree, '', { filtering: false, sidebarOpen: true, documentCount: 2 }), [])
+  assert.deepEqual(visibleChildFolders(sourceTree, '', { filtering: false, sidebarOpen: false, documentCount: 2 }), folders)
+})
 
 test('a plain single-file upload into the root sends no path-qualified name', () => {
   assert.equal(buildUploadFileName({ name: 'report.pdf' }, ROOT_FOLDER_PATH), undefined)

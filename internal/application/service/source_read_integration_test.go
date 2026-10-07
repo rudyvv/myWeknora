@@ -40,6 +40,33 @@ func syncSourceFixture(t *testing.T, f *javaSourceFixture, sourceIDs ...string) 
 	require.NoError(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)))
 }
 
+type countingKnowledgeListSourceReads struct {
+	interfaces.KnowledgeRepository
+	interfaces.SourceReadRepository
+	acquires int
+}
+
+func (r *countingKnowledgeListSourceReads) AcquireSourceRead(ctx context.Context, targets types.SearchTargets) (types.SourceReadLease, func(), error) {
+	r.acquires++
+	return r.SourceReadRepository.AcquireSourceRead(ctx, targets)
+}
+
+func TestSourceKnowledgeListPinsOneReadScopeForTheWholePage(t *testing.T) {
+	f := newJavaSourceFixture(t, map[string][]byte{
+		"src/One.java": []byte("class One { int value = 1; }\n"),
+		"src/Two.java": []byte("class Two { int value = 2; }\n"),
+	})
+	syncSourceFixture(t, f)
+	kbs := f.kbs.(*knowledgeBaseService)
+	counted := &countingKnowledgeListSourceReads{KnowledgeRepository: kbs.kgRepo, SourceReadRepository: kbs.kgRepo.(interfaces.SourceReadRepository)}
+	kbs.kgRepo = counted
+	result, err := f.knowledge.ListPagedKnowledgeByKnowledgeBaseID(f.ctx, f.kb.ID, &types.Pagination{Page: 1, PageSize: 35}, types.KnowledgeListFilter{})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, result.Total, int64(2), "fixture must actually contain multiple source files")
+	require.Equal(t, 1, counted.acquires, "one page must not capture a full Wiki read projection once per source file")
+	require.NotNil(t, result)
+}
+
 func TestSourceCodeExactPathTierBeatsRepeatedBM25AndIsConsumedByKeywordOnlySearch(t *testing.T) {
 	noise := "class Noise { String paths = \"" + strings.Repeat("src/Target.java ", 80) + "\"; }\n"
 	f := newJavaSourceFixture(t, map[string][]byte{

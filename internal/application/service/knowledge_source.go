@@ -99,6 +99,30 @@ func (s *knowledgeService) sourceKnowledgeInfos(ctx context.Context, rows []*typ
 	if err != nil {
 		return nil, err
 	}
+	// Pin the whole result page once. Acquiring a scope for each file also
+	// captures the Wiki projection each time and makes ordinary lists time out.
+	targets := make(types.SearchTargets, 0)
+	byKB := make(map[string]*types.SearchTarget)
+	for _, row := range rows {
+		if row == nil || row.Type != types.KnowledgeTypeSource {
+			continue
+		}
+		target := byKB[row.KnowledgeBaseID]
+		if target == nil {
+			target = &types.SearchTarget{Type: types.SearchTargetTypeKnowledge, KnowledgeBaseID: row.KnowledgeBaseID}
+			byKB[row.KnowledgeBaseID] = target
+			targets = append(targets, target)
+		}
+		target.KnowledgeIDs = append(target.KnowledgeIDs, row.ID)
+	}
+	if len(targets) > 0 {
+		var release func()
+		ctx, release, err = beginSourceRead(ctx, s.kbService, targets)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
 	for i, row := range rows {
 		rows[i], err = s.sourceKnowledgeInfo(ctx, row)
 		if err != nil {

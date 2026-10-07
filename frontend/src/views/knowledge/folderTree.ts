@@ -168,6 +168,16 @@ export function childFolders(
   return find(folders)?.children ?? []
 }
 
+/** Folder entries in the document pane; filtering returns flat document hits. */
+export function visibleChildFolders(
+  tree: KnowledgeFolderTree | null,
+  path: string,
+  options: { filtering: boolean; sidebarOpen: boolean; documentCount: number },
+): KnowledgeFolderNode[] {
+  if (options.filtering || (options.sidebarOpen && options.documentCount > 0)) return []
+  return childFolders(tree, path)
+}
+
 /**
  * Whether the document list is filtering rather than browsing.
  *

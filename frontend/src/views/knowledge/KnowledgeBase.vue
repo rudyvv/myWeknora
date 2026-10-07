@@ -67,7 +67,7 @@ import { resolveKnowledgeDownloadFileName } from './knowledgeDownloadFileName';
 import {
   buildUploadFileName,
   canMoveFolderTo,
-  childFolders,
+  visibleChildFolders,
   folderBreadcrumbs as buildFolderBreadcrumbs,
   folderPathExists as folderExistsInTree,
   isFilteringDocuments,
@@ -334,7 +334,7 @@ const canDownloadKnowledge = computed(() => {
 });
 
 const knowledgeList = ref<Array<{ id: string; name: string; type?: string }>>([]);
-let { cardList, total, moreIndex, details, getKnowled, openMore, onVisibleChange: _onVisibleChange, getCardDetails, getfDetails } = useKnowledgeBase(kbId.value)
+let { cardList, total, listLoadError, moreIndex, details, getKnowled, openMore, onVisibleChange: _onVisibleChange, getCardDetails, getfDetails } = useKnowledgeBase(kbId.value)
 
 const showKbDetailContextualGuide = computed(() => {
   return Boolean(kbId.value)
@@ -655,12 +655,14 @@ const isFiltering = computed(() =>
 );
 // Sub-folder entries shown at the top of the list while browsing. Search results
 // are flat, so they are dropped as soon as a filter is active. When the sidebar
-// tree is open it already lists the same folders, so skip the duplicate rows.
-const currentChildFolders = computed(() => {
-  if (isFiltering.value) return [];
-  if (showFolderTree.value && !folderTreeCollapsed.value) return [];
-  return childFolders(folderTree.value, selectedFolderPath.value);
-});
+// tree is open it already lists the same folders, so skip duplicate rows only
+// when the pane has direct documents. A directory containing only subfolders
+// must remain browsable rather than showing "knowledge is empty".
+const currentChildFolders = computed(() => visibleChildFolders(
+  folderTree.value,
+  selectedFolderPath.value,
+  { filtering: isFiltering.value, sidebarOpen: showFolderTree.value && !folderTreeCollapsed.value, documentCount: cardList.value.length },
+));
 // A row's folder is worth showing only when the list can span folders.
 const showDocumentFolderPath = computed(() => hasFolders.value && isFiltering.value);
 const folderBreadcrumbs = computed(() => buildFolderBreadcrumbs(selectedFolderPath.value));
@@ -2625,8 +2627,12 @@ async function createNewSession(value: string): Promise<void> {
                 <div v-if="docMarqueeVisible" class="doc-marquee-box"
                   :class="{ 'is-add': docMarqueeMode === 'add', 'is-subtract': docMarqueeMode === 'subtract' }"
                   :style="docMarqueeBoxStyle" aria-hidden="true" />
+                <div v-if="listLoadError" class="doc-empty-state" role="alert">
+                  <p>{{ t('knowledgeBase.loadingFailed') }}</p>
+                  <t-button variant="outline" @click="loadKnowledgeFiles(kbId)">{{ t('common.retry') }}</t-button>
+                </div>
                 <!-- 文档骨架屏 -->
-                <div v-if="docListLoading && cardList.length === 0 && !currentChildFolders.length" class="doc-card-list doc-card-list-animated">
+                <div v-else-if="docListLoading && cardList.length === 0 && !currentChildFolders.length" class="doc-card-list doc-card-list-animated">
                   <div v-for="n in 8" :key="'doc-skel-' + n" class="knowledge-card knowledge-card-skeleton">
                     <div class="card-content">
                       <div class="card-content-nav">
