@@ -899,6 +899,7 @@ func TestSourceWikiBatchRejectedQADraftsAreNeverPublished(t *testing.T) {
 		var child types.SourceWikiAttempt
 		require.NoError(t, f.db.Where("id = ?", *topic.AttemptID).Take(&child).Error)
 		require.Equal(t, "failed", child.Status, "whole-set rejection terminalizes the staged child")
+		require.NotEmpty(t, child.Draft, "whole-set rejection retains the failed child's draft")
 		var retainedOwners int64
 		require.NoError(t, f.db.Table("source_wiki_attempt_evidence_refs").Where("attempt_id = ?", child.ID).Count(&retainedOwners).Error)
 		require.Zero(t, retainedOwners, "rejected candidates release their exact evidence owners")
