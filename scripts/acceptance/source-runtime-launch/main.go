@@ -30,8 +30,8 @@ import (
 )
 
 const (
-	acceptedExe = `C:/Users/28211/.codex/test-runners/weknora-t22-acceptance-5cdadd8e.exe`
-	acceptedSHA = "60352a58dc68e6c85e259ee46140e98c3ffc5b086a2ce408e924c558f14fd906"
+	acceptedExe = `C:/Users/28211/.codex/test-runners/weknora-t22-acceptance-4e4fc3b4.exe`
+	acceptedSHA = "3a9073844550d75be0eacdca2cb1cdf6c51c8345c9fa8c5cfa8282befd4adde5"
 	workRoot    = `C:\Users\28211\.codex\worktrees\source-integration\WeKnora`
 	primaryEnv  = `D:\Project-Weknora\WeKnora\.env`
 	localEnv    = `D:\Project-Weknora\WeKnora\.env.local`
