@@ -48,7 +48,8 @@ const (
 	serverAddress = "127.0.0.1:57825"
 	parserURL     = "http://127.0.0.1:57823"
 
-	maxDotenvBytes = 1 << 20
+	maxDotenvBytes    = 1 << 20
+	frozenTLSDeadline = "2026-10-07T10:45:00Z"
 )
 
 var knownAsynqQueues = map[string]struct{}{
@@ -356,7 +357,7 @@ func rootGitLabTLS() (map[string]string, error) {
 	if !originSet || (origin == "" && until == "") {
 		return map[string]string{}, nil
 	}
-	if origin != "https://gitlab.p.it" || until == "" || origin != strings.TrimSpace(origin) || until != strings.TrimSpace(until) {
+	if origin != "https://gitlab.p.it" || until != frozenTLSDeadline || origin != strings.TrimSpace(origin) || until != strings.TrimSpace(until) {
 		return nil, errors.New("invalid TLS exception")
 	}
 	u, err := url.Parse(origin)
@@ -415,7 +416,7 @@ func verifyDatabaseReadOnly(cfg *pgx.ConnConfig, kbID string) error {
 	var knownKB bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM public.knowledge_bases
-		WHERE id::text=$1 AND deleted_at IS NULL AND vector_store_id IS NULL
+		WHERE id::text=$1 AND tenant_id=10000 AND deleted_at IS NULL AND vector_store_id IS NULL
 	)`, kbID).Scan(&knownKB); err != nil || !knownKB {
 		return errors.New("known T22 knowledge base missing or externally indexed")
 	}
