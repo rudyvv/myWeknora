@@ -14,15 +14,18 @@ import (
 
 const (
 	sourceWikiModuleProjectionPageSize          = 128
+	sourceWikiModuleProjectionMaxPathBytes      = 4096
+	sourceWikiModuleProjectionMaxTotalPathBytes = 8 << 20
 	sourceWikiModuleProjectionMaxSeedStringSize = 16 << 10
 	sourceWikiModuleProjectionMaxSeedBytes      = types.SourceWikiImpactMaxFactBytes
 )
 
 // SourceWikiModuleProjection is a bounded projection of one fixed current
-// publication. InventoryComplete proves that all manifest rows were paged and
-// their identities checked; it does not prove the manifest digest was
-// reconstructed from those rows. Relations are intentionally deferred because
-// this projection does not load or derive a complete relation graph.
+// publication. Paths are limited to 4096 UTF-8 bytes each and 8 MiB total.
+// InventoryComplete proves that all manifest rows were paged and their
+// identities checked; it does not prove the manifest digest was reconstructed
+// from those rows. Relations are intentionally deferred because this
+// projection does not load or derive a complete relation graph.
 type SourceWikiModuleProjection struct {
 	TenantID          uint64
 	KnowledgeBaseID   string
@@ -76,6 +79,8 @@ type sourceWikiModuleProjectionBounds struct {
 	MemberCount                  int64
 	DistinctPathCount            int64
 	EmptyPathCount               int64
+	MaxPathBytes                 int64
+	TotalPathBytes               int64
 	ParsedCount                  int64
 	ExcludedCount                int64
 	SupportedStatusCount         int64
@@ -116,6 +121,8 @@ type sourceWikiModuleProjectionMemberRow struct {
 // publication, including excluded members. Each page returns metadata and at
 // most one structural seed per non-generated parsed file; parser facts,
 // source content, symbols, and relation context are never materialized in Go.
+// Path bytes are bounded at 4096 per path and 8 MiB in aggregate; any budget
+// violation fails closed without returning a partial projection.
 func LoadSourceWikiModuleProjection(
 	ctx context.Context,
 	db *gorm.DB,
@@ -167,6 +174,12 @@ func LoadSourceWikiModuleProjection(
 		if err := tx.Raw(sourceWikiModuleProjectionBoundsSQL, tenantID, knowledgeBaseID, sourceID, snapshotID).Scan(&bounds).Error; err != nil {
 			return fmt.Errorf("validate source Wiki module projection manifest inventory: %w", err)
 		}
+		if bounds.MaxPathBytes > sourceWikiModuleProjectionMaxPathBytes {
+			return fmt.Errorf("source Wiki module projection path exceeds the %d-byte hard bound", sourceWikiModuleProjectionMaxPathBytes)
+		}
+		if bounds.TotalPathBytes > sourceWikiModuleProjectionMaxTotalPathBytes {
+			return fmt.Errorf("source Wiki module projection paths exceed the %d-byte aggregate hard bound", sourceWikiModuleProjectionMaxTotalPathBytes)
+		}
 		if bounds.MemberCount != int64(snapshot.MemberCount) || bounds.DistinctPathCount != bounds.MemberCount || bounds.EmptyPathCount != 0 ||
 			bounds.ParsedCount != int64(snapshot.FileCount) || bounds.SupportedStatusCount != bounds.MemberCount ||
 			bounds.FileIdentityCount != bounds.DistinctFileIdentityCount || bounds.VersionIdentityCount != bounds.DistinctVersionIdentityCount ||
@@ -185,7 +198,7 @@ func LoadSourceWikiModuleProjection(
 		seenFiles := make(map[string]struct{}, snapshot.MemberCount)
 		seenVersions := make(map[string]struct{}, snapshot.FileCount)
 		lastPath := ""
-		var seedBytes int64
+		var seedBytes, pathBytes int64
 		for len(projection.Members) < snapshot.MemberCount {
 			var rows []sourceWikiModuleProjectionMemberRow
 			if err := tx.Raw(sourceWikiModuleProjectionPageSQL, snapshotID, lastPath).Scan(&rows).Error; err != nil {
@@ -195,6 +208,11 @@ func LoadSourceWikiModuleProjection(
 				return fmt.Errorf("source Wiki module projection pagination did not cover the fixed manifest")
 			}
 			for _, row := range rows {
+				nextPathBytes, pathErr := addSourceWikiModuleProjectionPathBytes(pathBytes, row.Path)
+				if pathErr != nil {
+					return pathErr
+				}
+				pathBytes = nextPathBytes
 				if row.Path == "" || row.Path == lastPath || row.BlobSHA == "" {
 					return fmt.Errorf("source Wiki module projection contains an empty or unordered manifest path")
 				}
@@ -266,7 +284,7 @@ func LoadSourceWikiModuleProjection(
 				projection.Members = append(projection.Members, member)
 			}
 		}
-		if len(projection.Members) != snapshot.MemberCount || int64(len(seenVersions)) != bounds.ParsedCount {
+		if len(projection.Members) != snapshot.MemberCount || int64(len(seenVersions)) != bounds.ParsedCount || pathBytes != bounds.TotalPathBytes {
 			return fmt.Errorf("source Wiki module projection did not cover every manifest identity")
 		}
 		projection.InventoryComplete = true
@@ -290,6 +308,8 @@ SELECT
 	COUNT(*) AS member_count,
 	COUNT(DISTINCT sm.path) AS distinct_path_count,
 	COUNT(*) FILTER (WHERE sm.path IS NULL OR sm.path='') AS empty_path_count,
+	COALESCE(MAX(OCTET_LENGTH(sm.path)),0) AS max_path_bytes,
+	COALESCE(SUM(OCTET_LENGTH(sm.path)),0) AS total_path_bytes,
 	COUNT(*) FILTER (WHERE sm.status='parsed') AS parsed_count,
 	COUNT(*) FILTER (WHERE sm.status='excluded') AS excluded_count,
 	COUNT(*) FILTER (WHERE sm.status IN ('parsed','excluded')) AS supported_status_count,
@@ -369,4 +389,21 @@ func isSourceSHA256(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func addSourceWikiModuleProjectionPathBytes(total int64, path string) (int64, error) {
+	if total < 0 || total > sourceWikiModuleProjectionMaxTotalPathBytes {
+		return total, fmt.Errorf("source Wiki module projection path byte total is outside its hard bound")
+	}
+	pathBytes := int64(len(path))
+	if pathBytes == 0 {
+		return total, fmt.Errorf("source Wiki module projection contains an empty manifest path")
+	}
+	if pathBytes > sourceWikiModuleProjectionMaxPathBytes {
+		return total, fmt.Errorf("source Wiki module projection path exceeds the %d-byte hard bound", sourceWikiModuleProjectionMaxPathBytes)
+	}
+	if pathBytes > sourceWikiModuleProjectionMaxTotalPathBytes-total {
+		return total, fmt.Errorf("source Wiki module projection paths exceed the %d-byte aggregate hard bound", sourceWikiModuleProjectionMaxTotalPathBytes)
+	}
+	return total + pathBytes, nil
 }
