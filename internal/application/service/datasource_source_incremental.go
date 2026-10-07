@@ -7,12 +7,40 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/source"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
 )
+
+// sourceEmbeddingQuotaBackoff waits out provider quota windows (for example
+// Volcengine ModelAccountTpmRateLimitExceeded) before retrying the same
+// batch. A variable so tests can shorten the window; the run deadline still
+// bounds the total stall budget of one attempt.
+var sourceEmbeddingQuotaBackoff = 75 * time.Second
+
+// sourceEmbeddingQuotaBackoffReserve keeps runway after a backoff for the
+// retried batch itself before the run deadline expires.
+const sourceEmbeddingQuotaBackoffReserve = 2 * time.Minute
+
+// sourceEmbeddingQuotaBackoffMaxAttempts bounds in-stage backoffs even when
+// the context carries no deadline.
+const sourceEmbeddingQuotaBackoffMaxAttempts = 40
+
+// sourceEmbeddingRateLimited reports whether an embedding error is a quota
+// window (account/model TPM or RPM limits, HTTP 429) that can recover by
+// waiting, as opposed to a permanent request failure.
+func sourceEmbeddingRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "ratelimitexceeded") ||
+		strings.Contains(message, "too many requests") ||
+		strings.Contains(message, "rate limit")
+}
 
 // Reconcile consecutive complete manifests; excluded entries retain managed identity.
 // Only a unique disappeared/new pair with exactly equal blob bytes is a rename.
@@ -180,6 +208,34 @@ func (s *DataSourceService) newSourceIndexBatchStager(ctx context.Context, ds *t
 		indexProfile: indexProfile, dimension: dimension}, nil
 }
 
+// sourceEmbeddingBatchWithQuotaBackoff embeds one batch, waiting out provider
+// quota windows instead of failing the run while the quota can still recover.
+// Vectors banked by earlier batches stay cached, so repeated quota windows
+// converge; when a backoff no longer fits before the run deadline the stage
+// fails explicitly and the durable retry path resumes from the cache.
+func sourceEmbeddingBatchWithQuotaBackoff(embedCtx context.Context, runCtx context.Context, provider string, model sourceBatchEmbedder, texts []string) ([][]float32, error) {
+	for attempt := 0; ; attempt++ {
+		vectors, err := sourceBatchEmbed(embedCtx, provider, model, texts)
+		if err == nil {
+			return vectors, nil
+		}
+		if !sourceEmbeddingRateLimited(err) {
+			return nil, fmt.Errorf("source embedding request failed")
+		}
+		if attempt >= sourceEmbeddingQuotaBackoffMaxAttempts {
+			return nil, fmt.Errorf("source embedding quota backoff attempts exhausted")
+		}
+		if deadline, ok := runCtx.Deadline(); ok && time.Until(deadline) < sourceEmbeddingQuotaBackoff+sourceEmbeddingQuotaBackoffReserve {
+			return nil, fmt.Errorf("source embedding quota backoff budget exhausted before the run deadline")
+		}
+		select {
+		case <-time.After(sourceEmbeddingQuotaBackoff):
+		case <-runCtx.Done():
+			return nil, fmt.Errorf("source embedding request failed")
+		}
+	}
+}
+
 func (stager *sourceIndexBatchStager) stage(ctx context.Context, batch []*types.IndexInfo, usage *sourceEmbeddingUsage) error {
 	if len(batch) == 0 {
 		return nil
@@ -222,9 +278,9 @@ func (stager *sourceIndexBatchStager) stage(ctx context.Context, batch []*types.
 				usage.estimatedTokens.Add(attemptTokenEstimate)
 			})
 		}
-		vectors, err := sourceBatchEmbed(embedCtx, stager.config.Parameters.Provider, stager.model, texts)
+		vectors, err := sourceEmbeddingBatchWithQuotaBackoff(embedCtx, ctx, stager.config.Parameters.Provider, stager.model, texts)
 		if err != nil {
-			return fmt.Errorf("source embedding request failed")
+			return err
 		}
 		if len(vectors) != len(texts) {
 			return fmt.Errorf("source embedding result is incomplete")

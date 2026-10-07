@@ -3171,6 +3171,7 @@ type javaSourceFixture struct {
 	embedVector             []float32
 	embeddingForText        func(string) []float32
 	embedCount              atomic.Int64
+	embedRateLimitRemaining atomic.Int64
 	parseCount              atomic.Int64
 	captureParsePaths       atomic.Bool
 	parsePathMu             sync.Mutex
@@ -3426,6 +3427,14 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 
 	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.embedCount.Add(1)
+		// Optional provider quota-window simulation: the next calls answer with
+		// the same shape as Volcengine ModelAccountTpmRateLimitExceeded.
+		if f.embedRateLimitRemaining.Add(-1) >= 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprintf(w, `{"error":{"message":"ModelAccountTpmRateLimitExceeded - TPM (Tokens Per Minute) limit of the model is exceeded"}}`)
+			return
+		}
 		var request struct {
 			Input []string `json:"input"`
 		}
