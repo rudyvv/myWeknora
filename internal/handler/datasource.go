@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -477,6 +479,34 @@ func (h *DataSourceHandler) ManualSync(c *gin.Context) {
 		return
 	}
 
+	var request struct {
+		ExpectedCommitSHA *string `json:"expected_commit_sha"`
+	}
+	if c.Request.Body != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+		decoder := json.NewDecoder(c.Request.Body)
+		decoder.DisallowUnknownFields()
+		err := decoder.Decode(&request)
+		if err != nil && err != io.EOF {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sync request"})
+			return
+		}
+		if err == nil {
+			var extra any
+			if decoder.Decode(&extra) != io.EOF {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sync request"})
+				return
+			}
+		}
+	}
+	if request.ExpectedCommitSHA != nil {
+		var err error
+		ctx, err = types.WithSourceSyncExpectedCommit(ctx, *request.ExpectedCommitSHA)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expected commit"})
+			return
+		}
+	}
 	syncLog, err := h.service.ManualSync(ctx, id)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

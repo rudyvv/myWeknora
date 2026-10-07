@@ -37,6 +37,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 	"github.com/tiktoken-go/tokenizer"
 	pgdriver "gorm.io/driver/postgres"
@@ -3250,19 +3251,23 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 	require.Equal(t, "/source_test", address.Path)
 	require.Equal(t, "127.0.0.1", address.Hostname())
 	cloneFixture := os.Getenv("SOURCE_TEST_FIXED_ACCEPTANCE_CLONE")
+	var cloneConfig *pgx.ConnConfig
 	if cloneFixture != "" {
 		// This opt-in is used only by the Root-reviewed acceptance regression.
 		// No arbitrary database, endpoint, credentials or public rows are allowed.
 		require.Equal(t, "source_t22_live_rehearsal_20261006", cloneFixture)
-		require.Equal(t, "57822", address.Port())
-		require.Equal(t, "disable", address.Query().Get("sslmode"))
-		require.Len(t, address.Query(), 1)
+		cloneConfig = fixedCloneFixtureConfig(t, dsn)
 		address.Path = "/" + cloneFixture
 		dsn = address.String()
 	}
 	silentLogger := quietSourceIntegrationLogger{}
-	admin, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{Logger: silentLogger})
-	require.NoError(t, err)
+	var admin *gorm.DB
+	if cloneFixture == "" {
+		admin, err = gorm.Open(pgdriver.Open(dsn), &gorm.Config{Logger: silentLogger})
+		require.NoError(t, err)
+	} else {
+		admin = fixedCloneFixtureAdmin(t, cloneConfig)
+	}
 	schema := "source_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if cloneFixture == "" {
 		require.NoError(t, admin.Exec("CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search").Error)
@@ -3271,18 +3276,23 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 		require.NoError(t, admin.Raw("SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pg_search')").Scan(&extensionCount).Error)
 		require.Equal(t, int64(2), extensionCount)
 	}
-	require.NoError(t, admin.Exec("CREATE SCHEMA "+schema).Error)
-	t.Cleanup(func() {
-		_ = admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error
-		sqlDB, _ := admin.DB()
-		_ = sqlDB.Close()
-	})
-	query := address.Query()
-	query.Set("search_path", schema+",public")
-	address.RawQuery = query.Encode()
-	db, err := gorm.Open(pgdriver.Open(address.String()), &gorm.Config{Logger: silentLogger})
-	require.NoError(t, err)
-	t.Cleanup(func() { sqlDB, _ := db.DB(); _ = sqlDB.Close() })
+	var db *gorm.DB
+	if cloneFixture == "" {
+		require.NoError(t, admin.Exec("CREATE SCHEMA "+schema).Error)
+		t.Cleanup(func() {
+			_ = admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error
+			sqlDB, _ := admin.DB()
+			_ = sqlDB.Close()
+		})
+		query := address.Query()
+		query.Set("search_path", schema+",public")
+		address.RawQuery = query.Encode()
+		db, err = gorm.Open(pgdriver.Open(address.String()), &gorm.Config{Logger: silentLogger})
+		require.NoError(t, err)
+		t.Cleanup(func() { sqlDB, _ := db.DB(); _ = sqlDB.Close() })
+	} else {
+		db = fixedCloneFixtureDatabase(t, admin, cloneConfig, schema)
+	}
 	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.Model{}, &types.DataSource{}, &types.SyncLog{}, &types.TaskPendingOp{}, &types.SourceWikiAttempt{}, &types.KnowledgeTag{}, &types.KnowledgeTagRelation{}, &types.Organization{}, &types.OrganizationTenantMember{}, &types.KnowledgeBaseShare{}, &types.WikiFolder{}, &types.WikiPage{}, &types.WikiPageRevision{}))
 	require.NoError(t, db.Exec(`CREATE TABLE embeddings (
 		id BIGSERIAL PRIMARY KEY, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
