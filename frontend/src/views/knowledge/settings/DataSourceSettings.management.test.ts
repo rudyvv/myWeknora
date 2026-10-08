@@ -60,14 +60,9 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
   let holdNextList = false
   let releaseHeldList: (() => void) | undefined
   let failNextList = false
-  let holdNextUnbind = false
-  let releaseHeldUnbind: (() => void) | undefined
+  let holdNextDelete = false
+  let releaseHeldDelete: (() => void) | undefined
   const record = (method: string, ...args: any[]) => calls.push({ method, args: copy(args) })
-  const updateRow = (id: string, update: any) => {
-    const index = rows.findIndex(row => row.id === id)
-    rows[index] = { ...rows[index], ...copy(update) }
-    return copy(rows[index])
-  }
   const api = {
     async listDataSources() {
       if (failNextList) {
@@ -84,33 +79,15 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
     async deleteDataSource(id: string) {
       record('deleteDataSource', id)
       rows = rows.filter(row => row.id !== id)
+      if (holdNextDelete) {
+        holdNextDelete = false
+        await new Promise<void>(resolve => { releaseHeldDelete = resolve })
+      }
     },
     async triggerSync(id: string) { record('triggerSync', id) },
     async pauseDataSource(id: string) { record('pauseDataSource', id) },
     async resumeDataSource(id: string) { record('resumeDataSource', id) },
-    async unbindDataSource(id: string) {
-      record('unbindDataSource', id)
-      const reply = updateRow(id, { source_lifecycle: { binding_state: 'unbound', query_enabled: true } })
-      if (holdNextUnbind) {
-        holdNextUnbind = false
-        return new Promise(resolve => { releaseHeldUnbind = () => resolve(reply) })
-      }
-      return reply
-    },
-    async clearSourceKnowledge(id: string) {
-      record('clearSourceKnowledge', id)
-      return updateRow(id, { source_lifecycle: {
-        binding_state: 'unbound', query_enabled: false,
-        cleanup: { id: 'cleanup-one', status: 'pending', retryable: false },
-      } })
-    },
-    async retrySourceKnowledgeClear(id: string, operationId: string) {
-      record('retrySourceKnowledgeClear', id, operationId)
-      return updateRow(id, { source_lifecycle: {
-        binding_state: 'unbound', query_enabled: false,
-        cleanup: { id: operationId, status: 'pending', retryable: false },
-      } })
-    },
+
   }
 
   const componentStub = defineComponent({ setup: () => () => null })
@@ -199,8 +176,8 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
     holdNextList() { holdNextList = true },
     failNextList() { failNextList = true },
     async releaseHeldList() { releaseHeldList?.(); await settle() },
-    holdNextUnbind() { holdNextUnbind = true },
-    async releaseHeldUnbind() { releaseHeldUnbind?.(); await settle() },
+    holdNextDelete() { holdNextDelete = true },
+    async releaseHeldDelete() { releaseHeldDelete?.(); await settle() },
     hasMenuItem,
     clickMenuItem,
     confirm,
@@ -212,67 +189,28 @@ async function fixture(options: { admin?: boolean; sources: any[] }) {
   }
 }
 
-test('source lifecycle APIs use dedicated endpoints and the explicit current-plus-history scope', async () => {
-  const calls: any[] = []
-  const canonical = { id: 'source-one', source_lifecycle: { binding_state: 'unbound', query_enabled: false } }
-  const apiModule = { exports: {} as any }
-  const code = ts.transpileModule(readFileSync(apiPath, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText
-  const mockRequire = (name: string) => {
-    if (name === '../../utils/request') return {
-      get: () => undefined,
-      post: async (...args: any[]) => { calls.push(args); return { data: canonical } },
-      put: () => undefined,
-      del: () => undefined,
-    }
-    if (name === '../../utils/api-base') return { getApiBaseUrl: () => 'http://localhost' }
-    if (name === '../../utils/callbackUrl') return { buildApiCallbackUrl: () => '' }
-    return require(name)
-  }
-  new Function('require', 'module', 'exports', code)(mockRequire, apiModule, apiModule.exports)
-  const api = apiModule.exports
-  assert.deepEqual(await api.unbindDataSource('source-one'), canonical)
-  assert.deepEqual(await api.clearSourceKnowledge('source-one'), canonical)
-  assert.deepEqual(await api.retrySourceKnowledgeClear('source-one', 'cleanup-one'), canonical)
-  assert.deepEqual(calls, [
-    ['/api/v1/datasource/source-one/unbind', {}],
-    ['/api/v1/datasource/source-one/clear-source', { confirm: true, scope: 'current_and_history' }],
-    ['/api/v1/datasource/source-one/clear-source/retry', { operation_id: 'cleanup-one' }],
-  ])
-})
-
-test('source clear confirmation states its scope and accepted cleanup immediately disables query access', async () => {
+test('source uses the same DELETE endpoint and removes its card without clearing knowledge', async () => {
   const f = await fixture({ sources: [source('source-one')] })
   try {
-    assert.ok(f.hasMenuItem('datasource.sourceClear'))
-    assert.ok(!f.hasMenuItem('datasource.delete'), 'source knowledge removal is not datasource DELETE')
-    await f.clickMenuItem('datasource.sourceClear')
-    await f.confirm('datasource.sourceClearConfirm')
-    assert.ok(f.calls.some(call => call.method === 'clearSourceKnowledge'))
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'))
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.cleanup.pending'))
-    assert.ok(!f.hasMenuItem('datasource.syncNow'))
-    assert.ok(!f.hasMenuItem('datasource.resume'))
-    assert.ok(!f.hasMenuItem('datasource.edit'))
+    assert.ok(f.hasMenuItem('datasource.delete'))
+    assert.ok(!f.hasMenuItem('datasource.unbind'))
+    assert.ok(!f.hasMenuItem('datasource.sourceClear'))
+    assert.ok(!f.hasMenuItem('datasource.sourceClearRetry'))
+    await f.clickMenuItem('datasource.delete')
+    await f.confirm('datasource.deleteConfirm')
+    assert.deepEqual(f.calls.filter(call => call.method === 'deleteDataSource').map(call => call.args), [['source-one']])
+    assert.ok(!f.host.textContent?.includes('source-one'))
   } finally { await f.close() }
 })
 
-test('unbinding preserves query access while removing source management and sync controls', async () => {
-  const f = await fixture({ sources: [source('source-one')] })
+test('previously unbound sources can be removed through the unified delete action', async () => {
+  const f = await fixture({ sources: [source('source-one', 'source', { binding_state: 'unbound', query_enabled: true })] })
   try {
-    assert.ok(f.hasMenuItem('datasource.unbind'))
-    await f.clickMenuItem('datasource.unbind')
-    await f.confirm('datasource.unbindConfirm')
-    assert.ok(f.calls.some(call => call.method === 'unbindDataSource'))
-    assert.ok(!f.calls.some(call => call.method === 'deleteDataSource'))
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.binding.unbound'))
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryEnabled'))
-    assert.ok(f.hasMenuItem('datasource.sourceClear'), 'detached knowledge can still be explicitly cleared')
-    assert.ok(!f.hasMenuItem('datasource.edit'))
+    assert.ok(f.hasMenuItem('datasource.delete'))
     assert.ok(!f.hasMenuItem('datasource.syncNow'))
-    assert.ok(!f.hasMenuItem('datasource.resume'))
-    assert.ok(!f.hasMenuItem('datasource.unbind'))
+    await f.clickMenuItem('datasource.delete')
+    await f.confirm('datasource.deleteConfirm')
+    assert.ok(!f.host.textContent?.includes('source-one'))
   } finally { await f.close() }
 })
 
@@ -286,25 +224,16 @@ test('pausing a bound source leaves its query-visibility state untouched', async
   } finally { await f.close() }
 })
 
-test('failed retryable clear retries the same operation and never restores query or sync controls', async () => {
+test('legacy cleanup state exposes no clear or retry operation', async () => {
   const f = await fixture({ sources: [source('source-one', 'source', {
-    binding_state: 'unbound',
-    query_enabled: false,
-    cleanup: { id: 'cleanup-retry', status: 'failed', retryable: true, error_code: 'temporary_failure' },
+    binding_state: 'unbound', query_enabled: false,
+    cleanup: { id: 'cleanup-retry', status: 'failed', retryable: true },
   })] })
   try {
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.cleanup.failed'))
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'))
-    assert.ok(f.hasMenuItem('datasource.sourceClearRetry'))
+    assert.ok(!f.hasMenuItem('datasource.sourceClearRetry'))
     assert.ok(!f.hasMenuItem('datasource.sourceClear'))
+    assert.ok(f.hasMenuItem('datasource.delete'))
     assert.ok(!f.hasMenuItem('datasource.syncNow'))
-    assert.ok(!f.hasMenuItem('datasource.resume'))
-    await f.clickMenuItem('datasource.sourceClearRetry')
-    assert.deepEqual(f.calls.find(call => call.method === 'retrySourceKnowledgeClear')?.args, ['source-one', 'cleanup-retry'])
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'))
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.cleanup.pending'))
-    assert.ok(!f.hasMenuItem('datasource.syncNow'))
-    assert.ok(!f.hasMenuItem('datasource.resume'))
   } finally { await f.close() }
 })
 
@@ -313,6 +242,7 @@ test('viewer cannot mutate sources and document-mode datasource keeps its legacy
   try {
     assert.ok(!viewer.hasMenuItem('datasource.edit'))
     assert.ok(!viewer.hasMenuItem('datasource.syncNow'))
+    assert.ok(!viewer.hasMenuItem('datasource.delete'))
     assert.ok(!viewer.hasMenuItem('datasource.unbind'))
     assert.ok(!viewer.hasMenuItem('datasource.sourceClear'))
     assert.ok(viewer.hasMenuItem('datasource.logs'))
@@ -331,39 +261,31 @@ test('viewer cannot mutate sources and document-mode datasource keeps its legacy
   } finally { await doc.close() }
 })
 
-test('late pre-clear list cannot restore source controls when post-clear refresh fails', async () => {
+test('late list cannot restore a deleted source when refresh fails', async () => {
   const f = await fixture({ sources: [source('source-one')] })
   try {
     f.holdNextList()
     await f.clickMenuItem('datasource.syncNow')
     f.failNextList()
-    await f.clickMenuItem('datasource.sourceClear')
-    await f.confirm('datasource.sourceClearConfirm')
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'), 'accepted clear must disable queries')
+    await f.clickMenuItem('datasource.delete')
+    await f.confirm('datasource.deleteConfirm')
+    assert.ok(!f.host.textContent?.includes('source-one'))
     await f.releaseHeldList()
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'), 'older list response must not overwrite accepted clear')
-    assert.ok(!f.hasMenuItem('datasource.edit'), 'older list response must not restore edit')
-    assert.ok(!f.hasMenuItem('datasource.syncNow'), 'older list response must not restore sync')
+    assert.ok(!f.host.textContent?.includes('source-one'))
   } finally { await f.releaseHeldList(); await f.close() }
 })
 
-test('same-source clear waits for the in-flight unbind reply', async () => {
+test('source deletion prevents duplicate deletion and concurrent connection actions', async () => {
   const f = await fixture({ sources: [source('source-one')] })
   try {
-    f.holdNextUnbind()
-    await f.clickMenuItem('datasource.unbind')
-    await f.confirm('datasource.unbindConfirm')
-    assert.equal(f.calls.filter(call => call.method === 'unbindDataSource').length, 1)
-    assert.ok(!f.hasMenuItem('datasource.sourceClear'), 'clear must not overlap the outstanding unbind')
-    assert.ok(!f.hasMenuItem('datasource.syncNow'), 'sync is unavailable during a lifecycle write')
-    assert.ok(!f.hasMenuItem('datasource.edit'), 'connection edits are unavailable during a lifecycle write')
-    await f.releaseHeldUnbind()
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.binding.unbound'))
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryEnabled'))
-    assert.ok(f.hasMenuItem('datasource.sourceClear'), 'clear becomes available after unbind is authoritative')
-    await f.clickMenuItem('datasource.sourceClear')
-    await f.confirm('datasource.sourceClearConfirm')
-    assert.equal(f.calls.filter(call => call.method === 'clearSourceKnowledge').length, 1)
-    assert.ok(f.host.textContent?.includes('datasource.sourceLifecycle.queryDisabled'))
-  } finally { await f.releaseHeldUnbind(); await f.close() }
+    f.holdNextDelete()
+    await f.clickMenuItem('datasource.delete')
+    await f.confirm('datasource.deleteConfirm')
+    assert.equal(f.calls.filter(call => call.method === 'deleteDataSource').length, 1)
+    assert.ok(!f.hasMenuItem('datasource.delete'))
+    assert.ok(!f.hasMenuItem('datasource.syncNow'))
+    assert.ok(!f.hasMenuItem('datasource.edit'))
+    await f.releaseHeldDelete()
+    assert.ok(!f.host.textContent?.includes('source-one'))
+  } finally { await f.releaseHeldDelete(); await f.close() }
 })

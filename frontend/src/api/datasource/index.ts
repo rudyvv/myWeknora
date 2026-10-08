@@ -230,24 +230,6 @@ export function resumeDataSource(id: string) {
   return post(`/api/v1/datasource/${id}/resume`, {})
 }
 
-export async function unbindDataSource(id: string): Promise<DataSource> {
-  const response: any = await post(`/api/v1/datasource/${id}/unbind`, {})
-  return (response.data ?? response) as DataSource
-}
-
-export async function clearSourceKnowledge(id: string): Promise<DataSource> {
-  const response: any = await post(`/api/v1/datasource/${id}/clear-source`, {
-    confirm: true,
-    scope: 'current_and_history',
-  })
-  return (response.data ?? response) as DataSource
-}
-
-export async function retrySourceKnowledgeClear(id: string, operationId: string): Promise<DataSource> {
-  const response: any = await post(`/api/v1/datasource/${id}/clear-source/retry`, { operation_id: operationId })
-  return (response.data ?? response) as DataSource
-}
-
 export function getSyncLogs(id: string, limit = 20, offset = 0, projectOnly = false) {
   return get(`/api/v1/datasource/${id}/logs?limit=${limit}&offset=${offset}${projectOnly ? '&project_only=true' : ''}`)
 }

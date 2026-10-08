@@ -198,6 +198,15 @@ func (s *DataSourceService) ListDataSources(ctx context.Context, kbID string) ([
 		logger.Errorf(ctx, "failed to list data sources: %v", err)
 		return nil, err
 	}
+	// Retired source identities remain available to content authorization and
+	// whole-KB deletion, but no longer appear as manageable connections.
+	visible := dataSources[:0]
+	for _, ds := range dataSources {
+		if ds != nil && ds.Status != types.DataSourceStatusDeleted {
+			visible = append(visible, ds)
+		}
+	}
+	dataSources = visible
 	if cleanupRepo, ok := s.syncLogRepo.(interfaces.SourceLifecycleRepository); ok {
 		ids := make([]string, 0, len(dataSources))
 		for _, ds := range dataSources {
@@ -564,7 +573,8 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 	return nil
 }
 
-// DeleteDataSource deletes a data source (soft delete)
+// DeleteDataSource removes a connector and stops sync, retaining synchronized
+// knowledge. Sources retire their connection but preserve the read identity.
 func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) error {
 	if members, err := s.sourceProjectMembers(ctx, id); err != nil || len(members) > 0 {
 		if err != nil {
@@ -591,13 +601,20 @@ func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) err
 	}
 	if config, configErr := existing.ParseConfig(); configErr == nil {
 		if mode, modeErr := datasource.ContentMode(config); modeErr == nil && mode == datasource.ContentModeSource {
-			if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
-				// Fence active source workers before soft deletion. Otherwise a
-				// worker holding the old lease could publish after deletion.
-				if err := control.AdvanceSourceConfig(ctx, existing, false); err != nil {
-					return err
-				}
+			retirement, ok := s.syncLogRepo.(interfaces.SourceConnectionDeletionRepository)
+			if !ok {
+				return fmt.Errorf("source connection deletion is unavailable")
 			}
+			if err := retirement.DeleteSourceConnection(ctx, existing); err != nil {
+				return err
+			}
+			if s.scheduler != nil {
+				s.scheduler.Remove(id)
+			}
+			recordKBActivity(ctx, s.audit, existing.TenantID, existing.KnowledgeBaseID, types.AuditActionDataSourceDeleted,
+				"data_source", existing.ID, types.AuditOutcomeSuccess,
+				map[string]any{"name": existing.Name, "type": existing.Type})
+			return nil
 		}
 	}
 
@@ -606,18 +623,6 @@ func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) err
 		s.restoreSourceConfigurationFromStored(ctx, id)
 		return err
 	}
-	if config, configErr := existing.ParseConfig(); configErr == nil {
-		if mode, modeErr := datasource.ContentMode(config); modeErr == nil && mode == datasource.ContentModeSource {
-			if control, ok := s.syncLogRepo.(interfaces.SourceSyncControlRepository); ok {
-				// Close the race where another trigger registers between the
-				// initial fence and the soft-delete write.
-				if err := control.AdvanceSourceConfig(ctx, existing, false); err != nil {
-					logger.Errorf(ctx, "failed to re-fence deleted source ds=%s: %v", id, err)
-				}
-			}
-		}
-	}
-
 	// Remove cron schedule
 	s.scheduler.Remove(id)
 

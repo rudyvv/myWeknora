@@ -9,9 +9,6 @@ import {
   triggerSync,
   pauseDataSource,
   resumeDataSource,
-  unbindDataSource,
-  clearSourceKnowledge,
-  retrySourceKnowledgeClear,
   type DataSource,
 } from '@/api/datasource'
 import { humanizeCron, relativeTime } from '@/utils/cronHumanize'
@@ -44,6 +41,7 @@ const logsProjectOnly = ref(false)
 const pollTimer = ref<number | null>(null)
 let listRequestGeneration = 0
 const pendingSourceMutations = ref(new Set<string>())
+const deletedDataSourceIds = new Set<string>()
 
 function stopPolling() {
   if (pollTimer.value !== null) {
@@ -65,7 +63,7 @@ async function loadList(silent = false) {
   try {
     const res = await listDataSources(props.kbId)
     if (requestGeneration !== listRequestGeneration) return
-    dataSources.value = res?.data || res || []
+    dataSources.value = (res?.data || res || []).filter((ds: DataSource) => !deletedDataSourceIds.has(ds.id))
     emit('count', dataSources.value.length)
 
     const hasPendingWork = dataSources.value.flatMap(ds => [ds, ...(ds.source_projects || [])]).some(ds =>
@@ -116,65 +114,18 @@ function openLogs(ds: DataSource, projectOnly = false) {
 }
 
 async function removeDataSource(ds: DataSource) {
+  if (isSourceMode(ds) && !beginSourceMutation(ds.id)) return
   try {
     await deleteDataSource(ds.id)
+    // Invalidate old list responses even when the subsequent refresh fails.
+    deletedDataSourceIds.add(ds.id)
+    listRequestGeneration++
+    dataSources.value = dataSources.value.filter(row => row.id !== ds.id)
+    emit('count', dataSources.value.length)
     MessagePlugin.success(t('datasource.deleteSuccess'))
-    await loadList()
+    await loadList(true)
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('datasource.deleteFailed'))
-  }
-}
-
-function replaceDataSource(updated: DataSource) {
-  const index = dataSources.value.findIndex(ds => ds.id === updated.id)
-  if (index >= 0) dataSources.value[index] = updated
-}
-
-async function refreshSourceLifecycle(updated: DataSource) {
-  // Invalidate any list request that began before the accepted mutation. Keep
-  // this invalidation even if the subsequent refresh fails; the mutation reply
-  // is still the newest authoritative lifecycle state we have.
-  listRequestGeneration++
-  replaceDataSource(updated)
-  await loadList(true)
-}
-
-async function handleUnbind(ds: DataSource) {
-  if (!canUnbindDataSource(ds) || !beginSourceMutation(ds.id)) return
-  try {
-    const updated = await unbindDataSource(ds.id)
-    await refreshSourceLifecycle(updated)
-    MessagePlugin.success(t('datasource.unbindSuccess'))
-  } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.unbindFailed'))
-  } finally {
-    endSourceMutation(ds.id)
-  }
-}
-
-async function handleClearSource(ds: DataSource) {
-  if (!canClearSource(ds) || !beginSourceMutation(ds.id)) return
-  try {
-    const updated = await clearSourceKnowledge(ds.id)
-    await refreshSourceLifecycle(updated)
-    MessagePlugin.success(t('datasource.sourceClearSubmitted'))
-  } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.sourceClearFailed'))
-  } finally {
-    endSourceMutation(ds.id)
-  }
-}
-
-async function handleRetrySourceClear(ds: DataSource) {
-  if (!canRetrySourceClear(ds)) return
-  const operationId = ds.source_lifecycle?.cleanup?.id
-  if (!operationId || !beginSourceMutation(ds.id)) return
-  try {
-    const updated = await retrySourceKnowledgeClear(ds.id, operationId)
-    await refreshSourceLifecycle(updated)
-    MessagePlugin.success(t('datasource.sourceClearRetrySubmitted'))
-  } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.sourceClearRetryFailed'))
   } finally {
     endSourceMutation(ds.id)
   }
@@ -370,20 +321,6 @@ function canSyncDataSource(ds: DataSource) {
   return !isSourceMode(ds) || canOperateSource(ds)
 }
 
-function canUnbindDataSource(ds: DataSource) {
-  const lifecycle = ds.source_lifecycle
-  return isSourceMode(ds) && !isSourceMutationPending(ds) && !!lifecycle && lifecycle.binding_state === 'bound' && !lifecycle.cleanup
-}
-
-function canClearSource(ds: DataSource) {
-  return isSourceMode(ds) && !isSourceMutationPending(ds) && !!ds.source_lifecycle && !ds.source_lifecycle.cleanup
-}
-
-function canRetrySourceClear(ds: DataSource) {
-  const cleanup = ds.source_lifecycle?.cleanup
-  return isSourceMode(ds) && !isSourceMutationPending(ds) && cleanup?.status === 'failed' && cleanup.retryable
-}
-
 function onEditorSaved() {
   editorVisible.value = false
   loadList()
@@ -466,49 +403,7 @@ onBeforeUnmount(stopPolling)
                         <t-icon name="play-circle" /> {{ t('datasource.resume') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource && isSourceMode(ds) && canUnbindDataSource(ds)"
-                        theme="error"
-                      >
-                        <t-popconfirm
-                          :content="t('datasource.unbindConfirm')"
-                          :confirm-btn="{ content: t('datasource.unbind'), theme: 'danger' }"
-                          :cancel-btn="{ content: t('common.cancel') }"
-                          placement="left"
-                          attach="body"
-                          @confirm="handleUnbind(ds)"
-                        >
-                          <span class="ds-dropdown-delete-trigger" @click.stop>
-                            <t-icon name="link" />
-                            <span>{{ t('datasource.unbind') }}</span>
-                          </span>
-                        </t-popconfirm>
-                      </t-dropdown-item>
-                      <t-dropdown-item
-                        v-if="canManageDataSource && canClearSource(ds)"
-                        theme="error"
-                      >
-                        <t-popconfirm
-                          :content="t('datasource.sourceClearConfirm')"
-                          :confirm-btn="{ content: t('datasource.sourceClear'), theme: 'danger' }"
-                          :cancel-btn="{ content: t('common.cancel') }"
-                          placement="left"
-                          attach="body"
-                          @confirm="handleClearSource(ds)"
-                        >
-                          <span class="ds-dropdown-delete-trigger" @click.stop>
-                            <t-icon name="delete" />
-                            <span>{{ t('datasource.sourceClear') }}</span>
-                          </span>
-                        </t-popconfirm>
-                      </t-dropdown-item>
-                      <t-dropdown-item
-                        v-if="canManageDataSource && canRetrySourceClear(ds)"
-                        @click="handleRetrySourceClear(ds)"
-                      >
-                        <t-icon name="refresh" /> {{ t('datasource.sourceClearRetry') }}
-                      </t-dropdown-item>
-                      <t-dropdown-item
-                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && !isSourceMode(ds)"
+                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && !isSourceMutationPending(ds)"
                         theme="error"
                         class="ds-dropdown-delete-item"
                       >

@@ -91,7 +91,7 @@ func (s *DataSourceService) sourceProjectMembers(ctx context.Context, id string)
 	}
 	var members []*types.DataSource
 	for _, ds := range rows {
-		if ds.TenantID == root.TenantID && datasource.SourceGroupRoot(ds) == id {
+		if ds.Status != types.DataSourceStatusDeleted && ds.TenantID == root.TenantID && datasource.SourceGroupRoot(ds) == id {
 			members = append(members, ds)
 		}
 	}

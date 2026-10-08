@@ -99,6 +99,7 @@ func (r *DataSourceRepository) FindByID(ctx context.Context, id string) (*types.
 	var ds types.DataSource
 	if err := r.db.WithContext(ctx).
 		Where("id = ?", id).
+		Where("status <> ?", types.DataSourceStatusDeleted).
 		Where("deleted_at IS NULL").
 		First(&ds).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -173,6 +174,9 @@ func sourceLifecycleUpdateManaged(current, incoming *types.DataSource) bool {
 }
 
 func validateSourceLifecycleUpdate(current, incoming *types.DataSource) error {
+	if current != nil && current.Status == types.DataSourceStatusDeleted {
+		return errSourceConfigurationNotCurrent
+	}
 	if current == nil || incoming == nil || current.ID != incoming.ID ||
 		current.TenantID != incoming.TenantID || current.KnowledgeBaseID != incoming.KnowledgeBaseID ||
 		current.SourceBindingState != incoming.SourceBindingState ||

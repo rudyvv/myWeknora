@@ -6,6 +6,12 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
+// SourceConnectionDeletionRepository removes source management while retaining
+// the identity used to authorize published knowledge and historical citations.
+type SourceConnectionDeletionRepository interface {
+	DeleteSourceConnection(context.Context, *types.DataSource) error
+}
+
 // DataSourceLifecycleService is kept separate from ordinary CRUD so existing
 // document-only adapters are not forced to grow source lifecycle behavior.
 type DataSourceLifecycleService interface {

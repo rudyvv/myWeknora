@@ -21,7 +21,7 @@ type DataSourceService interface {
 	// UpdateDataSource updates an existing data source
 	UpdateDataSource(ctx context.Context, ds *types.DataSource) (*types.DataSource, error)
 
-	// DeleteDataSource deletes a data source (soft delete)
+	// DeleteDataSource stops/removes the connection while retaining synced knowledge.
 	DeleteDataSource(ctx context.Context, id string) error
 
 	// UpdateDataSourceCredentials replaces the connector credential map.

@@ -48,10 +48,20 @@ func (r *SyncLogRepository) FindSourceCleanups(ctx context.Context, dataSourceID
 // unbound. Query visibility is deliberately unchanged; clearing is a separate
 // explicit operation.
 func (r *SyncLogRepository) UnbindSourceSync(ctx context.Context, ds *types.DataSource) error {
+	return r.disconnectSourceSync(ctx, ds, false)
+}
+
+// DeleteSourceConnection retires the connector without soft-deleting the read
+// identity: source read/Wiki evidence joins must keep authorizing retained data.
+func (r *SyncLogRepository) DeleteSourceConnection(ctx context.Context, ds *types.DataSource) error {
+	return r.disconnectSourceSync(ctx, ds, true)
+}
+
+func (r *SyncLogRepository) disconnectSourceSync(ctx context.Context, ds *types.DataSource, remove bool) error {
 	if ds == nil || ds.ID == "" {
 		return errors.New("data source is required")
 	}
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		state, err := r.ensureSourceSyncState(tx, ds)
 		if err != nil {
 			return err
@@ -71,6 +81,10 @@ func (r *SyncLogRepository) UnbindSourceSync(ctx context.Context, ds *types.Data
 			return err
 		}
 		updates := map[string]any{"source_binding_state": types.SourceBindingUnbound}
+		if remove {
+			updates["status"] = types.DataSourceStatusDeleted
+			current.Status = types.DataSourceStatusDeleted
+		}
 		if string(config) != string(current.Config) {
 			updates["config"] = config
 			current.Config = config
@@ -88,13 +102,7 @@ func (r *SyncLogRepository) UnbindSourceSync(ctx context.Context, ds *types.Data
 		if err := lockCurrentSourcePublication(tx, current.ID); err != nil {
 			return err
 		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return supersedeSourceWikiWorkTx(tx, ds, "source_unbound")
+		return supersedeSourceWikiWorkTx(tx, current, "source_unbound")
 	})
 }
 

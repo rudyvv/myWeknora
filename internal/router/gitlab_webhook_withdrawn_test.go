@@ -21,6 +21,9 @@ func TestGitLabWebhookRoutesAreNotExposed(t *testing.T) {
 		{http.MethodGet, "/api/v1/datasource/source/gitlab-webhook"},
 		{http.MethodPut, "/api/v1/datasource/source/gitlab-webhook"},
 		{http.MethodPost, "/api/v1/datasource/source/gitlab-webhook/test"},
+		{http.MethodPost, "/api/v1/datasource/source/unbind"},
+		{http.MethodPost, "/api/v1/datasource/source/clear-source"},
+		{http.MethodPost, "/api/v1/datasource/source/clear-source/retry"},
 	} {
 		response := httptest.NewRecorder()
 		r.ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
@@ -35,4 +38,5 @@ func TestGitLabWebhookRoutesAreNotExposed(t *testing.T) {
 		require.True(t, paths["POST /api/v1/datasource/:id/"+path])
 	}
 	require.True(t, paths["GET /api/v1/datasource/:id/logs"])
+	require.True(t, paths["DELETE /api/v1/datasource/:id"])
 }

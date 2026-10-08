@@ -329,9 +329,9 @@ func RegisterDataSourceRoutes(
 		ds.POST("/:id/sync", g.Admin(), handler.ManualSync)
 		ds.POST("/:id/pause", g.Admin(), handler.PauseDataSource)
 		ds.POST("/:id/resume", g.Admin(), handler.ResumeDataSource)
-		ds.POST("/:id/unbind", g.Admin(), handler.UnbindDataSource)
-		ds.POST("/:id/clear-source", g.Admin(), handler.ClearSource)
-		ds.POST("/:id/clear-source/retry", g.Admin(), handler.RetryClearSource)
+		// Source and document modes both use DELETE, retaining synced knowledge.
+		// Retained cleanup machinery handles previously accepted operations only;
+		// no public source-unbind or source-clear APIs are provided.
 
 		// Sync logs — Viewer+ (read-only audit trail)
 		ds.GET("/:id/logs", g.Viewer(), handler.GetSyncLogs)
