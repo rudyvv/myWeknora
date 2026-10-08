@@ -985,8 +985,26 @@ const getChannelLabel = (channel: string) => {
 };
 
 // 获取类型标签
+const sourceLanguageNames: Record<string, string> = {
+  js: 'JavaScript', mjs: 'JavaScript', cjs: 'JavaScript', jsx: 'JavaScript / JSX',
+  ts: 'TypeScript', tsx: 'TypeScript / JSX', vue: 'Vue',
+  java: 'Java', py: 'Python', go: 'Go', rs: 'Rust',
+  c: 'C', h: 'C / C++', cpp: 'C++', cc: 'C++', hpp: 'C++', cs: 'C#',
+  php: 'PHP', rb: 'Ruby', kt: 'Kotlin', kts: 'Kotlin', swift: 'Swift',
+  sql: 'SQL', json: 'JSON', xml: 'XML', yaml: 'YAML', yml: 'YAML',
+  md: 'Markdown', markdown: 'Markdown', html: 'HTML', htm: 'HTML',
+  css: 'CSS', scss: 'SCSS', less: 'Less', sh: 'Shell', bash: 'Bash',
+};
+
 const getTypeLabel = () => {
   switch (props.details.type) {
+    case 'source': {
+      const ext = resolveFilePreviewExt(props.details.title, props.details.file_type);
+      if (!ext) return t('datasource.gitlab.sourceMode');
+      const suffix = ext.toUpperCase();
+      const language = sourceLanguageNames[ext];
+      return language && language.toUpperCase() !== suffix ? `${language}（${suffix}）` : suffix;
+    }
     case 'url':
       return t('knowledgeBase.typeURL');
     case 'manual':
