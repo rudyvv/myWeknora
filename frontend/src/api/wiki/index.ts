@@ -327,7 +327,13 @@ export function getWikiGraph(kbId: string, params?: WikiGraphQueryParams) {
     }
   }
   const qs = query.toString();
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/graph${qs ? '?' + qs : ''}`);
+  return get(`/api/v1/knowledgebase/${kbId}/wiki/graph${qs ? '?' + qs : ''}`).then(result => {
+    const graph = result.data || result;
+    // Older servers serialize an empty Go slice as null. Isolated pages are
+    // valid graph nodes and must still render in overview and ego views.
+    const normalized = { ...graph, nodes: graph.nodes || [], edges: graph.edges || [] };
+    return result.data ? { ...result, data: normalized } : normalized;
+  });
 }
 
 export function getWikiStats(kbId: string) {

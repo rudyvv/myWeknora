@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -470,6 +471,19 @@ func TestComputeGraphSubset_MarksFamiliarSourcePages(t *testing.T) {
 	}
 	if got.Meta.FamiliarCount != 1 {
 		t.Errorf("FamiliarCount = %d, want 1", got.Meta.FamiliarCount)
+	}
+}
+
+func TestComputeGraphSubset_EmptyEdgesAreJSONArray(t *testing.T) {
+	for _, pages := range [][]*types.WikiPage{nil, {{Slug: "concept/isolated", Title: "Isolated", PageType: "concept"}}} {
+		graph, err := computeGraphSubset(pages, &types.WikiGraphRequest{Mode: types.WikiGraphModeOverview, Limit: 500})
+		require.NoError(t, err)
+		require.Len(t, graph.Nodes, len(pages))
+		encoded, err := json.Marshal(graph)
+		require.NoError(t, err)
+		var payload map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(encoded, &payload))
+		require.JSONEq(t, "[]", string(payload["edges"]), "isolated Wiki pages must remain renderable without links")
 	}
 }
 

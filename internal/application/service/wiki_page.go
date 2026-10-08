@@ -867,7 +867,7 @@ func computeGraphSubset(pages []*types.WikiPage, req *types.WikiGraphRequest) (*
 	})
 
 	// Build edges, keeping only edges whose endpoints both survived selection.
-	var edges []types.WikiGraphEdge
+	edges := make([]types.WikiGraphEdge, 0)
 	for _, p := range pages {
 		if _, ok := selected[p.Slug]; !ok {
 			continue
