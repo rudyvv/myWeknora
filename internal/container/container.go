@@ -719,9 +719,13 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 	var sqliteDBPath string
 	switch os.Getenv("DB_DRIVER") {
 	case "postgres":
-		// DSN for GORM (key-value format)
+		// DSN for GORM (key-value format). Source/Wiki scope predicates have
+		// high estimated costs even for tiny result sets. PostgreSQL JIT can
+		// spend seconds compiling them before a millisecond-scale read. Set
+		// this per application connection (including new pool connections),
+		// leaving the server default and all permission predicates intact.
 		gormDSN := fmt.Sprintf(
-			"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC jit=off",
 			os.Getenv("DB_HOST"),
 			os.Getenv("DB_PORT"),
 			os.Getenv("DB_USER"),
