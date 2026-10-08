@@ -20,6 +20,7 @@ import {
 } from '@/api/datasource'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
+import SourceSyncCheckResult from './SourceSyncCheckResult.vue'
 import { getDatasourceIconUrl } from './datasourceIcons'
 
 const props = defineProps<{
@@ -221,20 +222,12 @@ const sourceExcludePaths = ref('')
 const sourcePreview = ref<SourcePreview | null>(null)
 const sourcePreviewLoading = ref(false)
 const sourcePreviewError = ref('')
-const sourcePreviewSearch = ref('')
-const sourcePreviewPage = ref(1)
 let sourcePreviewGeneration = 0
-const sourcePreviewFiles = computed(() => {
-  const search = sourcePreviewSearch.value.toLowerCase()
-  return (sourcePreview.value?.files ?? []).filter(file => file.path.toLowerCase().includes(search))
-})
-const sourcePreviewPageFiles = computed(() => sourcePreviewFiles.value.slice((sourcePreviewPage.value - 1) * 50, sourcePreviewPage.value * 50))
 watch([gitlabProjects, sourceExcludePaths, isSourceMode, () => form.value.config.credentials], () => {
   sourcePreviewGeneration++
   sourcePreview.value = null
   sourcePreviewError.value = ''
 }, { deep: true, flush: 'sync' })
-watch(sourcePreviewSearch, () => { sourcePreviewPage.value = 1 })
 function syncGitLabProjectsToSettings() {
   if (!isGitLabConnector(form.value.type)) return
   form.value.config.settings.projects = gitlabProjects.value
@@ -249,9 +242,14 @@ function addGitLabProject() { gitlabProjects.value.push({ project_id: '', ref: '
 function removeGitLabProject(index: number) { gitlabProjects.value.splice(index, 1); syncGitLabProjectsToSettings() }
 
 async function loadSourcePreview() {
+  if (sourcePreviewLoading.value) return false
   if (!isSourceMode.value || gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.project_id.trim() || !gitlabProjects.value[0]?.ref.trim()) {
     sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
-    return
+    return false
+  }
+  if (!gitlabProjects.value[0].pathsText.trim()) {
+    sourcePreviewError.value = t('datasource.gitlab.sourcePathsRequired')
+    return false
   }
   sourcePreviewLoading.value = true
   const generation = ++sourcePreviewGeneration
@@ -264,11 +262,11 @@ async function loadSourcePreview() {
       const draftId = (response.data ?? response).id
       if (generation !== sourcePreviewGeneration || !visible.value) {
         await deleteDataSource(draftId)
-        return
+        return false
       }
       tempDsId.value = draftId
     } else if (!isEdit.value && !(await commitCredentialsIfNeeded(tempDsId.value))) {
-      return
+      return false
     }
     const id = tempDsId.value
     const settings = JSON.parse(JSON.stringify(form.value.config.settings))
@@ -276,11 +274,12 @@ async function loadSourcePreview() {
     syncGitLabProjectsToSettings()
     if (generation === sourcePreviewGeneration && visible.value && tempDsId.value === id && JSON.stringify(form.value.config.settings) === JSON.stringify(settings)) {
       sourcePreview.value = result
-      sourcePreviewPage.value = 1
+      return result.can_sync
     }
   } catch (e: any) {
     if (generation === sourcePreviewGeneration && visible.value) sourcePreviewError.value = e?.message || e?.error || t('datasource.gitlab.previewFailed')
   } finally { sourcePreviewLoading.value = false }
+  return false
 }
 
 // extractDriveFolderToken accepts either a bare folder_token or a Drive folder
@@ -750,7 +749,6 @@ watch(visible, async (v) => {
   sourceExcludePaths.value = ''
   sourcePreview.value = null
   sourcePreviewError.value = ''
-  sourcePreviewSearch.value = ''
 
   if (isEdit.value && props.dataSource) {
     // Reset edit/replace toggle every open so an aborted replace doesn't
@@ -1072,6 +1070,7 @@ function validateStep1Fields(): boolean {
 }
 
 async function nextStep() {
+  if (step.value === 2 && sourcePreviewLoading.value) return
   if (step.value === 1) {
     if (!validateStep1Fields()) return
     if (needsConnectionTest() && testResult.value !== 'success') {
@@ -1095,8 +1094,12 @@ async function nextStep() {
       return
     }
     if (isSourceMode.value && (gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.ref.trim())) {
-      MessagePlugin.warning(t('datasource.gitlab.sourceSelectionRequired'))
+      sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
       return
+    }
+    if (isSourceMode.value) {
+      const ready = await loadSourcePreview()
+      if (!ready || !visible.value || step.value !== 2) return
     }
   }
   step.value++
@@ -1302,6 +1305,7 @@ const drawerTitle = computed(() =>
 const drawerDescription = computed(() => stepTitles.value[step.value] ?? '')
 
 const drawerConfirmText = computed(() => {
+  if (step.value === 2 && sourcePreviewLoading.value) return t('datasource.gitlab.checking')
   if (step.value === 3) {
     return isEdit.value ? t('datasource.save') : t('datasource.createAndSync')
   }
@@ -1318,7 +1322,7 @@ const drawerConfirmText = computed(() => {
     :class="[form.type ? `datasource-editor-drawer datasource-editor-drawer--${form.type}` : 'datasource-editor-drawer', { 'ds-fixed-step': step === 2 && !isGitLabConnector(form.type) }]"
     :hide-footer="step === 0"
     :confirm-text="drawerConfirmText"
-    :confirm-loading="submitting || (step === 1 && testing)"
+    :confirm-loading="submitting || (step === 1 && testing) || (step === 2 && sourcePreviewLoading)"
     storage-key="setting-drawer:width:datasource-editor"
     width="640px"
     @confirm="handleDrawerConfirm"
@@ -1670,30 +1674,17 @@ const drawerConfirmText = computed(() => {
             <t-input v-model="project.project_id" :placeholder="t('datasource.gitlab.projectIdPlaceholder')" />
             <label class="form-label" :class="{ required: isSourceMode }">{{ t('datasource.gitlab.ref') }}</label>
             <t-input v-model="project.ref" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourceBranchPlaceholder' : 'datasource.gitlab.refPlaceholder')" />
-            <label class="form-label">{{ t('datasource.gitlab.paths') }}</label>
-            <t-textarea v-model="project.pathsText" :placeholder="t('datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
+            <label class="form-label" :class="{ required: isSourceMode }">{{ t('datasource.gitlab.paths') }}</label>
+            <t-textarea v-model="project.pathsText" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourcePathsPlaceholder' : 'datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
           </div>
           <t-button v-if="!isSourceMode || !gitlabProjects.length" variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>
         </div>
         <div v-if="isSourceMode" class="source-preview">
           <label class="form-label">{{ t('datasource.gitlab.excludePaths') }}</label>
           <t-textarea v-model="sourceExcludePaths" :placeholder="t('datasource.gitlab.excludePathsHint')" :autosize="{ minRows: 2, maxRows: 5 }" />
-          <t-button variant="outline" :loading="sourcePreviewLoading" @click="loadSourcePreview">{{ t('datasource.gitlab.preview') }}</t-button>
-          <p v-if="sourcePreviewError" class="source-preview__error">{{ sourcePreviewError }}</p>
-          <template v-if="sourcePreview">
-            <p>{{ t('datasource.gitlab.fixedCommit') }} <code>{{ sourcePreview.commit_sha }}</code></p>
-            <p>{{ t('datasource.gitlab.rulesVersion') }} <code>{{ sourcePreview.rules_version }}</code></p>
-            <ul><li v-for="check in sourcePreview.checks" :key="check.name">{{ check.ready ? '✓' : '⚠' }} {{ check.message }}</li></ul>
-            <p v-for="warning in sourcePreview.warnings" :key="warning">⚠ {{ warning }}</p>
-            <t-input v-model="sourcePreviewSearch" :placeholder="t('datasource.gitlab.searchPaths')" clearable />
-            <div class="source-preview__files">
-              <div v-for="file in sourcePreviewPageFiles" :key="file.path" class="source-preview__file">
-                <code>{{ file.path }}</code><span>{{ file.size }} B · {{ file.status }}{{ file.generated ? ' · ' + t('datasource.gitlab.generated') : '' }}</span>
-                <small>{{ file.reason }}</small>
-              </div>
-            </div>
-            <t-pagination v-model="sourcePreviewPage" :total="sourcePreviewFiles.length" :page-size="50" :show-page-size="false" />
-          </template>
+          <p v-if="sourcePreviewLoading" role="status">{{ t('datasource.gitlab.checkingHint') }}</p>
+          <p v-if="sourcePreviewError" role="alert" class="source-preview__error">{{ sourcePreviewError }}</p>
+          <SourceSyncCheckResult v-if="sourcePreview" :preview="sourcePreview" />
         </div>
       </template>
       <template v-else>
@@ -1863,6 +1854,7 @@ const drawerConfirmText = computed(() => {
 
     <!-- Step 3: Sync strategy -->
     <template v-if="step === 3">
+      <SourceSyncCheckResult v-if="isSourceMode && sourcePreview" :preview="sourcePreview" />
       <section class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ t('datasource.syncScheduleLabel') }}</h4>
         <t-select v-model="form.sync_schedule">
@@ -2813,14 +2805,6 @@ const drawerConfirmText = computed(() => {
   overflow-wrap: anywhere;
 }
 .source-preview__error { color: var(--td-error-color); }
-.source-preview__files { max-height: 360px; overflow: auto; }
-.source-preview__file {
-  display: grid;
-  gap: 4px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--td-component-stroke);
-  span, small { color: var(--td-text-color-secondary); }
-}
 </style>
 
 <!--
