@@ -74,7 +74,8 @@ export default function (knowledgeBaseId?: string) {
     const cardList_ = data.map((item: any) => {
       const rawName = item.file_name || item.title || item.source || t('knowledgeBase.untitledDocument')
       const dotIndex = rawName.lastIndexOf('.')
-      const displayName = dotIndex > 0 ? rawName.substring(0, dotIndex) : rawName
+      // Source extensions identify the language and distinguish same-base files.
+      const displayName = item.type === 'source' || dotIndex <= 0 ? rawName : rawName.substring(0, dotIndex)
       const fileTypeSource = item.file_type || (item.type === 'manual' ? 'MANUAL' : '')
       return {
         ...item,
