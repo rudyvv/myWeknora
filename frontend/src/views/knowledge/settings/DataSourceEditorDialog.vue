@@ -1661,7 +1661,6 @@ const drawerConfirmText = computed(() => {
           <t-radio-button value="document">{{ t('datasource.gitlab.documentMode') }}</t-radio-button>
           <t-radio-button value="source">{{ t('datasource.gitlab.sourceMode') }}</t-radio-button>
         </t-radio-group>
-        <p v-if="isSourceMode" class="ds-resource-hint">{{ t('datasource.gitlab.sourceHint') }}</p>
         <h4 class="setting-drawer__section-title">{{ t('datasource.gitlab.projects') }}</h4>
         <p v-if="!isSourceMode" class="ds-resource-hint">{{ t('datasource.gitlab.projectsHint') }}</p>
         <div class="gitlab-project-list">
@@ -1675,7 +1674,7 @@ const drawerConfirmText = computed(() => {
             <label class="form-label">{{ t('datasource.gitlab.ref') }}</label>
             <t-input v-model="project.ref" :placeholder="t('datasource.gitlab.refPlaceholder')" />
             <label class="form-label">{{ t('datasource.gitlab.paths') }}</label>
-            <t-textarea v-model="project.pathsText" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourcePathsPlaceholder' : 'datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
+            <t-textarea v-model="project.pathsText" :placeholder="t('datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
           </div>
           <t-button v-if="!isSourceMode || !gitlabProjects.length" variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>
         </div>
