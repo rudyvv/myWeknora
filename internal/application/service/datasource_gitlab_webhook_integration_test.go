@@ -295,6 +295,45 @@ func TestGitLabPushHookHTTPDurableTriggerDedupAndScheduledReconciliation(t *test
 	require.Equal(t, f.sha, refreshed.Snapshot.CommitSHA, "scheduled reconciliation must keep the current GitLab HEAD")
 }
 
+func TestGitLabDefaultBranchPushOnlyAcceptsResolvedBranch(t *testing.T) {
+	f := newJavaSourceFixture(t)
+	config, err := f.ds.ParseConfig()
+	require.NoError(t, err)
+	config.Settings["projects"].([]interface{})[0].(map[string]interface{})["ref"] = ""
+	f.ds.Config, err = config.ToJSON()
+	require.NoError(t, err)
+	require.NoError(t, f.service.dsRepo.Update(f.ctx, f.ds))
+	f.ds.Status = types.DataSourceStatusError
+	require.True(t, datasource.GitLabSourceReconciliationEligible(f.ds), "error sources using the default branch remain eligible for scheduled repair")
+	require.NoError(t, f.service.dsRepo.Update(f.ctx, f.ds))
+	tasks := make(chan *asynq.Task, 2)
+	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: tasks}
+	enabled, secret := true, "fixture-default-branch-hook-secret"
+	_, err = f.service.ConfigureGitLabWebhook(f.ctx, f.ds.ID, f.ds.TenantID, types.GitLabWebhookUpdate{Enabled: &enabled, Secret: &secret})
+	require.NoError(t, err)
+	result, err := f.service.TestGitLabWebhook(f.ctx, f.ds.ID, f.ds.TenantID)
+	require.NoError(t, err)
+	require.Equal(t, "connected", result.GitLabAccessStatus)
+	require.Equal(t, "main", result.Branch)
+	event := types.GitLabPushEvent{ProjectID: "123", Ref: "refs/heads/other", Before: strings.Repeat("0", 40), After: f.sha, DeliveryID: "default-fixture"}
+	_, _, err = f.service.ReceiveGitLabPush(f.ctx, secret, event)
+	require.ErrorIs(t, err, datasource.ErrGitLabWebhookUnauthorized)
+	event.Ref = "refs/heads/main"
+	accepted, duplicate, err := f.service.ReceiveGitLabPush(f.ctx, secret, event)
+	require.NoError(t, err)
+	require.True(t, accepted)
+	require.False(t, duplicate)
+	select {
+	case task := <-tasks:
+		require.NoError(t, f.service.ProcessSync(f.ctx, task))
+	case <-time.After(2 * time.Second):
+		t.Fatal("default branch push did not dispatch")
+	}
+	published, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, f.sha, published.Snapshot.CommitSHA)
+}
+
 func failGitLabSourceAndExhaustRetryBudget(t *testing.T, f *javaSourceFixture, tasks <-chan *asynq.Task) {
 	t.Helper()
 	f.embedVector = []float32{0, 0, 0}

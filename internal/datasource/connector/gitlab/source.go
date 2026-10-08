@@ -27,16 +27,23 @@ func (c *Connector) ResolveSourceRepository(ctx context.Context, ds *types.DataS
 	if err != nil {
 		return nil, err
 	}
+	ref := selection.Ref
+	if ref == "" {
+		ref = strings.TrimSpace(project.DefaultBranch)
+		if ref == "" {
+			return nil, fmt.Errorf("GitLab project has no default branch; initialize the repository or specify a branch")
+		}
+	}
 	var branch struct {
 		Name   string `json:"name"`
 		Commit struct {
 			ID string `json:"id"`
 		} `json:"commit"`
 	}
-	if err := configured.client.get(ctx, "/projects/"+projectPath(selection.ProjectID)+"/repository/branches/"+url.PathEscape(selection.Ref), &branch); err != nil {
+	if err := configured.client.get(ctx, "/projects/"+projectPath(selection.ProjectID)+"/repository/branches/"+url.PathEscape(ref), &branch); err != nil {
 		return nil, err
 	}
-	if branch.Name != selection.Ref || !validObjectID(branch.Commit.ID) {
+	if branch.Name != ref || !validObjectID(branch.Commit.ID) {
 		return nil, fmt.Errorf("GitLab branch did not resolve to a commit")
 	}
 	clone, err := url.Parse(project.HTTPURLToRepo)
@@ -44,7 +51,7 @@ func (c *Connector) ResolveSourceRepository(ctx context.Context, ds *types.DataS
 	if err != nil || clone.User != nil || clone.RawQuery != "" || clone.Fragment != "" || clone.Host != base.Host || clone.Scheme != base.Scheme || (clone.Scheme != "https" && clone.Scheme != "http") || !strings.HasSuffix(clone.Path, ".git") {
 		return nil, fmt.Errorf("GitLab clone URL must use the configured instance origin")
 	}
-	return &types.SourceRepository{ProjectID: selection.ProjectID, Branch: selection.Ref, CommitSHA: branch.Commit.ID, CloneURL: clone.String(), Token: configured.client.token}, nil
+	return &types.SourceRepository{ProjectID: selection.ProjectID, Branch: ref, CommitSHA: branch.Commit.ID, CloneURL: clone.String(), Token: configured.client.token}, nil
 }
 
 // Credential rotation remains possible when a selected branch is unavailable.

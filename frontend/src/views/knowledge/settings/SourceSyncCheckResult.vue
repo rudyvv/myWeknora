@@ -36,6 +36,7 @@ const issues = computed(() => props.preview.checks.filter(check => !check.ready)
 <template>
   <div class="source-check-result" :class="{ 'source-check-result--blocked': !preview.can_sync }" :role="preview.can_sync ? 'status' : 'alert'">
     <strong>{{ t(preview.can_sync ? 'datasource.gitlab.checkPassed' : 'datasource.gitlab.checkBlocked') }}</strong>
+    <p>{{ t('datasource.gitlab.checkResolvedBranch', { branch: preview.branch }) }}</p>
     <p>{{ t('datasource.gitlab.checkCounts', counts) }}</p>
     <ul v-if="issues.length"><li v-for="(issue, index) in issues" :key="index">{{ issue }}</li></ul>
     <p v-for="warning in preview.warnings" :key="warning">{{ warning === 'Wiki is disabled for this knowledge base' ? t('datasource.gitlab.checkWikiDisabled') : warning }}</p>

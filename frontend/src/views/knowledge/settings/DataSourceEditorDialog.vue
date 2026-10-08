@@ -243,7 +243,7 @@ function removeGitLabProject(index: number) { gitlabProjects.value.splice(index,
 
 async function loadSourcePreview() {
   if (sourcePreviewLoading.value) return false
-  if (!isSourceMode.value || gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.project_id.trim() || !gitlabProjects.value[0]?.ref.trim()) {
+  if (!isSourceMode.value || gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.project_id.trim()) {
     sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
     return false
   }
@@ -1093,7 +1093,7 @@ async function nextStep() {
       MessagePlugin.warning(t('datasource.gitlab.projectRequired'))
       return
     }
-    if (isSourceMode.value && (gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.ref.trim())) {
+    if (isSourceMode.value && gitlabProjects.value.length !== 1) {
       sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
       return
     }
@@ -1672,8 +1672,8 @@ const drawerConfirmText = computed(() => {
             </div>
             <label class="form-label required">{{ t('datasource.gitlab.projectId') }}</label>
             <t-input v-model="project.project_id" :placeholder="t('datasource.gitlab.projectIdPlaceholder')" />
-            <label class="form-label" :class="{ required: isSourceMode }">{{ t('datasource.gitlab.ref') }}</label>
-            <t-input v-model="project.ref" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourceBranchPlaceholder' : 'datasource.gitlab.refPlaceholder')" />
+            <label class="form-label">{{ t('datasource.gitlab.ref') }}</label>
+            <t-input v-model="project.ref" :placeholder="t('datasource.gitlab.refPlaceholder')" />
             <label class="form-label">{{ t('datasource.gitlab.paths') }}</label>
             <t-textarea v-model="project.pathsText" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourcePathsPlaceholder' : 'datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
           </div>

@@ -67,9 +67,10 @@ func ValidateContentMode(connectorType string, config *types.DataSourceConfig) e
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("%w: project_id is required", ErrInvalidConfig)
 	}
-	branch, _ := project["ref"].(string)
-	if strings.TrimSpace(branch) == "" {
-		return fmt.Errorf("%w: source mode requires a specified branch", ErrInvalidConfig)
+	if branch, exists := project["ref"]; exists && branch != nil {
+		if _, ok := branch.(string); !ok {
+			return fmt.Errorf("%w: branch must be a string", ErrInvalidConfig)
+		}
 	}
 	return nil
 }
@@ -156,6 +157,5 @@ func GitLabSourceReconciliationEligible(ds *types.DataSource) bool {
 	}
 	settings, _, err := ParseSourceSettings(config)
 	return err == nil && len(settings.Projects) == 1 &&
-		strings.TrimSpace(settings.Projects[0].ProjectID) != "" &&
-		strings.TrimSpace(settings.Projects[0].Ref) != ""
+		strings.TrimSpace(settings.Projects[0].ProjectID) != ""
 }

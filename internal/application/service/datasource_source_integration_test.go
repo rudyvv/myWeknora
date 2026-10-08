@@ -52,6 +52,7 @@ func TestSourceWholeRepositorySyncIncludesRootAndNestedFilesWithExclusions(t *te
 	})
 	config, err := f.ds.ParseConfig()
 	require.NoError(t, err)
+	config.Settings["projects"].([]interface{})[0].(map[string]interface{})["ref"] = ""
 	config.Settings["exclude_paths"] = []string{"vendor"}
 	encoded, err := json.Marshal(config)
 	require.NoError(t, err)
@@ -60,6 +61,7 @@ func TestSourceWholeRepositorySyncIncludesRootAndNestedFilesWithExclusions(t *te
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
 	require.NoError(t, err)
 	require.True(t, preview.CanSync, "blank paths select the repository and still run all readiness checks")
+	require.Equal(t, "main", preview.Branch, "blank branch resolves the GitLab default")
 	statuses := map[string]string{}
 	for _, file := range preview.Files {
 		statuses[file.Path] = file.Status
@@ -3623,7 +3625,7 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 			}
 			fmt.Fprint(w, `{"active":true,"scopes":["read_api","read_repository"]}`)
 		case "/api/v4/projects/123":
-			fmt.Fprintf(w, `{"id":123,"http_url_to_repo":%q}`, gitlabServer.URL+"/repo.git")
+			fmt.Fprintf(w, `{"id":123,"default_branch":"main","http_url_to_repo":%q}`, gitlabServer.URL+"/repo.git")
 		case "/api/v4/projects/123/repository/branches/main":
 			if f.gitlabBranchMissing {
 				http.Error(w, "branch not found", http.StatusNotFound)

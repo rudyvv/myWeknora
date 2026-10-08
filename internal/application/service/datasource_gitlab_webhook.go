@@ -134,6 +134,7 @@ func (s *DataSourceService) TestGitLabWebhook(ctx context.Context, id string, te
 		return result, nil
 	}
 	result.GitLabAccessStatus = "connected"
+	result.Branch = preview.Branch
 	result.CurrentCommitSHA = preview.CommitSHA
 	return result, nil
 }
@@ -209,7 +210,7 @@ func (s *DataSourceService) ReceiveGitLabPush(ctx context.Context, suppliedSecre
 		settings, _, settingsErr := datasource.ParseSourceSettings(config)
 		if settingsErr != nil || len(settings.Projects) != 1 ||
 			!registeredGitLabProjectMatches(settings.Projects[0].ProjectID, event) ||
-			settings.Projects[0].Ref != branch {
+			(settings.Projects[0].Ref != "" && settings.Projects[0].Ref != branch) {
 			continue
 		}
 		hook, hookErr := repo.GetGitLabWebhookConfig(ctx, candidate.ID, candidate.TenantID)
@@ -220,6 +221,30 @@ func (s *DataSourceService) ReceiveGitLabPush(ctx context.Context, suppliedSecre
 			continue
 		}
 		if !constantTimeSecretEqual(hook.Secret, suppliedSecret) {
+			continue
+		}
+		selectedBranch := settings.Projects[0].Ref
+		if selectedBranch == "" {
+			// Only authenticate against the registered instance and credentials.
+			// The push payload cannot choose a default branch or repository URL.
+			if s.connectorRegistry == nil {
+				continue
+			}
+			connector, connectorErr := s.connectorRegistry.Get(candidate.Type)
+			if connectorErr != nil {
+				continue
+			}
+			resolver, ok := connector.(datasource.SourceRepositoryResolver)
+			if !ok {
+				continue
+			}
+			repository, resolveErr := resolver.ResolveSourceRepository(ctx, config)
+			if resolveErr != nil {
+				continue
+			}
+			selectedBranch = repository.Branch
+		}
+		if selectedBranch != branch {
 			continue
 		}
 		matches = append(matches, authenticatedSource{ds: candidate, secret: hook.Secret})

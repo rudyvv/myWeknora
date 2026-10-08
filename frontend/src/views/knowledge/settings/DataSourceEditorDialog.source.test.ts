@@ -41,7 +41,7 @@ async function fixture({ create = false, twoProjects = false, delayedPreview = f
       record('previewSource', id, settings)
       if (delayedPreview) await new Promise<void>(resolve => { releasePreview = resolve })
       if (previewFails) throw new Error(previewError)
-      return { commit_sha: '1111111111111111111111111111111111111111', rules_version: 'v1:fixture', can_sync: ready,
+      return { branch: settings.projects[0].ref || 'release/default', commit_sha: '1111111111111111111111111111111111111111', rules_version: 'v1:fixture', can_sync: ready,
         files: [{ path: 'dist/Business.java', status: 'included', reason: 'selected', generated: false, size: 20 }],
         checks: [{ name: 'parser', ready, message: 'Source parser is unavailable' }], warnings: [] }
     },
@@ -117,15 +117,16 @@ test('Next accepts blank paths as the whole repository and retains exclusions', 
     assert.equal(projects.length, 2)
     projects[1].querySelector<HTMLButtonElement>('button')!.click()
     await settle()
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
     await f.fill('datasource.gitlab.excludePathsHint', 'vendor\ndist')
     await f.click('datasource.next')
     assert.equal(document.querySelector('.source-preview'), null, 'editor advances to sync settings')
     assert.ok(document.body.textContent?.includes('datasource.step.strategy'))
     assert.deepEqual(f.calls.map(call => call.method), ['previewSource'])
     assert.deepEqual(f.calls[0].args[1].projects[0].paths, [])
+    assert.equal(f.calls[0].args[1].projects[0].ref, '', 'blank branch requests the GitLab default branch')
     assert.deepEqual(f.calls[0].args[1].exclude_paths, ['vendor', 'dist'])
     assert.ok(document.body.textContent?.includes('datasource.gitlab.checkPassed'))
+    assert.ok(document.body.textContent?.includes('datasource.gitlab.checkResolvedBranch'))
     assert.equal(document.querySelector('details')?.open, false, 'technical details are collapsed')
   } finally { await f.close() }
 })
@@ -135,7 +136,7 @@ test('a delayed preview cannot display the previous instance after credentials c
   try {
     await f.click('datasource.next')
     await f.click('datasource.gitlab.sourceMode')
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
+    await f.fill('datasource.gitlab.refPlaceholder', 'main')
     await f.fill('datasource.gitlab.sourcePathsPlaceholder', 'src')
     await f.click('datasource.next')
     await f.click('datasource.back')
@@ -156,7 +157,7 @@ test('Next blocks an unready source with a summary and collapsed details without
   try {
     await f.click('datasource.next')
     await f.click('datasource.gitlab.sourceMode')
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
+    await f.fill('datasource.gitlab.refPlaceholder', 'main')
     await f.fill('datasource.gitlab.sourcePathsPlaceholder', 'src')
     await f.fill('datasource.gitlab.excludePathsHint', 'vendor\nsrc/generated')
     assert.ok(!document.body.textContent?.includes('datasource.gitlab.preview'), 'no separate preview button')
@@ -169,7 +170,7 @@ test('Next blocks an unready source with a summary and collapsed details without
     assert.ok(document.body.textContent?.includes('Source parser is unavailable'))
     assert.deepEqual(f.calls, [{ method: 'previewSource', args: ['source-one', { content_mode: 'source', projects: [{ project_id: '123', ref: 'main', paths: ['src'] }], exclude_paths: ['vendor', 'src/generated'] }] }])
     assert.equal(f.storedCredentials().access_token, 'token-A')
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'release')
+    await f.fill('datasource.gitlab.refPlaceholder', 'release')
     assert.equal(document.querySelector('.source-preview__files'), null, 'changing a draft invalidates the displayed preview')
   } finally { await f.close() }
 })
@@ -184,7 +185,6 @@ test('new source keeps the final credentials after automatic checks and returnin
     await f.click('datasource.next')
     await f.click('datasource.gitlab.sourceMode')
     await f.fill('datasource.gitlab.projectIdPlaceholder', '123')
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
     await f.fill('datasource.gitlab.sourcePathsPlaceholder', 'src')
     await f.click('datasource.next')
     assert.ok(document.querySelector('.source-preview__files'), 'first preview succeeds and creates a draft')
@@ -202,6 +202,7 @@ test('new source keeps the final credentials after automatic checks and returnin
     const saved = f.calls.find(call => call.method === 'updateDataSource')
     assert.ok(saved)
     assert.deepEqual(saved.args[1].config.credentials, {})
+    assert.equal(saved.args[1].config.settings.projects[0].ref, '', 'new source saves default-branch intent after checks')
   } finally { await f.close() }
 })
 
@@ -220,7 +221,7 @@ test('a pending check cannot be submitted twice or advance after the range chang
   try {
     await f.click('datasource.next')
     await f.click('datasource.gitlab.sourceMode')
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
+    await f.fill('datasource.gitlab.refPlaceholder', 'main')
     await f.fill('datasource.gitlab.sourcePathsPlaceholder', 'src')
     await f.click('datasource.next')
     assert.ok(document.body.textContent?.includes('datasource.gitlab.checkingHint'))
@@ -238,7 +239,7 @@ test('a failed repository check remains on range selection and can be retried', 
   try {
     await f.click('datasource.next')
     await f.click('datasource.gitlab.sourceMode')
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
+    await f.fill('datasource.gitlab.refPlaceholder', 'main')
     await f.fill('datasource.gitlab.sourcePathsPlaceholder', 'src')
     await f.click('datasource.next')
     assert.ok(document.querySelector('.gitlab-project-list'))
@@ -254,7 +255,7 @@ test('whole repository resource limits show an actionable message and do not adv
   try {
     await f.click('datasource.next')
     await f.click('datasource.gitlab.sourceMode')
-    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
+    await f.fill('datasource.gitlab.refPlaceholder', 'main')
     await f.click('datasource.next')
     assert.ok(document.querySelector('.gitlab-project-list'))
     assert.ok(document.body.textContent?.includes('datasource.gitlab.checkResourceBudget'))

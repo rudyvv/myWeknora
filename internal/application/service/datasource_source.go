@@ -125,7 +125,7 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 	}
 	preview := &types.SourcePreview{ProjectID: repository.ProjectID, Branch: repository.Branch, CommitSHA: repository.CommitSHA,
 		RulesVersion: version, Files: files, Warnings: []string{}, Checks: []types.SourcePreviewCheck{
-			{Name: "gitlab_branch", Ready: true, Message: "specified branch resolved and fixed commit fetched"},
+			{Name: "gitlab_branch", Ready: true, Message: "selected branch resolved and fixed commit fetched"},
 			{Name: "indexes", Ready: indexBackendReady && profileErr == nil && len(preflightFailures) == 0, Message: indexMessage},
 			{Name: "parser", Ready: sourceParserReady(ctx, requiredLanguages...), Message: "source mode requires a healthy, versioned parser with every selected grammar or text fallback route"},
 			{Name: "source_pipeline", Ready: false, Message: "source ingestion pipeline is not available; configuration and preview can be saved"},

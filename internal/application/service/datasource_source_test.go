@@ -34,19 +34,24 @@ func TestSourceParseArtifactKeyChangesWithParserVersionAndIsDeterministic(t *tes
 	require.NotEqual(t, newRulesKey, sourceParseArtifactKey("src/reservation.py", raw, "source-pack-1.19.0-rules-4-new", "settings-v1", "o200k_base:8192"))
 }
 
-func TestUpdateDataSourceRejectsSourceModeWithoutSpecifiedBranch(t *testing.T) {
+func TestUpdateDataSourceAllowsSourceModeWithDefaultBranch(t *testing.T) {
 	stored := &types.DataSource{ID: "source-one", TenantID: 1, KnowledgeBaseID: "kb-one", Type: types.ConnectorTypeGitLab,
 		Config: types.JSON(`{"type":"gitlab","settings":{"projects":[{"project_id":"123"}]}}`)}
-	repo := newKBDeleteDSRepo("kb-one", stored)
+	repo := &sourceSettingsRepo{kbDeleteDSRepo: newKBDeleteDSRepo("kb-one", stored)}
 	svc := &DataSourceService{dsRepo: repo, scheduler: datasource.NewScheduler(repo, nil, nil, nil)}
 	incoming := *stored
 	incoming.Config = types.JSON(`{"type":"gitlab","settings":{"content_mode":"source","projects":[{"project_id":"123"}]}}`)
 
 	_, err := svc.UpdateDataSource(context.Background(), &incoming)
-	require.ErrorContains(t, err, "specified branch")
-	unchanged, err := svc.GetDataSource(context.Background(), stored.ID)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"type":"gitlab","settings":{"projects":[{"project_id":"123"}]}}`, string(unchanged.Config))
+	saved, err := svc.GetDataSource(context.Background(), stored.ID)
+	require.NoError(t, err)
+	config, err := saved.ParseConfig()
+	require.NoError(t, err)
+	settings, version, err := datasource.ParseSourceSettings(config)
+	require.NoError(t, err)
+	require.Empty(t, settings.Projects[0].Ref, "saving must retain the default-branch selection")
+	require.Equal(t, version, config.Settings["rules_version"])
 }
 
 func TestSourceSettingsAreVersionedWhenSavedWithoutChangingDocumentDefaults(t *testing.T) {
