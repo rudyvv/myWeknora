@@ -19,7 +19,6 @@ import DataSourceEditorDialog from './DataSourceEditorDialog.vue'
 import DataSourceSyncLogs from './DataSourceSyncLogs.vue'
 import { syncLogDisplayStatus } from './syncLogDisplay'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
-import GitLabWebhookDialog from './GitLabWebhookDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ kbId: string }>()
@@ -45,8 +44,6 @@ const logsProjectOnly = ref(false)
 const pollTimer = ref<number | null>(null)
 let listRequestGeneration = 0
 const pendingSourceMutations = ref(new Set<string>())
-const gitLabWebhookVisible = ref(false)
-const gitLabWebhookDataSource = ref<DataSource | null>(null)
 
 function stopPolling() {
   if (pollTimer.value !== null) {
@@ -331,12 +328,6 @@ function isSyncRunning(ds: DataSource) {
   return ds.latest_sync_log?.status === 'running'
 }
 
-function openGitLabWebhook(ds: DataSource) {
-  if (!canEditDataSource(ds)) return
-  gitLabWebhookDataSource.value = ds
-  gitLabWebhookVisible.value = true
-}
-
 function hasPendingSync(ds: DataSource) {
   return ds.latest_sync_log?.status === 'running' || ds.latest_sync_log?.status === 'queued'
 }
@@ -447,12 +438,6 @@ onBeforeUnmount(stopPolling)
                     <t-dropdown-menu>
                       <t-dropdown-item v-if="canManageDataSource && !isWeDriveDataSource(ds) && canEditDataSource(ds)" @click="openEdit(ds)">
                         <t-icon name="edit" /> {{ t('datasource.edit') }}
-                      </t-dropdown-item>
-                      <t-dropdown-item
-                        v-if="canManageDataSource && ds.type === 'gitlab' && isSourceMode(ds) && canEditDataSource(ds) && (ds.source_projects?.length || 0) <= 1"
-                        @click="openGitLabWebhook(ds)"
-                      >
-                        <t-icon name="link" /> {{ t('datasource.gitlabWebhook.manage') }}
                       </t-dropdown-item>
                       <t-dropdown-item v-else-if="canManageDataSource && !isSourceMode(ds)" @click="openWeDriveSync">
                         <t-icon name="setting" /> 在企业微信微盘同步中管理
@@ -590,7 +575,6 @@ onBeforeUnmount(stopPolling)
                 <span class="ds-card__sep">·</span>
                 <span>{{ project.source_project_removed ? t('datasource.gitlab.retainedProject') : project.latest_sync_log ? lastSyncStatusLabel(project) : statusLabel(project.status) }}</span>
                 <t-button variant="text" size="small" @click.stop="openLogs(project, true)">{{ t('datasource.logs') }}</t-button>
-                <t-button v-if="canManageDataSource && canEditDataSource(project) && !project.source_project_removed" variant="text" size="small" @click.stop="openGitLabWebhook(project)">{{ t('datasource.gitlabWebhook.manage') }}</t-button>
               </div>
             </div>
             <p v-if="isWeDriveDataSource(ds)" class="ds-card__managed-note">
@@ -633,10 +617,6 @@ onBeforeUnmount(stopPolling)
       :project-only="logsProjectOnly"
     />
 
-    <GitLabWebhookDialog
-      v-model:visible="gitLabWebhookVisible"
-      :data-source="gitLabWebhookDataSource"
-    />
   </div>
 </template>
 

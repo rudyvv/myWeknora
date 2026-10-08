@@ -6,7 +6,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Tencent/WeKnora/internal/handler"
-	"github.com/Tencent/WeKnora/internal/types"
 )
 
 // Models are tenant-wide infrastructure (LLM credentials, embeddings,
@@ -320,9 +319,8 @@ func RegisterDataSourceRoutes(
 
 		// Connection and resource management — Admin+
 		ds.POST("/:id/validate", g.Admin(), handler.ValidateConnection)
-		ds.GET("/:id/gitlab-webhook", g.Admin(), handler.GetGitLabWebhook)
-		ds.PUT("/:id/gitlab-webhook", g.Admin(), handler.UpdateGitLabWebhook)
-		ds.POST("/:id/gitlab-webhook/test", g.Admin(), handler.TestGitLabWebhook)
+		// GitLab Push Webhook: 已有实现，端到端验证未完成，暂不对外提供。
+		// Do not expose management endpoints that could re-enable saved configs.
 		ds.GET("/:id/resources", g.Admin(), handler.ListAvailableResources)
 		ds.POST("/:id/resource-ancestors", g.Admin(), handler.ResolveResourceAncestors)
 		ds.POST("/:id/source-preview", g.Admin(), handler.PreviewSource)
@@ -341,14 +339,10 @@ func RegisterDataSourceRoutes(
 	}
 }
 
-// RegisterGitLabWebhookRoutes mounts the shared-secret authenticated callback
-// before global WeKnora authentication. Project and tenant identity are
-// resolved exclusively from persisted active source configurations.
+// RegisterGitLabWebhookRoutes deliberately registers no callback.
+// GitLab Push Webhook: 已有实现，端到端验证未完成，暂不对外提供。
+// Keep the bootstrap seam while withholding the retained implementation.
 func RegisterGitLabWebhookRoutes(r *gin.Engine, h *handler.DataSourceHandler) {
-	if h == nil {
-		return
-	}
-	r.POST(types.GitLabWebhookCallbackPath, h.ReceiveGitLabPush)
 }
 
 // RegisterWeDriveAgentRoutes exposes only self-authenticated Agent calls. The

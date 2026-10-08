@@ -17,6 +17,10 @@ import (
 
 const defaultGitLabWebhookReconciliationSchedule = datasource.DefaultSourceSyncSchedule
 
+// GitLab Push Webhook: 已有实现，端到端验证未完成，暂不对外提供。
+// Production routes are withdrawn and service calls fail closed. The retained
+// implementation can only be exercised by in-process experimental fixtures.
+
 func (s *DataSourceService) gitLabWebhookRepository() (interfaces.GitLabWebhookRepository, error) {
 	repository, ok := s.syncLogRepo.(interfaces.GitLabWebhookRepository)
 	if !ok {
@@ -35,6 +39,9 @@ func hasGitLabSourceCredentials(config *types.DataSourceConfig) bool {
 }
 
 func (s *DataSourceService) gitLabSourceScope(ctx context.Context, id string, tenantID uint64) (*types.DataSource, *types.DataSourceConfig, string, string, error) {
+	if !s.gitLabWebhookExperimental {
+		return nil, nil, "", "", datasource.ErrGitLabWebhookUnavailable
+	}
 	ds, err := s.GetDataSource(ctx, id)
 	if err != nil || ds == nil || ds.TenantID != tenantID || ds.Type != types.ConnectorTypeGitLab {
 		return nil, nil, "", "", datasource.ErrDataSourceNotFound
@@ -170,6 +177,9 @@ func registeredGitLabProjectMatches(registeredProject string, event types.GitLab
 }
 
 func (s *DataSourceService) ReceiveGitLabPush(ctx context.Context, suppliedSecret string, event types.GitLabPushEvent) (accepted bool, duplicate bool, err error) {
+	if !s.gitLabWebhookExperimental {
+		return false, false, datasource.ErrGitLabWebhookUnavailable
+	}
 	if suppliedSecret == "" || !validGitLabPushEvent(event) || len(event.DeliveryID) > 256 || len(event.EventID) > 256 {
 		return false, false, datasource.ErrGitLabWebhookUnauthorized
 	}

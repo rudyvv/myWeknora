@@ -47,6 +47,10 @@ type DataSourceService struct {
 	sourceResources    *source.ResourceController
 	sourceWikiCoverage interfaces.SourceWikiBatchReadService
 	sourceWikiLimits   sourceWikiDerivationLimits
+	// 已有实现，端到端验证未完成，暂不对外提供。
+	// Only retained in-process webhook fixtures enable this; production constructors
+	// leave it false. There is deliberately no environment/configuration switch.
+	gitLabWebhookExperimental bool
 }
 
 // NewDataSourceService creates a new data source service
@@ -1207,6 +1211,11 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		logger.Errorf(ctx, "failed to unmarshal sync payload: %v", err)
 		return err
+	}
+	// Discard old webhook queue deliveries before any connector/model work.
+	// Migration 122 also cancels durable webhook runs and their recovery pointers.
+	if payload.Trigger == "gitlab_webhook" && !s.gitLabWebhookExperimental {
+		return nil
 	}
 	ctx = payload.Initiator.Apply(ctx)
 	taskID, _ := asynq.GetTaskID(ctx)

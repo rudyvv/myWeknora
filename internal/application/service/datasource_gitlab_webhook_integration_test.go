@@ -28,6 +28,8 @@ import (
 
 func TestGitLabPushHookHTTPDurableTriggerDedupAndScheduledReconciliation(t *testing.T) {
 	f := newJavaSourceFixture(t)
+	// Exercise the retained implementation only; production never enables it.
+	f.service.gitLabWebhookExperimental = true
 	tasks := make(chan *asynq.Task, 4)
 	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: tasks}
 
@@ -297,6 +299,8 @@ func TestGitLabPushHookHTTPDurableTriggerDedupAndScheduledReconciliation(t *test
 
 func TestGitLabDefaultBranchPushOnlyAcceptsResolvedBranch(t *testing.T) {
 	f := newJavaSourceFixture(t)
+	// Exercise the retained implementation only; production never enables it.
+	f.service.gitLabWebhookExperimental = true
 	config, err := f.ds.ParseConfig()
 	require.NoError(t, err)
 	config.Settings["projects"].([]interface{})[0].(map[string]interface{})["ref"] = ""
@@ -358,6 +362,8 @@ func failGitLabSourceAndExhaustRetryBudget(t *testing.T, f *javaSourceFixture, t
 
 func TestGitLabWebhookErrorSourceAcceptsPushAndStartupReconcilesLatestHead(t *testing.T) {
 	f := newJavaSourceFixture(t)
+	// Exercise the retained implementation only; production never enables it.
+	f.service.gitLabWebhookExperimental = true
 	pushTasks := make(chan *asynq.Task, 8)
 	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: pushTasks}
 	enabled, secret := true, "fixture-error-source-hook-secret"
@@ -459,6 +465,8 @@ func TestGitLabWebhookErrorSourceAcceptsPushAndStartupReconcilesLatestHead(t *te
 
 func TestGitLabWebhookRegisteredCronContinuesAfterSourceEntersError(t *testing.T) {
 	f := newJavaSourceFixture(t)
+	// Exercise the retained implementation only; production never enables it.
+	f.service.gitLabWebhookExperimental = true
 	require.NoError(t, f.db.Model(&types.DataSource{}).Where("id = ?", f.ds.ID).Update("sync_schedule", "* * * * * *").Error)
 	scheduledTasks := make(chan *asynq.Task, 8)
 	scheduler := datasource.NewScheduler(repository.NewDataSourceRepository(f.db), repository.NewSyncLogRepository(f.db),
@@ -499,6 +507,8 @@ func TestGitLabWebhookRegisteredCronContinuesAfterSourceEntersError(t *testing.T
 
 func TestGitLabWebhookSecretRotationRequiresFreshInboundEvidence(t *testing.T) {
 	f := newJavaSourceFixture(t)
+	// Exercise the retained implementation only; production never enables it.
+	f.service.gitLabWebhookExperimental = true
 	f.service.taskEnqueuer = sourceTestTaskEnqueuer{tasks: make(chan *asynq.Task, 32)}
 	enabled := true
 	secretA, secretB := "fixture-rotation-secret-A", "fixture-rotation-secret-B"

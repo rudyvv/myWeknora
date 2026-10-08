@@ -1,5 +1,11 @@
 # Source acceptance runner
 
+GitLab Push Webhook：**已有实现，端到端验证未完成，暂不对外提供**。
+源码模式使用“立即同步”和定时同步，源码发布后继续通过持久化通知更新 Wiki。
+前端 Webhook 入口和配置弹窗已移除；后端不注册回调或管理接口，服务层拒绝调用。
+迁移 `000122` 停用已有 Webhook 配置，并取消未完成的 Webhook 同步任务；已有源码和 Wiki 发布保持可用。
+保留的 Webhook 实现与模拟测试仅供后续开发验证，不能作为真实 GitLab 端到端验收证据。
+
 `scripts/source-acceptance-run.ps1` performs a bounded acceptance pass against the existing WeKnora API. It verifies model and source scope, obtains source previews, associates each source with its approved published snapshot, issues 30 source-scoped top-10 searches, then checks expected evidence through authorized original-file reads. Its default mode does not publish or otherwise mutate sources.
 
 The WeKnora bearer token must be injected into the process environment as `WEKNORA_ACCESS_TOKEN` by the approved secret mechanism. The runner never reads GitLab credentials (they remain in the configured datasource), accepts no credentials as command arguments, suppresses API error bodies, and never places source text or answers in the report. Avoid PowerShell transcription during a run that handles credentials.
