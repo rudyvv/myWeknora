@@ -41,6 +41,7 @@ const logsVisible = ref(false)
 const logsDsId = ref('')
 const logsDsName = ref('')
 const logsDsType = ref('')
+const logsProjectOnly = ref(false)
 const pollTimer = ref<number | null>(null)
 let listRequestGeneration = 0
 const pendingSourceMutations = ref(new Set<string>())
@@ -70,7 +71,7 @@ async function loadList(silent = false) {
     dataSources.value = res?.data || res || []
     emit('count', dataSources.value.length)
 
-    const hasPendingWork = dataSources.value.some(ds =>
+    const hasPendingWork = dataSources.value.flatMap(ds => [ds, ...(ds.source_projects || [])]).some(ds =>
       ds.latest_sync_log?.status === 'running' || ds.latest_sync_log?.status === 'queued' ||
       ['pending', 'running'].includes(ds.source_lifecycle?.cleanup?.status || ''),
     )
@@ -109,9 +110,10 @@ function openWeDriveSync() {
   void router.push({ path: '/platform/wedrive-sync', query: { kb_id: props.kbId } })
 }
 
-function openLogs(ds: DataSource) {
+function openLogs(ds: DataSource, projectOnly = false) {
+  logsProjectOnly.value = projectOnly
   logsDsId.value = ds.id
-  logsDsName.value = ds.name
+  logsDsName.value = projectOnly ? `${ds.name} · ${ds.config?.settings?.projects?.[0]?.project_id || ''}` : ds.name
   logsDsType.value = ds.type
   logsVisible.value = true
 }
@@ -189,6 +191,7 @@ async function handleSync(ds: DataSource) {
     await loadList(true)
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('datasource.syncFailed'))
+    await loadList(true)
   }
 }
 
@@ -446,7 +449,7 @@ onBeforeUnmount(stopPolling)
                         <t-icon name="edit" /> {{ t('datasource.edit') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource && ds.type === 'gitlab' && isSourceMode(ds) && canEditDataSource(ds)"
+                        v-if="canManageDataSource && ds.type === 'gitlab' && isSourceMode(ds) && canEditDataSource(ds) && (ds.source_projects?.length || 0) <= 1"
                         @click="openGitLabWebhook(ds)"
                       >
                         <t-icon name="link" /> {{ t('datasource.gitlabWebhook.manage') }}
@@ -466,7 +469,7 @@ onBeforeUnmount(stopPolling)
                         <t-icon name="root-list" /> {{ t('datasource.logs') }}
                       </t-dropdown-item>
                       <t-dropdown-item
-                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && canOperateSource(ds) && ds.status === 'active'"
+                        v-if="canManageDataSource && !isWeDriveDataSource(ds) && canOperateSource(ds) && (ds.status === 'active' || isSourceMode(ds) && ds.status === 'error')"
                         @click="handlePause(ds)"
                       >
                         <t-icon name="pause-circle" /> {{ t('datasource.pause') }}
@@ -581,6 +584,15 @@ onBeforeUnmount(stopPolling)
                 >{{ pill.text }}</span>
               </template>
             </p>
+            <div v-if="ds.source_projects && ds.source_projects.length > 1" class="ds-card__projects">
+              <div v-for="project in ds.source_projects" :key="project.id" class="ds-card__detail">
+                <span>{{ project.config?.settings?.projects?.[0]?.project_id }}</span>
+                <span class="ds-card__sep">·</span>
+                <span>{{ project.source_project_removed ? t('datasource.gitlab.retainedProject') : project.latest_sync_log ? lastSyncStatusLabel(project) : statusLabel(project.status) }}</span>
+                <t-button variant="text" size="small" @click.stop="openLogs(project, true)">{{ t('datasource.logs') }}</t-button>
+                <t-button v-if="canManageDataSource && canEditDataSource(project) && !project.source_project_removed" variant="text" size="small" @click.stop="openGitLabWebhook(project)">{{ t('datasource.gitlabWebhook.manage') }}</t-button>
+              </div>
+            </div>
             <p v-if="isWeDriveDataSource(ds)" class="ds-card__managed-note">
               目录与扫描设置请在企业微信微盘同步中管理。
               <t-button variant="text" size="small" @click.stop="openWeDriveSync">打开企业微信微盘同步</t-button>
@@ -618,6 +630,7 @@ onBeforeUnmount(stopPolling)
       :data-source-id="logsDsId"
       :data-source-name="logsDsName"
       :data-source-type="logsDsType"
+      :project-only="logsProjectOnly"
     />
 
     <GitLabWebhookDialog

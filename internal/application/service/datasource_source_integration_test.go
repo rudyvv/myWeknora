@@ -3252,6 +3252,7 @@ type javaSourceFixture struct {
 	advanceFiles            func(map[string][]byte) string
 	forcePush               func() string
 	gitlabBranchMissing     bool
+	gitlabProject456Missing bool
 	gitlabTokenInvalid      bool
 	gitTransportUnavailable bool
 	gitTransportRequests    atomic.Int64
@@ -3626,13 +3627,21 @@ func newSourceFixture(t *testing.T, includeDefaultJava bool, selectedPaths []str
 			fmt.Fprint(w, `{"active":true,"scopes":["read_api","read_repository"]}`)
 		case "/api/v4/projects/123":
 			fmt.Fprintf(w, `{"id":123,"default_branch":"main","http_url_to_repo":%q}`, gitlabServer.URL+"/repo.git")
+		case "/api/v4/projects/456":
+			fmt.Fprintf(w, `{"id":456,"default_branch":"main","http_url_to_repo":%q}`, gitlabServer.URL+"/second.git")
+		case "/api/v4/projects/456/repository/branches/main":
+			if f.gitlabProject456Missing {
+				http.Error(w, "branch not found", http.StatusNotFound)
+				return
+			}
+			fmt.Fprintf(w, `{"name":"main","commit":{"id":%q}}`, sha)
 		case "/api/v4/projects/123/repository/branches/main":
 			if f.gitlabBranchMissing {
 				http.Error(w, "branch not found", http.StatusNotFound)
 				return
 			}
 			fmt.Fprintf(w, `{"name":"main","commit":{"id":%q}}`, sha)
-		case "/repo.git/info/refs", "/repo.git/git-upload-pack":
+		case "/repo.git/info/refs", "/repo.git/git-upload-pack", "/second.git/info/refs", "/second.git/git-upload-pack":
 			f.gitTransportRequests.Add(1)
 			if f.gitTransportUnavailable {
 				http.Error(w, "repository unavailable", http.StatusBadGateway)

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -14,6 +15,52 @@ import (
 // DataSourceRepository provides data access for data sources
 type DataSourceRepository struct {
 	db *gorm.DB
+}
+
+func (r *DataSourceRepository) SaveSourceProjectGroup(ctx context.Context, expected, members []*types.DataSource) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		existing := make(map[string]bool, len(expected))
+		currentRows := make(map[string]*types.DataSource, len(expected))
+		for _, before := range expected {
+			var current types.DataSource
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND deleted_at IS NULL", before.ID).Take(&current).Error; err != nil {
+				return err
+			}
+			if current.TenantID != before.TenantID || current.KnowledgeBaseID != before.KnowledgeBaseID ||
+				current.SourceBindingState != before.SourceBindingState || current.SourceQueryEnabled != before.SourceQueryEnabled ||
+				current.Status != before.Status || !bytes.Equal(current.Config, before.Config) ||
+				current.SyncSchedule != before.SyncSchedule || current.SyncMode != before.SyncMode ||
+				current.SyncDeletions != before.SyncDeletions || current.Name != before.Name {
+				return errSourceConfigurationNotCurrent
+			}
+			existing[before.ID] = true
+			currentRows[before.ID] = &current
+		}
+		repo := &DataSourceRepository{db: tx}
+		for _, member := range members {
+			var err error
+			if existing[member.ID] {
+				if err = validateSourceLifecycleUpdate(currentRows[member.ID], member); err != nil {
+					return err
+				}
+				// Configuration changes must not overwrite a run's cursor,
+				// timestamps or results if it finished since the form was loaded.
+				fields := map[string]interface{}{"name": member.Name, "type": member.Type, "config": member.Config,
+					"sync_schedule": member.SyncSchedule, "sync_mode": member.SyncMode, "status": member.Status,
+					"conflict_strategy": member.ConflictStrategy, "sync_deletions": member.SyncDeletions}
+				if member.SyncLogRetentionDays > 0 {
+					fields["sync_log_retention_days"] = member.SyncLogRetentionDays
+				}
+				err = tx.Model(&types.DataSource{}).Where("id = ?", member.ID).Updates(fields).Error
+			} else {
+				err = repo.Create(ctx, member)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // NewDataSourceRepository creates a new data source repository

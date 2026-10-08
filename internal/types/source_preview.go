@@ -28,6 +28,7 @@ type SourcePreviewCheck struct {
 
 // SourcePreview inventories a fixed commit without creating knowledge or cards.
 type SourcePreview struct {
+	Projects     []*SourcePreview     `json:"projects,omitempty"`
 	ProjectID    string               `json:"project_id"`
 	Branch       string               `json:"branch"`
 	CommitSHA    string               `json:"commit_sha"`

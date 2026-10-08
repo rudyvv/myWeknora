@@ -211,19 +211,18 @@ const driveRootLoaded = ref(false)
 const isDriveConnector = (type: string) => type === 'feishu_drive' || type === 'lark_drive'
 const isGitLabConnector = (type: string) => type === 'gitlab'
 
-interface GitLabProjectInput { project_id: string; ref: string; pathsText: string }
+interface GitLabProjectInput { project_id: string; ref: string; pathsText: string; excludeText: string }
 const gitlabProjects = ref<GitLabProjectInput[]>([])
 const isSourceMode = computed(() => isGitLabConnector(form.value.type) && form.value.config.settings.content_mode === 'source')
 const gitlabContentMode = computed({
   get: () => form.value.config.settings.content_mode || 'document',
   set: (mode: string) => { form.value.config.settings.content_mode = mode },
 })
-const sourceExcludePaths = ref('')
 const sourcePreview = ref<SourcePreview | null>(null)
 const sourcePreviewLoading = ref(false)
 const sourcePreviewError = ref('')
 let sourcePreviewGeneration = 0
-watch([gitlabProjects, sourceExcludePaths, isSourceMode, () => form.value.config.credentials], () => {
+watch([gitlabProjects, isSourceMode, () => form.value.config.credentials], () => {
   sourcePreviewGeneration++
   sourcePreview.value = null
   sourcePreviewError.value = ''
@@ -235,15 +234,16 @@ function syncGitLabProjectsToSettings() {
     .map(project => ({
       project_id: project.project_id.trim(), ref: project.ref.trim(),
       paths: project.pathsText.split(/[\n,]/).map(path => path.trim()).filter(Boolean),
+      ...(isSourceMode.value ? { exclude_paths: project.excludeText.split(/[\n,]/).map(path => path.trim()).filter(Boolean) } : {}),
     }))
-  if (isSourceMode.value) form.value.config.settings.exclude_paths = sourceExcludePaths.value.split(/[\n,]/).map(path => path.trim()).filter(Boolean)
+  if (isSourceMode.value) delete form.value.config.settings.exclude_paths
 }
-function addGitLabProject() { gitlabProjects.value.push({ project_id: '', ref: '', pathsText: '' }) }
+function addGitLabProject() { gitlabProjects.value.push({ project_id: '', ref: '', pathsText: '', excludeText: '' }) }
 function removeGitLabProject(index: number) { gitlabProjects.value.splice(index, 1); syncGitLabProjectsToSettings() }
 
 async function loadSourcePreview() {
   if (sourcePreviewLoading.value) return false
-  if (!isSourceMode.value || gitlabProjects.value.length !== 1 || !gitlabProjects.value[0]?.project_id.trim()) {
+  if (!isSourceMode.value || !gitlabProjects.value.length || gitlabProjects.value.some(project => !project.project_id.trim())) {
     sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
     return false
   }
@@ -746,7 +746,6 @@ watch(visible, async (v) => {
   driveRootLoaded.value = false
   rssAuthHeaders.value = []
   gitlabProjects.value = []
-  sourceExcludePaths.value = ''
   sourcePreview.value = null
   sourcePreviewError.value = ''
 
@@ -776,11 +775,11 @@ watch(visible, async (v) => {
     }
     selectedResourceIds.value = form.value.config?.resource_ids || []
     if (isGitLabConnector(form.value.type)) {
-      sourceExcludePaths.value = Array.isArray(form.value.config.settings.exclude_paths) ? form.value.config.settings.exclude_paths.join('\n') : ''
       const savedProjects = Array.isArray(form.value.config.settings.projects) ? form.value.config.settings.projects : []
       gitlabProjects.value = savedProjects.map((project: any) => ({
         project_id: String(project.project_id || ''), ref: String(project.ref || ''),
         pathsText: Array.isArray(project.paths) ? project.paths.join('\n') : '',
+        excludeText: (project.exclude_paths ?? form.value.config.settings.exclude_paths ?? []).join('\n'),
       }))
     }
     // Pre-fill the Drive root folder_token from the saved resource_ids so the
@@ -1093,7 +1092,7 @@ async function nextStep() {
       MessagePlugin.warning(t('datasource.gitlab.projectRequired'))
       return
     }
-    if (isSourceMode.value && gitlabProjects.value.length !== 1) {
+    if (isSourceMode.value && gitlabProjects.value.some(project => !project.project_id.trim())) {
       sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
       return
     }
@@ -1662,7 +1661,7 @@ const drawerConfirmText = computed(() => {
           <t-radio-button value="source">{{ t('datasource.gitlab.sourceMode') }}</t-radio-button>
         </t-radio-group>
         <h4 class="setting-drawer__section-title">{{ t('datasource.gitlab.projects') }}</h4>
-        <p v-if="!isSourceMode" class="ds-resource-hint">{{ t('datasource.gitlab.projectsHint') }}</p>
+        <p class="ds-resource-hint">{{ t('datasource.gitlab.projectsHint') }}</p>
         <div class="gitlab-project-list">
           <div v-for="(project, index) in gitlabProjects" :key="index" class="gitlab-project-row">
             <div class="gitlab-project-row__header">
@@ -1675,15 +1674,23 @@ const drawerConfirmText = computed(() => {
             <t-input v-model="project.ref" :placeholder="t('datasource.gitlab.refPlaceholder')" />
             <label class="form-label">{{ t('datasource.gitlab.paths') }}</label>
             <t-textarea v-model="project.pathsText" :placeholder="t('datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
+            <template v-if="isSourceMode">
+              <label class="form-label">{{ t('datasource.gitlab.excludePaths') }}</label>
+              <t-textarea v-model="project.excludeText" :placeholder="t('datasource.gitlab.excludePathsHint')" :autosize="{ minRows: 2, maxRows: 5 }" />
+            </template>
           </div>
-          <t-button v-if="!isSourceMode || !gitlabProjects.length" variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>
+          <t-button variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>
         </div>
         <div v-if="isSourceMode" class="source-preview">
-          <label class="form-label">{{ t('datasource.gitlab.excludePaths') }}</label>
-          <t-textarea v-model="sourceExcludePaths" :placeholder="t('datasource.gitlab.excludePathsHint')" :autosize="{ minRows: 2, maxRows: 5 }" />
           <p v-if="sourcePreviewLoading" role="status">{{ t('datasource.gitlab.checkingHint') }}</p>
           <p v-if="sourcePreviewError" role="alert" class="source-preview__error">{{ sourcePreviewError }}</p>
-          <SourceSyncCheckResult v-if="sourcePreview" :preview="sourcePreview" />
+          <template v-if="sourcePreview">
+            <p v-if="sourcePreview.projects?.some(project => !project.can_sync)" role="status">{{ t('datasource.gitlab.partialCheckHint') }}</p>
+            <div v-for="preview in sourcePreview.projects || [sourcePreview]" :key="preview.project_id">
+              <h4 v-if="sourcePreview.projects">{{ preview.project_id }}</h4>
+              <SourceSyncCheckResult :preview="preview" />
+            </div>
+          </template>
         </div>
       </template>
       <template v-else>
@@ -1853,7 +1860,13 @@ const drawerConfirmText = computed(() => {
 
     <!-- Step 3: Sync strategy -->
     <template v-if="step === 3">
-      <SourceSyncCheckResult v-if="isSourceMode && sourcePreview" :preview="sourcePreview" />
+      <template v-if="isSourceMode && sourcePreview">
+        <p v-if="sourcePreview.projects?.some(project => !project.can_sync)" role="status">{{ t('datasource.gitlab.partialCheckHint') }}</p>
+        <div v-for="preview in sourcePreview.projects || [sourcePreview]" :key="preview.project_id">
+          <h4 v-if="sourcePreview.projects">{{ preview.project_id }}</h4>
+          <SourceSyncCheckResult :preview="preview" />
+        </div>
+      </template>
       <section class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ t('datasource.syncScheduleLabel') }}</h4>
         <t-select v-model="form.sync_schedule">

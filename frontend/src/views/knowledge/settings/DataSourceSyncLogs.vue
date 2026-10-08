@@ -9,6 +9,7 @@ const props = defineProps<{
   dataSourceId: string
   dataSourceName?: string
   dataSourceType?: string
+  projectOnly?: boolean
 }>()
 const visible = defineModel<boolean>('visible', { default: false })
 const { t } = useI18n()
@@ -35,7 +36,7 @@ async function fetchLogs(reset = true) {
 
   try {
     const offset = reset ? 0 : logs.value.length
-    const res = await getSyncLogs(sourceID, pageSize, offset)
+    const res = await getSyncLogs(sourceID, pageSize, offset, props.projectOnly)
     if (!visible.value || sourceID !== props.dataSourceId || requestGeneration !== generation) return
     const items = res?.data || res || []
     logs.value = reset ? items : [...logs.value, ...items]
@@ -49,7 +50,7 @@ async function fetchLogs(reset = true) {
   }
 }
 
-watch([visible, () => props.dataSourceId], ([v]) => {
+watch([visible, () => props.dataSourceId, () => props.projectOnly], ([v]) => {
   generation++
   if (polling) clearInterval(polling)
   polling = undefined
@@ -289,6 +290,7 @@ const groupedLogs = computed(() => {
             <!-- Content -->
             <div class="tl-content">
               <div class="tl-header">
+                <span v-if="log.source_project_id" class="tl-time">{{ log.source_project_id }}</span>
                 <span class="tl-status" :style="{ color: statusColor(syncLogDisplayStatus(log)) }">
                   {{ t(`datasource.logStatus.${syncLogDisplayStatus(log)}`) }}
                 </span>

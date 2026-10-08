@@ -100,6 +100,19 @@ type DataSourceRepository interface {
 }
 
 // ErrorGitLabSourceRepository is an optional query used only by source
+// SourceProjectGroupRepository atomically saves validated single-repo members.
+// Expected rows are checked under locks to avoid overwriting concurrent lifecycle changes.
+type SourceProjectGroupRepository interface {
+	SaveSourceProjectGroup(ctx context.Context, expected, members []*types.DataSource) error
+}
+
+// SourceProjectLogReader reads one repository's logs even when its execution
+// ID is also the logical group's anchor ID.
+type SourceProjectLogReader interface {
+	GetSourceProjectLogs(ctx context.Context, id string, limit, offset int) ([]*types.SyncLog, error)
+}
+
+// ErrorGitLabSourceRepository is an optional query used only by source
 // reconciliation; ordinary datasource repositories need not broaden their
 // active-source listing semantics.
 type ErrorGitLabSourceRepository interface {

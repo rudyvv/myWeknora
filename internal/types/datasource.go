@@ -135,6 +135,8 @@ type DataSource struct {
 
 	// Latest sync log (not stored in DB, populated on query)
 	LatestSyncLog *SyncLog `json:"latest_sync_log" gorm:"-"`
+	// Logical group projection only; raw credentials never leave the redacted DTO.
+	SourceProjects []*DataSource `json:"-" gorm:"-"`
 }
 
 // TableName specifies the table name for DataSource
@@ -152,6 +154,7 @@ func (d *DataSource) BeforeCreate(tx *gorm.DB) error {
 
 // SyncLog records the execution of a sync task
 type SyncLog struct {
+	SourceProjectID string `json:"source_project_id,omitempty" gorm:"-"`
 	// Unique identifier
 	ID string `json:"id" gorm:"type:varchar(36);primaryKey"`
 

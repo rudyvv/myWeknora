@@ -721,7 +721,13 @@ func (h *DataSourceHandler) GetSyncLogs(c *gin.Context) {
 		}
 	}
 
-	logs, err := h.service.GetSyncLogs(ctx, id, limit, offset)
+	var logs []*types.SyncLog
+	var err error
+	if reader, ok := h.service.(interfaces.SourceProjectLogReader); ok && c.Query("project_only") == "true" {
+		logs, err = reader.GetSourceProjectLogs(ctx, id, limit, offset)
+	} else {
+		logs, err = h.service.GetSyncLogs(ctx, id, limit, offset)
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

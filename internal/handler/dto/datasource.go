@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -20,6 +21,8 @@ import (
 // authenticate. The subresource therefore exposes only one logical field,
 // "credentials", with PUT replacing the whole map and DELETE wiping it.
 type DataSourceResponse struct {
+	SourceProjectRemoved bool                          `json:"source_project_removed,omitempty"`
+	SourceProjects       []*DataSourceResponse         `json:"source_projects,omitempty"`
 	ID                   string                        `json:"id"`
 	TenantID             uint64                        `json:"tenant_id"`
 	KnowledgeBaseID      string                        `json:"knowledge_base_id"`
@@ -109,6 +112,9 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
 			"credentials": {Configured: configured},
 		},
 	}
+	if cfgDTO != nil {
+		response.SourceProjectRemoved = cfgDTO.Settings["source_group_removed"] == true
+	}
 	if configuredSourceMode(ds) {
 		bindingState := ds.SourceBindingState
 		if bindingState == "" {
@@ -128,6 +134,76 @@ func NewDataSourceResponse(ds *types.DataSource) *DataSourceResponse {
 		response.ErrorMessage = safeWeDriveError(ds.ErrorMessage)
 		response.LastSyncResult = safeWeDriveResult(ds.LastSyncResult)
 		response.LatestSyncLog = SafeWeDriveSyncLog(ds.LatestSyncLog)
+	}
+	if cfgDTO != nil {
+		delete(cfgDTO.Settings, datasource.SourceGroupRootKey)
+		delete(cfgDTO.Settings, "source_group_removed")
+	}
+	if len(ds.SourceProjects) > 0 && cfgDTO != nil {
+		projects := []interface{}{}
+		for _, member := range ds.SourceProjects {
+			copy := *member
+			copy.SourceProjects = nil
+			item := NewDataSourceResponse(&copy)
+			response.SourceProjects = append(response.SourceProjects, item)
+			if item.Config == nil || item.SourceProjectRemoved {
+				continue
+			}
+			if selection, ok := item.Config.Settings["projects"].([]interface{}); ok && len(selection) == 1 {
+				project, ok := selection[0].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				project["exclude_paths"] = item.Config.Settings["exclude_paths"]
+				projects = append(projects, project)
+			}
+		}
+		cfgDTO.Settings["projects"] = projects
+		delete(cfgDTO.Settings, "exclude_paths")
+		response.SourceProjectRemoved = false // the logical data source remains configured
+		// The headline represents the group; member rows retain their own state.
+		allPaused, anyError, anyBound, anyQuery := true, false, false, false
+		priority := map[string]int{"running": 5, "queued": 4, "failed": 3, "partial": 2, "success": 1, "canceled": 1}
+		cleanupPriority := map[string]int{"pending": 4, "running": 3, "failed": 2, "completed": 1}
+		response.LatestSyncLog = nil
+		if response.SourceLifecycle != nil {
+			response.SourceLifecycle.Cleanup = nil
+		}
+		for _, member := range response.SourceProjects {
+			if !member.SourceProjectRemoved {
+				allPaused = allPaused && member.Status == types.DataSourceStatusPaused
+				anyError = anyError || member.Status == types.DataSourceStatusError
+			}
+			if member.SourceLifecycle != nil {
+				anyBound = anyBound || member.SourceLifecycle.BindingState == types.SourceBindingBound
+				anyQuery = anyQuery || member.SourceLifecycle.QueryEnabled
+				if op := member.SourceLifecycle.Cleanup; op != nil && response.SourceLifecycle != nil {
+					current := response.SourceLifecycle.Cleanup
+					if current == nil || cleanupPriority[op.Status] > cleanupPriority[current.Status] {
+						response.SourceLifecycle.Cleanup = op
+					}
+				}
+			}
+			if log := member.LatestSyncLog; log != nil && !member.SourceProjectRemoved {
+				current := response.LatestSyncLog
+				if current == nil || priority[log.Status] > priority[current.Status] || priority[log.Status] == priority[current.Status] && log.StartedAt.After(current.StartedAt) {
+					response.LatestSyncLog = log
+				}
+			}
+		}
+		response.Status = types.DataSourceStatusActive
+		if allPaused {
+			response.Status = types.DataSourceStatusPaused
+		} else if anyError {
+			response.Status = types.DataSourceStatusError
+		}
+		if response.SourceLifecycle != nil {
+			response.SourceLifecycle.QueryEnabled = anyQuery
+			response.SourceLifecycle.BindingState = types.SourceBindingUnbound
+			if anyBound {
+				response.SourceLifecycle.BindingState = types.SourceBindingBound
+			}
+		}
 	}
 	return response
 }

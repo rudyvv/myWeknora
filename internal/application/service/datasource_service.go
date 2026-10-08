@@ -123,6 +123,18 @@ func (s *DataSourceService) CreateDataSource(ctx context.Context, ds *types.Data
 	// Validate configuration
 	if cfg, err := ds.ParseConfig(); err == nil && cfg != nil {
 		cfg.StripNonSecretCredentials(ds.Type)
+		delete(cfg.Settings, datasource.SourceGroupRootKey)
+		delete(cfg.Settings, sourceProjectRemovedKey)
+		if mode, _ := datasource.ContentMode(cfg); mode == datasource.ContentModeSource {
+			configs, splitErr := datasource.SplitSourceProjects(cfg)
+			if splitErr != nil {
+				return nil, splitErr
+			}
+			if len(configs) > 1 {
+				return s.saveSourceProjectGroup(ctx, ds, nil, cfg)
+			}
+			cfg = configs[0]
+		}
 		if blob, err := cfg.ToJSON(); err == nil {
 			ds.Config = blob
 		}
@@ -161,6 +173,17 @@ func (s *DataSourceService) GetDataSource(ctx context.Context, id string) (*type
 	if err := s.loadSourceCleanup(ctx, ds); err != nil {
 		return nil, err
 	}
+	if ctx.Value(sourceProjectMemberKey{}) != true && datasource.SourceGroupRoot(ds) == id {
+		groups, err := s.ListDataSources(ctx, ds.KnowledgeBaseID)
+		if err != nil {
+			return nil, err
+		}
+		for _, group := range groups {
+			if group.ID == id {
+				return group, nil
+			}
+		}
+	}
 	return ds, nil
 }
 
@@ -197,7 +220,7 @@ func (s *DataSourceService) ListDataSources(ctx context.Context, kbID string) ([
 		}
 	}
 
-	return dataSources, nil
+	return projectSourceGroups(dataSources), nil
 }
 
 func (s *DataSourceService) loadSourceCleanup(ctx context.Context, ds *types.DataSource) error {
@@ -298,6 +321,33 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 		if err != nil {
 			return nil, datasource.ErrInvalidConfig
 		}
+		rootID := datasource.SourceGroupRoot(existing)
+		mode, _ := datasource.ContentMode(config)
+		if rootID != "" && mode != datasource.ContentModeSource {
+			return nil, fmt.Errorf("a source project group cannot change content mode")
+		}
+		delete(config.Settings, datasource.SourceGroupRootKey)
+		delete(config.Settings, sourceProjectRemovedKey)
+		if mode == datasource.ContentModeSource {
+			configs, splitErr := datasource.SplitSourceProjects(config)
+			if splitErr != nil {
+				return nil, splitErr
+			}
+			if rootID == existing.ID || len(configs) > 1 {
+				if rootID != "" && rootID != existing.ID {
+					return nil, datasource.ErrDataSourceInvalid
+				}
+				return s.saveSourceProjectGroup(ctx, ds, existing, config)
+			}
+			config = configs[0]
+			if rootID != "" {
+				config.Settings[datasource.SourceGroupRootKey] = rootID
+			}
+			ds.Config, err = config.ToJSON()
+			if err != nil {
+				return nil, err
+			}
+		}
 		if err := datasource.ValidateContentMode(ds.Type, config); err != nil {
 			return nil, err
 		}
@@ -351,6 +401,12 @@ func (s *DataSourceService) UpdateDataSource(ctx context.Context, ds *types.Data
 func (s *DataSourceService) UpdateDataSourceCredentials(
 	ctx context.Context, id string, credentials map[string]interface{},
 ) (*types.DataSource, error) {
+	if handled, err := s.updateSourceGroupCredentials(ctx, id, credentials); handled || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return s.GetDataSource(ctx, id)
+	}
 	if id == "" {
 		return nil, datasource.ErrDataSourceInvalid
 	}
@@ -448,6 +504,9 @@ func (s *DataSourceService) restoreSourceConfigurationFromStored(ctx context.Con
 // ClearDataSourceCredentials wipes the connector credential map without
 // touching any other config field. Idempotent.
 func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id string) error {
+	if handled, err := s.updateSourceGroupCredentials(ctx, id, nil); handled || err != nil {
+		return err
+	}
 	if id == "" {
 		return datasource.ErrDataSourceInvalid
 	}
@@ -503,6 +562,24 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 
 // DeleteDataSource deletes a data source (soft delete)
 func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) error {
+	if members, err := s.sourceProjectMembers(ctx, id); err != nil || len(members) > 0 {
+		if err != nil {
+			return err
+		}
+		memberCtx := context.WithValue(ctx, sourceProjectMemberKey{}, true)
+		var failures []error
+		for _, member := range members {
+			if member.ID != id {
+				if err := s.DeleteDataSource(memberCtx, member.ID); err != nil {
+					failures = append(failures, err)
+				}
+			}
+		}
+		if err := errors.Join(failures...); err != nil {
+			return err
+		}
+		return s.DeleteDataSource(memberCtx, id)
+	}
 	// Verify data source exists
 	existing, err := s.dsRepo.FindByID(ctx, id)
 	if err != nil {
@@ -685,6 +762,34 @@ func (s *DataSourceService) ResolveResourceAncestors(
 
 // ManualSync triggers an immediate sync for a data source
 func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types.SyncLog, error) {
+	var firstLog *types.SyncLog
+	if handled, err := s.fanOutSourceProjects(ctx, dsID, func(memberCtx context.Context, memberID string) error {
+		member, err := s.dsRepo.FindByID(memberCtx, memberID)
+		if err != nil {
+			return err
+		}
+		if sourceProjectRemoved(member) {
+			return nil
+		}
+		if types.SourceSyncExpectedCommitFromContext(ctx) != "" {
+			return fmt.Errorf("use a project's sync endpoint when supplying expected_commit_sha")
+		}
+		log, err := s.ManualSync(memberCtx, memberID)
+		if err != nil && log == nil {
+			now := time.Now()
+			failed := &types.SyncLog{ID: uuid.NewString(), TenantID: member.TenantID, DataSourceID: member.ID,
+				Status: types.SyncLogStatusFailed, StartedAt: now, FinishedAt: &now, ErrorMessage: err.Error()}
+			if writeErr := s.syncLogRepo.Create(memberCtx, failed); writeErr != nil {
+				return errors.Join(err, writeErr)
+			}
+		}
+		if firstLog == nil && log != nil {
+			firstLog = log
+		}
+		return err
+	}); handled || err != nil {
+		return firstLog, err
+	}
 	ds, err := s.GetDataSource(ctx, dsID)
 	if err != nil {
 		return nil, err
@@ -845,6 +950,9 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 // PauseDataSource pauses a data source's scheduled syncs. Source mode also
 // fences active and queued source work before the paused status is persisted.
 func (s *DataSourceService) PauseDataSource(ctx context.Context, id string) error {
+	if handled, err := s.fanOutSourceProjects(ctx, id, s.PauseDataSource); handled || err != nil {
+		return err
+	}
 	ds, err := s.GetDataSource(ctx, id)
 	if err != nil {
 		return err
@@ -886,6 +994,15 @@ func (s *DataSourceService) PauseDataSource(ctx context.Context, id string) erro
 // UnbindDataSource fences all connector work while retaining every currently
 // published source read. There is intentionally no implicit rebind path.
 func (s *DataSourceService) UnbindDataSource(ctx context.Context, id string) (*types.DataSource, error) {
+	if handled, err := s.fanOutSourceProjects(ctx, id, func(memberCtx context.Context, memberID string) error {
+		_, err := s.UnbindDataSource(memberCtx, memberID)
+		return err
+	}); handled || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return s.GetDataSource(ctx, id)
+	}
 	ds, err := s.GetDataSource(ctx, id)
 	if err != nil {
 		return nil, err
@@ -914,6 +1031,15 @@ func (s *DataSourceService) UnbindDataSource(ctx context.Context, id string) (*t
 // ClearSource immediately denies source reads and persists a resumable
 // current-and-history withdrawal before any bounded physical cleanup begins.
 func (s *DataSourceService) ClearSource(ctx context.Context, id string, confirm bool, scope string) (*types.DataSource, error) {
+	if handled, err := s.fanOutSourceProjects(ctx, id, func(memberCtx context.Context, memberID string) error {
+		_, err := s.ClearSource(memberCtx, memberID, confirm, scope)
+		return err
+	}); handled || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return s.GetDataSource(ctx, id)
+	}
 	if !confirm || scope != types.SourceCleanupScopeCurrentAndHistory {
 		return nil, fmt.Errorf("clear-source requires confirm=true and scope=%q", types.SourceCleanupScopeCurrentAndHistory)
 	}
@@ -943,6 +1069,34 @@ func (s *DataSourceService) ClearSource(ctx context.Context, id string, confirm 
 }
 
 func (s *DataSourceService) RetryClearSource(ctx context.Context, id string, operationID string) (*types.DataSource, error) {
+	if members, err := s.sourceProjectMembers(ctx, id); err != nil || len(members) > 0 {
+		if err != nil {
+			return nil, err
+		}
+		memberCtx := context.WithValue(ctx, sourceProjectMemberKey{}, true)
+		matched := false
+		for _, member := range members {
+			if err := s.loadSourceCleanup(memberCtx, member); err != nil {
+				return nil, err
+			}
+			matched = matched || member.SourceCleanup != nil && member.SourceCleanup.ID == operationID
+		}
+		if !matched {
+			return nil, fmt.Errorf("cleanup operation does not belong to this source group")
+		}
+		var failures []error
+		for _, member := range members {
+			if op := member.SourceCleanup; op != nil && op.Status == "failed" && op.Retryable {
+				if _, err := s.RetryClearSource(memberCtx, member.ID, op.ID); err != nil {
+					failures = append(failures, err)
+				}
+			}
+		}
+		if err := errors.Join(failures...); err != nil {
+			return nil, err
+		}
+		return s.GetDataSource(ctx, id)
+	}
 	if operationID == "" {
 		return nil, fmt.Errorf("operation_id is required")
 	}
@@ -985,6 +1139,15 @@ func sourceLifecycleAllowsConnection(ds *types.DataSource) bool {
 
 // ResumeDataSource resumes a paused data source
 func (s *DataSourceService) ResumeDataSource(ctx context.Context, id string) error {
+	if handled, err := s.fanOutSourceProjects(ctx, id, func(memberCtx context.Context, memberID string) error {
+		member, err := s.dsRepo.FindByID(memberCtx, memberID)
+		if err != nil || sourceProjectRemoved(member) {
+			return err
+		}
+		return s.ResumeDataSource(memberCtx, memberID)
+	}); handled || err != nil {
+		return err
+	}
 	ds, err := s.GetDataSource(ctx, id)
 	if err != nil {
 		return err
@@ -1012,6 +1175,9 @@ func (s *DataSourceService) ResumeDataSource(ctx context.Context, id string) err
 
 // GetSyncLogs retrieves sync history for a data source
 func (s *DataSourceService) GetSyncLogs(ctx context.Context, dsID string, limit int, offset int) ([]*types.SyncLog, error) {
+	if logs, handled, err := s.sourceProjectGroupLogs(ctx, dsID, limit, offset); handled || err != nil {
+		return logs, err
+	}
 	logs, err := s.syncLogRepo.FindByDataSource(ctx, dsID, limit, offset)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get sync logs: %v", err)

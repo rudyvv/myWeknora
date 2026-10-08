@@ -33,6 +33,16 @@ func saveSourceRulesVersion(ds *types.DataSource, config *types.DataSourceConfig
 // PreviewSource merges draft settings with stored credentials; preview never
 // persists those settings or publishes any source knowledge.
 func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settings map[string]interface{}) (*types.SourcePreview, error) {
+	if ctx.Value(sourceProjectMemberKey{}) != true && settings != nil {
+		if projects, ok := settings["projects"].([]interface{}); ok && len(projects) > 1 {
+			return s.previewSourceProjects(ctx, id, settings)
+		}
+		configs, err := datasource.SplitSourceProjects(&types.DataSourceConfig{Settings: settings})
+		if err != nil {
+			return nil, err
+		}
+		settings = configs[0].Settings
+	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	ds, err := s.GetDataSource(ctx, id)
@@ -146,7 +156,7 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 			}
 		}
 		previous, publishedErr := s.sourceSnapshots.GetPublished(ctx, ds.TenantID, ds.ID)
-		canPublishEmpty := publishedErr == nil && previous != nil
+		canPublishEmpty := publishedErr == nil && previous != nil && previous.Snapshot != nil && previous.Snapshot.ProjectID == repository.ProjectID
 		pipeline := &preview.Checks[3]
 		pipeline.Ready = supportedOnly && (count > 0 || canPublishEmpty) && count <= resourcePolicy.MaxSelectedFiles && size <= resourcePolicy.MaxSelectedBytes && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
 		pipeline.Message = "source sync requires files within the configured source resource budgets, supported source, template, and text configuration formats, and built-in PostgreSQL indexes; an existing publication may become empty"

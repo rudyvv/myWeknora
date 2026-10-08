@@ -25,6 +25,8 @@ export interface DataSource {
   created_at: string
   updated_at: string
   latest_sync_log?: SyncLog
+  source_projects?: DataSource[]
+  source_project_removed?: boolean
   source_lifecycle?: SourceLifecycle
 }
 
@@ -112,6 +114,7 @@ export interface SyncResultDetail {
 }
 
 export interface SyncLog {
+  source_project_id?: string
   id: string
   data_source_id: string
   status: 'queued' | 'running' | 'success' | 'partial' | 'failed' | 'canceled'
@@ -203,6 +206,7 @@ export function triggerSync(id: string) {
 }
 
 export interface SourcePreview {
+  projects?: SourcePreview[]
   project_id: string
   branch: string
   commit_sha: string
@@ -244,8 +248,8 @@ export async function retrySourceKnowledgeClear(id: string, operationId: string)
   return (response.data ?? response) as DataSource
 }
 
-export function getSyncLogs(id: string, limit = 20, offset = 0) {
-  return get(`/api/v1/datasource/${id}/logs?limit=${limit}&offset=${offset}`)
+export function getSyncLogs(id: string, limit = 20, offset = 0, projectOnly = false) {
+  return get(`/api/v1/datasource/${id}/logs?limit=${limit}&offset=${offset}${projectOnly ? '&project_only=true' : ''}`)
 }
 
 // ----------------------------------------------------------------------------

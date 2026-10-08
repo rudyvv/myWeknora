@@ -26,7 +26,7 @@ async function settle() {
   }
 }
 
-async function fixture({ create = false, twoProjects = false, delayedPreview = false, ready = false, previewFails = false, previewError = 'Repository unavailable' } = {}) {
+async function fixture({ create = false, twoProjects = false, delayedPreview = false, ready = false, previewFails = false, previewError = 'Repository unavailable', blockedProject = '' } = {}) {
   const calls: Array<{ method: string; args: any[] }> = []
   let releasePreview: (() => void) | undefined
   let storedCredentials = { base_url: 'https://gitlab.example.com', access_token: 'token-A' }
@@ -41,9 +41,10 @@ async function fixture({ create = false, twoProjects = false, delayedPreview = f
       record('previewSource', id, settings)
       if (delayedPreview) await new Promise<void>(resolve => { releasePreview = resolve })
       if (previewFails) throw new Error(previewError)
-      return { branch: settings.projects[0].ref || 'release/default', commit_sha: '1111111111111111111111111111111111111111', rules_version: 'v1:fixture', can_sync: ready,
+      const previews = settings.projects.map((project: any) => ({ project_id: project.project_id, branch: project.ref || 'release/default', commit_sha: '1111111111111111111111111111111111111111', rules_version: 'v1:fixture', can_sync: ready && project.project_id !== blockedProject,
         files: [{ path: 'dist/Business.java', status: 'included', reason: 'selected', generated: false, size: 20 }],
-        checks: [{ name: 'parser', ready, message: 'Source parser is unavailable' }], warnings: [] }
+        checks: [{ name: 'parser', ready: ready && project.project_id !== blockedProject, message: 'Source parser is unavailable' }], warnings: [] }))
+      return previews.length > 1 ? { can_sync: previews.some((preview: any) => preview.can_sync), projects: previews } : previews[0]
     },
     async validateCredentials(type: string, credentials: any) { record('validateCredentials', type, credentials) },
     async putDataSourceCredentials(id: string, credentials: any) {
@@ -105,18 +106,15 @@ async function fixture({ create = false, twoProjects = false, delayedPreview = f
   } }
 }
 
-test('Next accepts blank paths as the whole repository and retains exclusions', async () => {
+test('Next accepts multiple source projects with separate exclusions and blank defaults', async () => {
   const f = await fixture({ twoProjects: true, ready: true })
   try {
     await f.click('datasource.next')
     await f.click('datasource.gitlab.sourceMode')
-    await f.click('datasource.next')
-    assert.ok(document.body.textContent?.includes('datasource.gitlab.sourceSelectionRequired'))
-    assert.ok(document.querySelector('.source-preview'), 'resource selection remains visible')
     const projects = document.querySelectorAll('.gitlab-project-row')
     assert.equal(projects.length, 2)
-    projects[1].querySelector<HTMLButtonElement>('button')!.click()
-    await settle()
+    assert.ok(projects[0].querySelector('textarea[placeholder="datasource.gitlab.excludePathsHint"]'), 'exclusions are inside each project')
+    assert.ok(projects[1].querySelector('textarea[placeholder="datasource.gitlab.excludePathsHint"]'))
     await f.fill('datasource.gitlab.excludePathsHint', 'vendor\ndist')
     await f.click('datasource.next')
     assert.equal(document.querySelector('.source-preview'), null, 'editor advances to sync settings')
@@ -124,7 +122,8 @@ test('Next accepts blank paths as the whole repository and retains exclusions', 
     assert.deepEqual(f.calls.map(call => call.method), ['previewSource'])
     assert.deepEqual(f.calls[0].args[1].projects[0].paths, [])
     assert.equal(f.calls[0].args[1].projects[0].ref, '', 'blank branch requests the GitLab default branch')
-    assert.deepEqual(f.calls[0].args[1].exclude_paths, ['vendor', 'dist'])
+    assert.deepEqual(f.calls[0].args[1].projects[0].exclude_paths, ['vendor', 'dist'])
+    assert.deepEqual(f.calls[0].args[1].projects[1].exclude_paths, [])
     assert.ok(document.body.textContent?.includes('datasource.gitlab.checkPassed'))
     assert.ok(document.body.textContent?.includes('datasource.gitlab.checkResolvedBranch'))
     assert.equal(document.querySelector('details')?.open, false, 'technical details are collapsed')
@@ -168,7 +167,7 @@ test('Next blocks an unready source with a summary and collapsed details without
     assert.ok(document.body.textContent?.includes('1111111111111111111111111111111111111111'))
     assert.ok(document.body.textContent?.includes('dist/Business.java'))
     assert.ok(document.body.textContent?.includes('Source parser is unavailable'))
-    assert.deepEqual(f.calls, [{ method: 'previewSource', args: ['source-one', { content_mode: 'source', projects: [{ project_id: '123', ref: 'main', paths: ['src'] }], exclude_paths: ['vendor', 'src/generated'] }] }])
+    assert.deepEqual(f.calls, [{ method: 'previewSource', args: ['source-one', { content_mode: 'source', projects: [{ project_id: '123', ref: 'main', paths: ['src'], exclude_paths: ['vendor', 'src/generated'] }] }] }])
     assert.equal(f.storedCredentials().access_token, 'token-A')
     await f.fill('datasource.gitlab.refPlaceholder', 'release')
     assert.equal(document.querySelector('.source-preview__files'), null, 'changing a draft invalidates the displayed preview')
@@ -261,5 +260,23 @@ test('whole repository resource limits show an actionable message and do not adv
     assert.ok(document.body.textContent?.includes('datasource.gitlab.checkResourceBudget'))
     assert.deepEqual(f.calls[0].args[1].projects[0].paths, [])
     assert.equal(f.calls.filter(call => call.method === 'updateDataSource' || call.method === 'triggerSync').length, 0)
+  } finally { await f.close() }
+})
+
+
+test('a blocked project shows its own check while other ready projects can advance', async () => {
+  const f = await fixture({ twoProjects: true, ready: true, blockedProject: '456' })
+  try {
+    await f.click('datasource.next')
+    await f.click('datasource.gitlab.sourceMode')
+    await f.click('datasource.next')
+    assert.equal(document.querySelector('.source-preview'), null, 'ready projects can proceed to independent sync')
+    assert.ok(document.body.textContent?.includes('datasource.gitlab.partialCheckHint'))
+    assert.equal(document.querySelectorAll('.source-check-result').length, 2)
+    assert.equal(document.querySelectorAll('.source-check-result--blocked').length, 1)
+    assert.ok(document.body.textContent?.includes('123'))
+    assert.ok(document.body.textContent?.includes('456'))
+    assert.ok(document.body.textContent?.includes('datasource.gitlab.checkPassed'))
+    assert.ok(document.body.textContent?.includes('datasource.gitlab.checkBlocked'))
   } finally { await f.close() }
 })
