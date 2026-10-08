@@ -247,10 +247,6 @@ async function loadSourcePreview() {
     sourcePreviewError.value = t('datasource.gitlab.sourceSelectionRequired')
     return false
   }
-  if (!gitlabProjects.value[0].pathsText.trim()) {
-    sourcePreviewError.value = t('datasource.gitlab.sourcePathsRequired')
-    return false
-  }
   sourcePreviewLoading.value = true
   const generation = ++sourcePreviewGeneration
   sourcePreviewError.value = ''
@@ -277,7 +273,11 @@ async function loadSourcePreview() {
       return result.can_sync
     }
   } catch (e: any) {
-    if (generation === sourcePreviewGeneration && visible.value) sourcePreviewError.value = e?.message || e?.error || t('datasource.gitlab.previewFailed')
+    if (generation === sourcePreviewGeneration && visible.value) {
+      const message = e?.message || e?.error || t('datasource.gitlab.previewFailed')
+      sourcePreviewError.value = String(message).includes('source resource budget exceeded')
+        ? t('datasource.gitlab.checkResourceBudget') : message
+    }
   } finally { sourcePreviewLoading.value = false }
   return false
 }
@@ -1674,7 +1674,7 @@ const drawerConfirmText = computed(() => {
             <t-input v-model="project.project_id" :placeholder="t('datasource.gitlab.projectIdPlaceholder')" />
             <label class="form-label" :class="{ required: isSourceMode }">{{ t('datasource.gitlab.ref') }}</label>
             <t-input v-model="project.ref" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourceBranchPlaceholder' : 'datasource.gitlab.refPlaceholder')" />
-            <label class="form-label" :class="{ required: isSourceMode }">{{ t('datasource.gitlab.paths') }}</label>
+            <label class="form-label">{{ t('datasource.gitlab.paths') }}</label>
             <t-textarea v-model="project.pathsText" :placeholder="t(isSourceMode ? 'datasource.gitlab.sourcePathsPlaceholder' : 'datasource.gitlab.pathsPlaceholder')" :autosize="{ minRows: 2, maxRows: 5 }" />
           </div>
           <t-button v-if="!isSourceMode || !gitlabProjects.length" variant="outline" @click="addGitLabProject"><template #icon><t-icon name="add" /></template>{{ t('datasource.gitlab.addProject') }}</t-button>

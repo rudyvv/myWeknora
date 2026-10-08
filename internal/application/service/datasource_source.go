@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -94,6 +95,9 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, source.ErrResourceLimitExceeded) {
+			return nil, fmt.Errorf("%w; narrow the included directories or add exclusions before retrying", err)
+		}
 		return nil, err
 	}
 	for index := range files {
@@ -144,8 +148,8 @@ func (s *DataSourceService) PreviewSource(ctx context.Context, id string, settin
 		previous, publishedErr := s.sourceSnapshots.GetPublished(ctx, ds.TenantID, ds.ID)
 		canPublishEmpty := publishedErr == nil && previous != nil
 		pipeline := &preview.Checks[3]
-		pipeline.Ready = len(rules.Projects[0].Paths) > 0 && supportedOnly && (count > 0 || canPublishEmpty) && count <= resourcePolicy.MaxSelectedFiles && size <= resourcePolicy.MaxSelectedBytes && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
-		pipeline.Message = "source sync requires explicit paths, files within the configured source resource budgets, supported source, template, and text configuration formats, and built-in PostgreSQL indexes; an existing publication may become empty"
+		pipeline.Ready = supportedOnly && (count > 0 || canPublishEmpty) && count <= resourcePolicy.MaxSelectedFiles && size <= resourcePolicy.MaxSelectedBytes && (kb.VectorStoreID == nil || *kb.VectorStoreID == "") && s.sourceSnapshots.CheckReady(ctx) == nil
+		pipeline.Message = "source sync requires files within the configured source resource budgets, supported source, template, and text configuration formats, and built-in PostgreSQL indexes; an existing publication may become empty"
 		preview.CanSync = true
 		for _, check := range preview.Checks {
 			preview.CanSync = preview.CanSync && check.Ready

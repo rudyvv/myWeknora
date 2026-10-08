@@ -45,6 +45,75 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
+func TestSourceWholeRepositorySyncIncludesRootAndNestedFilesWithExclusions(t *testing.T) {
+	f := newSourceFixture(t, true, []string{}, map[string][]byte{
+		"Root.java":          []byte("class Root { int wholeRepositoryToken() { return 1; } }\n"),
+		"vendor/ignored.bin": {0, 1, 2},
+	})
+	config, err := f.ds.ParseConfig()
+	require.NoError(t, err)
+	config.Settings["exclude_paths"] = []string{"vendor"}
+	encoded, err := json.Marshal(config)
+	require.NoError(t, err)
+	f.ds.Config = types.JSON(encoded)
+	require.NoError(t, f.service.dsRepo.Update(f.ctx, f.ds))
+	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.NoError(t, err)
+	require.True(t, preview.CanSync, "blank paths select the repository and still run all readiness checks")
+	statuses := map[string]string{}
+	for _, file := range preview.Files {
+		statuses[file.Path] = file.Status
+	}
+	require.Equal(t, map[string]string{"Root.java": "included", "README.md": "included", "src/Service.java": "included", "vendor/ignored.bin": "excluded"}, statuses)
+	syncSourceFixture(t, f)
+	publication, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	members := latestIncrementalRun(t, f).Members
+	require.Equal(t, f.sha, publication.Snapshot.CommitSHA)
+	paths := []string{}
+	for _, member := range members {
+		if member.Status == "parsed" {
+			paths = append(paths, member.Path)
+			view, readErr := f.knowledge.GetSourceFile(f.ctx, member.SourceFileID)
+			require.NoError(t, readErr)
+			require.Equal(t, f.sha, view.CommitSHA)
+		} else {
+			require.Equal(t, "vendor/ignored.bin", member.Path)
+			require.Equal(t, "excluded", member.Status)
+			require.Empty(t, member.SourceFileID, "excluded files have manifest entries but no indexed source identity")
+		}
+	}
+	require.ElementsMatch(t, []string{"Root.java", "README.md", "src/Service.java"}, paths)
+	hits, err := f.kbs.HybridSearch(f.ctx, f.kb.ID, types.SearchParams{QueryText: "wholeRepositoryToken", MatchCount: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	require.Contains(t, hits[0].Content, "wholeRepositoryToken")
+}
+
+func TestSourceWholeRepositoryBudgetsBlockWithoutReplacingPublication(t *testing.T) {
+	f := newSourceFixture(t, true, []string{})
+	syncSourceFixture(t, f)
+	previous, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	policy := f.service.sourceResources.Policy()
+	policy.MaxSelectedFiles = 1 // Repository contains README.md and src/Service.java.
+	f.service.sourceResources, err = source.NewResourceController(policy)
+	require.NoError(t, err)
+	_, err = f.service.PreviewSource(f.ctx, f.ds.ID, nil)
+	require.ErrorIs(t, err, source.ErrResourceLimitExceeded)
+	log, err := f.service.ManualSync(f.ctx, f.ds.ID)
+	require.NoError(t, err)
+	payload, err := json.Marshal(types.DataSourceSyncPayload{DataSourceID: f.ds.ID, TenantID: f.ds.TenantID, SyncLogID: log.ID, Trigger: "manual"})
+	require.NoError(t, err)
+	require.ErrorContains(t, f.service.ProcessSync(f.ctx, asynq.NewTask(types.TypeDataSourceSync, payload)), "source resource budget exceeded")
+	finished, err := f.service.GetSyncLog(f.ctx, log.ID)
+	require.NoError(t, err)
+	require.NotEqual(t, types.SyncLogStatusSuccess, finished.Status)
+	current, err := f.service.sourceSnapshots.GetPublished(f.ctx, f.ds.TenantID, f.ds.ID)
+	require.NoError(t, err)
+	require.Equal(t, previous.Snapshot.ID, current.Snapshot.ID)
+}
+
 func TestSourceFirstJavaSnapshotIsPublishedAndSearchable(t *testing.T) {
 	f := newJavaSourceFixture(t)
 	preview, err := f.service.PreviewSource(f.ctx, f.ds.ID, nil)

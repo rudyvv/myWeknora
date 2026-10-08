@@ -33,12 +33,9 @@ func (s *DataSourceService) checkSourceSyncReady(ctx context.Context, kb *types.
 	if kb.VectorStoreID != nil && *kb.VectorStoreID != "" {
 		return source.IndexProfile{}, fmt.Errorf("initial source sync requires the built-in PostgreSQL index store")
 	}
-	rules, _, err := datasource.ParseSourceSettings(config)
+	_, _, err := datasource.ParseSourceSettings(config)
 	if err != nil {
 		return source.IndexProfile{}, err
-	}
-	if len(rules.Projects[0].Paths) == 0 {
-		return source.IndexProfile{}, fmt.Errorf("initial source sync requires explicitly selected paths")
 	}
 	if !s.sourceIndexBackendReady(ctx, kb) {
 		return source.IndexProfile{}, fmt.Errorf("source indexes are not ready")

@@ -26,7 +26,7 @@ async function settle() {
   }
 }
 
-async function fixture({ create = false, twoProjects = false, delayedPreview = false, ready = false, previewFails = false } = {}) {
+async function fixture({ create = false, twoProjects = false, delayedPreview = false, ready = false, previewFails = false, previewError = 'Repository unavailable' } = {}) {
   const calls: Array<{ method: string; args: any[] }> = []
   let releasePreview: (() => void) | undefined
   let storedCredentials = { base_url: 'https://gitlab.example.com', access_token: 'token-A' }
@@ -40,7 +40,7 @@ async function fixture({ create = false, twoProjects = false, delayedPreview = f
     async previewSource(id: string, settings: any) {
       record('previewSource', id, settings)
       if (delayedPreview) await new Promise<void>(resolve => { releasePreview = resolve })
-      if (previewFails) throw new Error('Repository unavailable')
+      if (previewFails) throw new Error(previewError)
       return { commit_sha: '1111111111111111111111111111111111111111', rules_version: 'v1:fixture', can_sync: ready,
         files: [{ path: 'dist/Business.java', status: 'included', reason: 'selected', generated: false, size: 20 }],
         checks: [{ name: 'parser', ready, message: 'Source parser is unavailable' }], warnings: [] }
@@ -105,7 +105,7 @@ async function fixture({ create = false, twoProjects = false, delayedPreview = f
   } }
 }
 
-test('Next checks one project, branch and paths before automatically checking source readiness', async () => {
+test('Next accepts blank paths as the whole repository and retains exclusions', async () => {
   const f = await fixture({ twoProjects: true, ready: true })
   try {
     await f.click('datasource.next')
@@ -118,14 +118,13 @@ test('Next checks one project, branch and paths before automatically checking so
     projects[1].querySelector<HTMLButtonElement>('button')!.click()
     await settle()
     await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
-    await f.click('datasource.next')
-    assert.ok(document.body.textContent?.includes('datasource.gitlab.sourcePathsRequired'))
-    assert.deepEqual(f.calls, [], 'empty paths do not fetch the repository')
-    await f.fill('datasource.gitlab.sourcePathsPlaceholder', 'src')
+    await f.fill('datasource.gitlab.excludePathsHint', 'vendor\ndist')
     await f.click('datasource.next')
     assert.equal(document.querySelector('.source-preview'), null, 'editor advances to sync settings')
     assert.ok(document.body.textContent?.includes('datasource.step.strategy'))
     assert.deepEqual(f.calls.map(call => call.method), ['previewSource'])
+    assert.deepEqual(f.calls[0].args[1].projects[0].paths, [])
+    assert.deepEqual(f.calls[0].args[1].exclude_paths, ['vendor', 'dist'])
     assert.ok(document.body.textContent?.includes('datasource.gitlab.checkPassed'))
     assert.equal(document.querySelector('details')?.open, false, 'technical details are collapsed')
   } finally { await f.close() }
@@ -246,6 +245,20 @@ test('a failed repository check remains on range selection and can be retried', 
     assert.ok(document.body.textContent?.includes('Repository unavailable'))
     await f.click('datasource.next')
     assert.equal(f.calls.filter(call => call.method === 'previewSource').length, 2)
+    assert.equal(f.calls.filter(call => call.method === 'updateDataSource' || call.method === 'triggerSync').length, 0)
+  } finally { await f.close() }
+})
+
+test('whole repository resource limits show an actionable message and do not advance', async () => {
+  const f = await fixture({ previewFails: true, previewError: 'source resource budget exceeded; narrow the included directories or add exclusions before retrying' })
+  try {
+    await f.click('datasource.next')
+    await f.click('datasource.gitlab.sourceMode')
+    await f.fill('datasource.gitlab.sourceBranchPlaceholder', 'main')
+    await f.click('datasource.next')
+    assert.ok(document.querySelector('.gitlab-project-list'))
+    assert.ok(document.body.textContent?.includes('datasource.gitlab.checkResourceBudget'))
+    assert.deepEqual(f.calls[0].args[1].projects[0].paths, [])
     assert.equal(f.calls.filter(call => call.method === 'updateDataSource' || call.method === 'triggerSync').length, 0)
   } finally { await f.close() }
 })
