@@ -538,7 +538,7 @@
         <ChatRequestInfoButton :session="session" :session-id="sessionId" />
       </div>
       <div v-if="isConversationDone && getReferencesForDrawer().length" class="answer-toolbar">
-        <t-button size="small" variant="text" @click="openReferencesDrawer()">
+        <t-button size="small" variant="text" class="answer-toolbar__references" @click="openReferencesDrawer()">
           {{ t('chat.referencesDrawerTitle') }}
         </t-button>
       </div>

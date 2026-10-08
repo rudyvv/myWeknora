@@ -87,6 +87,13 @@
       }
     }
   }
+  // Reference labels need their content width; the other actions are icons.
+  :deep(.t-button.answer-toolbar__references) {
+    width: auto;
+    flex-shrink: 0;
+    padding: 0 7px;
+    white-space: nowrap;
+  }
 }
 
 .answer-toolbar__artifact {
