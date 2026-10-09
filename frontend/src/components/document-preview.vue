@@ -29,6 +29,7 @@ import {
 
 
 const VueOfficePptx = defineAsyncComponent(() => import('@vue-office/pptx'));
+const PdfPreview = defineAsyncComponent(() => import('./PdfPreview.vue'));
 
 const { t } = useI18n();
 
@@ -58,6 +59,7 @@ const excelHtml = ref('');
 const mermaidSvg = ref('');
 const htmlViewMode = ref<'render' | 'source'>('render');
 const pptxData = shallowRef<ArrayBuffer | null>(null);
+const pdfBlob = shallowRef<Blob | null>(null);
 let pptxSlideCount = 0;
 function onPptxRendered(result: unknown) {
   if (!isCompletePptxRender(result, pptxSlideCount)) error.value = t('preview.loadFailed');
@@ -402,7 +404,10 @@ async function loadPreview() {
     await nextTick();
 
     switch (kind) {
-      case 'pdf':
+      case 'pdf': {
+        pdfBlob.value = blob;
+        break;
+      }
       case 'image':
       case 'audio':
       case 'video': {
@@ -465,6 +470,8 @@ function cleanup() {
   mermaidSvg.value = '';
   htmlViewMode.value = 'render';
   pptxData.value = null;
+  pdfBlob.value = null;
+  previewContent.value = null;
   pptxSlideCount = 0;
   imageNaturalWidth.value = 0;
   imageNaturalHeight.value = 0;
@@ -538,8 +545,8 @@ onUnmounted(() => {
     </div>
 
     <!-- PDF -->
-    <div v-else-if="previewType === 'pdf' && blobUrl" class="preview-pdf">
-      <iframe ref="previewContent" tabindex="0" :title="fileName" :src="blobUrl" class="pdf-iframe" @load="onPreviewFrameLoad" />
+    <div v-else-if="previewType === 'pdf' && pdfBlob" class="preview-pdf">
+      <PdfPreview :blob="pdfBlob" :file-name="fileName" @ready="previewContent = $event" @error="error = $event.message" />
     </div>
 
     <!-- HTML: artifacts render in a unique-origin iframe; other sources stay as source. -->
@@ -856,12 +863,6 @@ onUnmounted(() => {
   width: 100%;
   height: @preview-max-h;
   min-height: 500px;
-  .pdf-iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-    border-radius: @border-radius;
-  }
 }
 
 // ── HTML ──

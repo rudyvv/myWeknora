@@ -7,7 +7,8 @@ import 'katex/dist/katex.min.css';
 import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
 import mermaid from "mermaid";
-import SourceCodeView from './SourceCodeView.vue';
+import SourceDocumentPreview from './SourceDocumentPreview.vue';
+import { renderSourceChunk } from '@/utils/sourceChunkPreview';
 import { onMounted, ref, nextTick, onUnmounted, watch, computed } from "vue";
 import {
   downKnowledgeDetails, deleteGeneratedQuestion, getChunkByIdOnly, previewKnowledgeFile,
@@ -733,7 +734,9 @@ const processedChunks = computed(() => {
   return (props.details?.md || []).map((item: any, index: number) => {
     return {
       original: item,
-      processedContent: processMarkdown(item.content),
+      processedContent: props.details?.type === 'source'
+        ? renderSourceChunk(item.content, resolveFilePreviewExt(props.details?.title, props.details?.file_type))
+        : processMarkdown(item.content),
       questions: getGeneratedQuestions(item),
       meta: getChunkMeta(item),
       hasParent: hasParentChunk(item),
@@ -743,6 +746,7 @@ const processedChunks = computed(() => {
 });
 
 const canPreview = (): boolean => {
+  if (props.details?.type === 'source') return true;
   if (props.details?.type !== 'file') return false;
   const ft = resolveFilePreviewExt(props.details?.title, props.details?.file_type);
   if (!ft) return false;
@@ -750,7 +754,7 @@ const canPreview = (): boolean => {
   return isKnownPreviewableExt(ft);
 };
 
-// 当文档详情加载完成时，file 类型自动切换到「预览」；音频类型使用 merged + 播放器
+// 文件和源码默认展示原文；音频使用 merged + 播放器。
 watch(() => props.details?.id, (newId) => {
   // 清理旧音频
   if (audioBlobUrl.value) {
@@ -761,7 +765,7 @@ watch(() => props.details?.id, (newId) => {
   if (isAudioFile(props.details?.file_type)) {
     viewMode.value = 'merged'; // 音频默认全文视图，播放器已内嵌
     loadAudioPreview();
-  } else if (props.details?.type === 'file' && canPreview()) {
+  } else if (canPreview()) {
     viewMode.value = 'preview';
   } else {
     viewMode.value = 'merged';
@@ -967,6 +971,8 @@ const channelLabelMap: Record<string, string> = {
   browser_extension: 'knowledgeBase.channelBrowserExtension',
   wechat: 'knowledgeBase.channelWechat',
   wecom: 'knowledgeBase.channelWecom',
+  wecom_drive: 'datasource.connector.wecom_drive_rpa',
+  wecom_drive_rpa: 'datasource.connector.wecom_drive_rpa',
   feishu: 'knowledgeBase.channelFeishu',
   gitlab: 'knowledgeBase.channelGitLab',
   // Drive (云盘) connectors get their own channel so Drive docs show
@@ -1043,18 +1049,8 @@ const getContentLabel = () => {
   }
 };
 
-// 获取时间标签
-const getTimeLabel = () => {
-  switch (props.details.type) {
-    case 'url':
-      return t('knowledgeBase.importTime');
-    case 'manual':
-      return t('knowledgeBase.createTime');
-    case 'file':
-    default:
-      return t('knowledgeBase.uploadTime');
-  }
-};
+// The details hook formats updated_at for every knowledge type.
+const getTimeLabel = () => t('knowledgeBase.columnUpdatedAt');
 
 // 获取Chunk样式类
 const getChunkClass = (index: number) => {
@@ -1837,7 +1833,7 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
                 {{ $t('knowledgeBase.chunkCount', { count: details.total }) }}
               </span>
             </div>
-            <div v-if="details.type !== 'source'" class="view-mode-buttons">
+            <div class="view-mode-buttons">
               <t-button v-if="canPreview()" size="small" :variant="viewMode === 'preview' ? 'base' : 'outline'"
                 :theme="viewMode === 'preview' ? 'primary' : 'default'" @click="viewMode = 'preview'"
                 class="view-mode-btn">
@@ -1868,7 +1864,8 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
           </div>
 
           <!-- 合并视图 -->
-          <SourceCodeView v-if="details.type === 'source'" :knowledge-id="details.id" :file-version-id="details.metadata?.source_file_version_id" />
+          <SourceDocumentPreview v-if="details.type === 'source' && viewMode === 'preview'"
+            :knowledge-id="details.id" :file-version-id="details.metadata?.source_file_version_id" />
           <div v-else-if="viewMode === 'merged'">
             <div v-if="isChunkPageTransition" class="chunk-page-loading">
               <t-loading size="small" />
@@ -2151,7 +2148,7 @@ const handleChunkPageChange = (pageInfo: { current: number }) => {
               @change="handleChunkPageChange" />
           </div>
 
-          <div v-else-if="viewMode === 'preview'">
+          <div v-else-if="viewMode === 'preview' && details.type !== 'source'">
             <DocumentPreview :knowledgeId="details.id" :fileType="details.file_type" :fileName="details.title"
               :active="viewMode === 'preview'" />
           </div>
