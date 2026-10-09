@@ -40,6 +40,7 @@ function loadComponent(path: string, stubChildComponents = false): any {
     if (name === '@/api/wiki') return { readSourceWikiEvidence() { throw new Error('unexpected Wiki evidence reader') } }
     if (name === '@/api/knowledge-base') return { async getSourceFile() { return { data: { file_version_id: 'version-one', path: 'src/Service.java', content: 'class Service {}', commit_sha: 'a'.repeat(40), quality: 'structural', symbols: [] } } } }
     if (name === '@/utils/sourceQuality') return loadTypeScriptModule(resolve(srcRoot, 'utils/sourceQuality.ts'))
+    if (name.startsWith('@/')) return require(resolve(srcRoot, name.slice(2)))
     return require(name)
   }, module, module.exports)
   return module.exports.default
