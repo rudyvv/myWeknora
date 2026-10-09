@@ -166,7 +166,8 @@ class ScriptHTTPContract(unittest.TestCase):
                '  method() { return "' + '预约😀' * 1000 + '"; }\r\n}\r\n').encode()
         status, result = self.parse('web/large.ts', 'typescript', raw)
         self.assertEqual(status, 200, result)
-        self.assertEqual(result['quality'], 'structural')
+        self.assertEqual(result['quality'], 'partial')
+        self.assertTrue(any(d['code'] == 'oversized_unstructured_region' for d in result['diagnostics']))
         self.assertEqual(''.join(c['content'] for c in result['chunks']).encode(), raw)
         self.assertLessEqual(max(len(c['content'].encode()) for c in result['chunks']), 128)
         contexts = [context for chunk in result['chunks'] for context in chunk['context']]

@@ -185,6 +185,9 @@ class PythonHTTPContract(unittest.TestCase):
         status, result = self.parse('pkg/multiline.py', raw)
         self.assertEqual(status, 200, result)
         self.assertEqual(result['quality'], 'structural')
+        literal_statement = raw[:raw.index(b'@trace')].decode().strip()
+        self.assertTrue(any(literal_statement in c['content'] for c in result['chunks']),
+                        'a string statement that fits the budget must remain whole')
         self.assertFalse(any(symbol['kind'] == 'import' for symbol in result['symbols']))
         self.assertFalse(any(symbol['name'] == 'FakeFramework' for symbol in result['symbols']))
         actual = next(symbol for symbol in result['symbols'] if symbol['name'] == 'actual_function')

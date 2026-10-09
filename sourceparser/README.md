@@ -2,6 +2,42 @@
 
 This worker accepts original UTF-8 content, SHA-256, a logical repository path and a byte budget. It receives no GitLab credentials or host file paths. Go fetches a fixed Git commit without checking out or executing the repository, verifies parser ranges against the original bytes, tokenizes the derived index text, stages both indexes on the built-in PostgreSQL database and atomically publishes the complete source manifest.
 
+## Semantic chunk boundaries
+
+`chunking.py` uses the locked Tree-sitter grammar's complete declarations,
+members and statements as candidate boundaries. It packs adjacent original
+ranges within the requested byte budget; keywords, assignment prefixes and
+closing delimiters are not standalone units. A complete named signature may
+be a boundary when it and the first body unit cannot fit together. Forced
+cuts through long indivisible source units are marked `partial`, including
+strings and comments, and preserve every UTF-8 byte. Source contexts remain
+separate, verifiable signatures; named constructor/call object bindings also
+carry their assignment signature.
+
+MyBatis statements retain independent ranges, with small whitespace gaps and
+the mapper closing tag attached when the byte budget permits. Normal Vue
+wrappers attach to their own body region when they fit, while external,
+unknown-preprocessor and empty wrappers retain their explicit evidence.
+Non-script Vue bodies and admitted text files prefer complete lines; shell
+and Docker backslash continuations do not offer a preferred cut. Text
+fallback remains explicit: this does not add structural grammars for JSON,
+CSS, SQL or template languages. `.env` is accepted as a literal filename as
+well as the existing `.env` suffix route.
+
+The aggregate parser fingerprint includes the semantic, XML and text chunk
+rules. Deploy the rebuilt worker and sync the source again to create a new
+candidate snapshot and indexes; existing publications and retained evidence
+are not edited in place. Go still counts complete model input tokens and
+reduces the worker byte budget when necessary.
+
+Regression tests cover all admitted suffixes, small and oversized declarations,
+Vue regions, MyBatis gaps, long lexical units, BOM/CRLF, Unicode coordinates,
+and seeded byte-budget properties. Use the deployment's `init: true` (or
+`docker run --init`) when running the process-tree cleanup contract tests.
+The opt-in Go check `TestSemanticParserWithRealTokenBudget` additionally takes
+`WEKNORA_SOURCE_PARSER_TEST_URL` and exercises the real HTTP worker through
+the production token-budget adapter, without contacting an embedding provider.
+
 ## Deployment
 
 Use the normal PostgreSQL/ParadeDB deployment and the opt-in overlay:
@@ -18,7 +54,7 @@ In knowledge-base data sources, choose GitLab source mode, one project and branc
 
 Start manual sync, open its run details, and follow fetching → parsing → indexing → published. The manifest includes excluded members, stable file identities and immutable file-version identities. Published members open a read-only code view with symbols, line numbers and a same-SHA GitLab link. Search a known method through either keyword or vector retrieval. Tags, description and custom metadata stay manageable; ordinary body/chunk edits, enable toggles, reparse, delete and cross-KB transfer are rejected.
 
-`GET /api/v1/knowledge/:id/source?version_id=...` reads a published file after existing KB authorization and verifies its stored checksum. An explicit version must match current publication; it never silently substitutes another version. Retained source evidence is readable only through its authorized Wiki page/revision owner, as described below; this general endpoint does not grant arbitrary historical versions. Raw download preserves the original bytes. Chunk `chunk_metadata.source` carries original byte/line ranges, separate contexts, symbols, quality, snapshot/version and GitLab URL. Vue chunk evidence additionally identifies its template/script/style/custom region; wrapper tags and gaps remain separate exact source chunks, not a fabricated combined span. External `src` values stay literal and unresolved in stored evidence, where `unchecked` means no authorization-scoped read has happened yet. A file read resolves one only when the target is selected in the same snapshot and is also allowed by the caller's current combined file/tag scope; absent and out-of-scope targets both return the generic `unavailable` status without a resolved path.
+`GET /api/v1/knowledge/:id/source?version_id=...` reads a published file after existing KB authorization and verifies its stored checksum. An explicit version must match current publication; it never silently substitutes another version. Retained source evidence is readable only through its authorized Wiki page/revision owner, as described below; this general endpoint does not grant arbitrary historical versions. Raw download preserves the original bytes. Chunk `chunk_metadata.source` carries original byte/line ranges, separate contexts, symbols, quality, snapshot/version and GitLab URL. Vue chunk evidence additionally identifies its template/script/style/custom region; normal wrappers and short whitespace gaps attach to their own region chunks; degraded or empty wrappers retain separate exact source evidence. External `src` values stay literal and unresolved in stored evidence, where `unchecked` means no authorization-scoped read has happened yet. A file read resolves one only when the target is selected in the same snapshot and is also allowed by the caller's current combined file/tag scope; absent and out-of-scope targets both return the generic `unavailable` status without a resolved path.
 
 GitLab source sync requires `embedding_parameters.tokenizer` and `embedding_parameters.max_input_tokens` on the selected embedding model. Configure the exact supported local encoding (`cl100k_base`, `o200k_base`, `p50k_base`, `p50k_edit` or `r50k_base`) and that model's documented hard per-input limit; there is no guess based on the provider name. Missing or unsupported profiles fail before a candidate snapshot is created, leave the previous publication readable and do not change ordinary document embedding. Each chunk separately counts its path/signature/context header, body and complete derived `SourceIndexText` with the configured encoding. The usable ceiling is the smaller of the model limit, 2,000 tokens and any provider-side truncation cap, minus a 16-token safety margin; parse artifacts include the profile identity so changes re-chunk on the next sync. The mature parser worker budgets bytes, while Go verifies actual token counts, first omits range-bearing trace context and nonessential symbols as needed to fit a header, then reduces the body byte budget; a required path header that still exceeds the limit fails the run without replacing the prior publication. Text fallbacks use exact UTF-8 source slices, prefer line boundaries where possible, and mark quality as `text_fallback`; structural semantics are intentionally not inferred. Parser HTTP is still bounded by its existing file/request limits.
 

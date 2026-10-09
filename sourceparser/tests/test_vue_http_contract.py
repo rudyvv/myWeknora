@@ -188,7 +188,7 @@ class VueHTTPContract(unittest.TestCase):
             self.assertEqual(raw[signature_range['start_byte']:signature_range['end_byte']].decode(),
                              symbol['signature'], symbol['qualified_name'])
         self.assertTrue(any((chunk.get('region') or {}).get('kind') == 'style' for chunk in parsed['chunks']))
-        self.assertTrue(any(chunk.get('region') is None and '<template' in chunk['content']
+        self.assertTrue(any((chunk.get('region') or {}).get('kind') == 'template' and '<template' in chunk['content']
                             for chunk in parsed['chunks']))
 
     def test_preprocessor_quality_is_scoped_to_block_kind(self):
@@ -600,7 +600,7 @@ class VueHTTPContract(unittest.TestCase):
                 self.assertEqual(status, 200, parsed)
                 self.assertEqual(''.join(chunk['content'] for chunk in parsed['chunks']).encode(), raw)
                 wrappers = [chunk for chunk in parsed['chunks'] if opening in chunk['content'] or closing in chunk['content']]
-                self.assertEqual([chunk['content'] for chunk in wrappers], [opening, closing])
+                self.assertEqual([chunk['content'].rstrip('\r\n') for chunk in wrappers], [opening, closing])
                 for chunk in wrappers:
                     self.assertEqual(chunk['quality'], 'unknown_preprocess')
                     self.assertEqual(chunk['region']['kind'], kind)

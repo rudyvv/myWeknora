@@ -38,6 +38,8 @@ func TestLanguageForPathRoutesSupportedSourceAndTextFiles(t *testing.T) {
 		"config/app.json":       "text",
 		"config/app.toml":       "text",
 		"config/app.properties": "text",
+		"config/.env":           "text",
+		"config/app.env":        "text",
 		"Dockerfile":            "text",
 		"docker/Dockerfile":     "text",
 		"docker/Dockerfile.ci":  "text",

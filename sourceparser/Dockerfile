@@ -4,7 +4,7 @@ WORKDIR /opt/source-parser
 COPY requirements.lock ./
 RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements.lock
 FROM dependencies AS build
-COPY runtime.py mybatis_parser.py prefetch.py ./
+COPY runtime.py chunking.py mybatis_parser.py prefetch.py ./
 RUN /opt/venv/bin/python prefetch.py --cache /opt/source-parser/grammar
 
 FROM dependencies AS sfc-build
@@ -24,7 +24,7 @@ COPY --from=build /opt/source-parser/grammar ./grammar
 COPY --from=sfc-build /opt/node/bin/node /usr/local/bin/node
 COPY --from=sfc-build /opt/node/LICENSE ./sfc/LICENSE-node.txt
 COPY --from=sfc-build /opt/source-parser/sfc ./sfc
-COPY runtime.py mybatis_parser.py server.py ./
+COPY runtime.py chunking.py mybatis_parser.py server.py ./
 COPY LICENSE-*.txt ./
 RUN chown -R 65532:65532 /opt/source-parser/grammar /opt/source-parser/sfc && chmod -R a+rX,a-w /opt/source-parser /opt/venv /usr/local/bin/node
 USER 65532:65532

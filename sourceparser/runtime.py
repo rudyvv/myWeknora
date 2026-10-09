@@ -1,4 +1,4 @@
-"""Locked Tree-sitter runtime and a provenance adapter over the mature chunker."""
+"""Locked Tree-sitter runtime with semantic chunks and original-byte evidence."""
 import hashlib
 from array import array
 from bisect import bisect_left, bisect_right
@@ -13,8 +13,10 @@ from urllib.parse import urlsplit
 
 if __package__:
     from .mybatis_parser import extract_java_facts, parse_mybatis_xml
+    from .chunking import attach_whitespace, structural_ranges, text_ranges
 else:
     from mybatis_parser import extract_java_facts, parse_mybatis_xml
+    from chunking import attach_whitespace, structural_ranges, text_ranges
 import tree_sitter_language_pack as pack
 
 PACK_VERSION = '1.19.0'
@@ -110,7 +112,7 @@ def runtime_version(versions):
     if not versions:
         return ''
     processing = {'grammars': versions, 'sqlglot': version('sqlglot'), 'xml_rules': 'mybatis-expat-rules-2',
-                  'xml_chunk_rules': 1, 'text_fallback_rules': 1}
+                  'xml_chunk_rules': 2, 'text_fallback_rules': 2, 'semantic_chunk_rules': 1}
     fingerprint = hashlib.sha256(json.dumps(processing, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     rules_version = max((RULES_VERSIONS[language] for language in versions if language in RULES_VERSIONS), default=1)
     return 'source-pack-' + PACK_VERSION + '-rules-' + str(rules_version) + '-' + fingerprint[:32]
@@ -474,6 +476,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     degraded = False
     unknown_preprocess = False
     syntax_error = False
+    partial = False
     diagnostics = response.get('diagnostics', [])
 
     def region_for(block, quality):
@@ -494,6 +497,17 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         'style': {'', 'css', 'scss', 'sass', 'less', 'stylus', 'postcss'},
         'custom': {'', 'json', 'yaml', 'yml'},
     }
+    def append_gap(start, end):
+        if end <= start:
+            return
+        if (chunks and not raw[start:end].strip() and
+                end - chunks[-1]['range']['start_byte'] <= max_bytes):
+            previous = chunks[-1]
+            begin = previous['range']['start_byte']
+            previous.update(content=raw[begin:end].decode('utf-8'), range=span(begin, end))
+        else:
+            chunks.extend(_split_raw(raw, start, end, max_bytes, span, 'structural', None))
+
     for index, block in enumerate(blocks):
         start, end = block['start_byte'], block['end_byte']
         block_type, language = block['type'], block.get('lang', '').lower()
@@ -520,9 +534,17 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         if tag_start is not None and tag_start < cursor:
             raise RuntimeError('SFC parser returned an overlapping block wrapper range')
         split_empty_wrappers = not body and tag_start is not None
-        opening_start = tag_start if wrapper_quality or split_empty_wrappers else start
+        normal_wrappers = (bool(body) and not wrapper_quality and tag_start is not None
+                           and block.get('close_end_byte') is not None)
+        closing_end = block.get('close_end_byte', end)
+        wrapper_bytes = start - tag_start + closing_end - end if normal_wrappers else 0
+        # Reserve room on the edge chunks; coordinates of the body/context
+        # remain original. Very large wrappers retain their bounded evidence.
+        normal_wrappers = normal_wrappers and wrapper_bytes <= max_bytes // 2
+        body_budget = max_bytes - wrapper_bytes if normal_wrappers else max_bytes
+        opening_start = tag_start if wrapper_quality or split_empty_wrappers or normal_wrappers else start
         if opening_start > cursor:
-            chunks.extend(_split_raw(raw, cursor, opening_start, max_bytes, span, 'structural', None))
+            append_gap(cursor, opening_start)
         if wrapper_quality:
             opening_chunks = _split_raw(raw, tag_start, start, max_bytes, span, wrapper_quality, wrapper_region)
             chunks.extend(opening_chunks)
@@ -533,8 +555,9 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         is_script = (not recovered and kind == 'script' and not block.get('src') and
                      script_language in script_languages)
         if is_script and body:
-            parsed = parse_source(body, max_bytes, parser_version, script_language, path)
+            parsed = parse_source(body, body_budget, parser_version, script_language, path)
             block_quality = parsed['quality']
+            partial = partial or block_quality == 'partial'
             syntax_error = syntax_error or block_quality == 'syntax_error'
             block_symbols = [_shift_sfc_fragment(symbol, start, span) for symbol in parsed['symbols']]
             block_chunks = [_shift_sfc_fragment(chunk, start, span) for chunk in parsed['chunks']]
@@ -554,9 +577,17 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
                 unknown_preprocess = True
             if not body and end > start:
                 raise RuntimeError('SFC empty body range mismatch')
-            body_chunks = _split_raw(raw, start, end, max_bytes, span, block_quality,
-                                     region_for(block, block_quality))
+            body_chunks = [{'content': body[a:b].decode('utf-8'), 'range': span(start + a, start + b),
+                            'quality': block_quality, 'symbols': [], 'context': [],
+                            'region': region_for(block, block_quality)}
+                           for a, b in text_ranges(body, body_budget)]
             chunks.extend(body_chunks)
+        if normal_wrappers and body_chunks:
+            first, last = body_chunks[0], body_chunks[-1]
+            first_end = first['range']['end_byte']
+            first.update(content=raw[tag_start:first_end].decode('utf-8'), range=span(tag_start, first_end))
+            last_start = last['range']['start_byte']
+            last.update(content=raw[last_start:closing_end].decode('utf-8'), range=span(last_start, closing_end))
         region = region_for(block, block_quality)
         region_range = span(start, end)
         marker_signature_range = span(start, start)
@@ -567,7 +598,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         for symbol in block_symbols:
             symbol['region'] = region
             symbols.append(symbol)
-        cursor = end
+        cursor = closing_end if normal_wrappers else end
         if (wrapper_quality or split_empty_wrappers) and block.get('close_end_byte') is not None:
             close_start, close_end = block['close_start_byte'], block['close_end_byte']
             if close_start != cursor or close_end <= close_start:
@@ -587,7 +618,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             'body_chunks': body_chunks,
         })
     if cursor < len(raw):
-        chunks.extend(_split_raw(raw, cursor, len(raw), max_bytes, span, 'structural', None))
+        append_gap(cursor, len(raw))
     safe_diagnostic_codes = {'vue_sfc_parse_warning', 'vue_sfc_duplicate_block'}
     if not isinstance(diagnostics, list) or len(diagnostics) > 128:
         raise RuntimeError('SFC parser returned invalid diagnostics')
@@ -672,6 +703,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
     for chunk in chunks:
         area = chunk['range']
         if (area['start_byte'] != verified_cursor or area['end_byte'] <= verified_cursor or
+                area['end_byte'] - area['start_byte'] > max_bytes or
                 raw[area['start_byte']:area['end_byte']].decode('utf-8') != chunk['content']):
             raise RuntimeError('SFC chunker produced a non-verifiable source range')
         verified_cursor = area['end_byte']
@@ -679,7 +711,7 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
         raise RuntimeError('SFC chunker did not cover the original file')
     quality = ('syntax_error' if syntax_error else
                'unknown_preprocess' if unknown_preprocess else
-               'degraded' if degraded else 'structural')
+               'degraded' if degraded else 'partial' if partial else 'structural')
     symbols.sort(key=lambda symbol: (symbol['range']['start_byte'], symbol['range']['end_byte'], symbol['kind']))
     return {'parser_version': parser_version, 'sha256': digest, 'byte_length': len(raw),
             'encoding': 'utf-8-bom' if raw.startswith(b'\xef\xbb\xbf') else 'utf-8',
@@ -687,30 +719,12 @@ def parse_vue_source(raw, max_bytes, parser_version, path, node_runtime, script_
             'facts': sorted(facts, key=lambda fact: (fact['range']['start_byte'], fact['range']['end_byte'], fact['kind']))}
 def is_text_fallback_path(path):
     basename = Path(path).name.lower()
-    return (basename in ('dockerfile', 'containerfile') or basename.startswith(('dockerfile.', 'containerfile.'))
+    return (basename in ('.env', 'dockerfile', 'containerfile') or basename.startswith(('dockerfile.', 'containerfile.'))
             or Path(path).suffix.lower() in TEXT_EXTENSIONS)
 
 
 def _bounded_text_ranges(raw, maximum):
-    ranges = []
-    start = 0
-    while start < len(raw):
-        cut = min(len(raw), start + maximum)
-        if cut < len(raw):
-            while cut > start and raw[cut] & 0xC0 == 0x80:
-                cut -= 1
-            if cut <= start:
-                cut = min(len(raw), start + maximum)
-                while cut < len(raw) and raw[cut] & 0xC0 == 0x80:
-                    cut += 1
-            newline = raw.rfind(b'\n', start, cut)
-            if newline >= start + maximum // 2:
-                cut = newline + 1
-        if cut <= start:
-            raise RuntimeError('text fallback could not make forward progress')
-        ranges.append((start, cut))
-        start = cut
-    return ranges
+    return text_ranges(raw, maximum)
 
 
 def _xml_markup_end(raw, start, end):
@@ -879,11 +893,6 @@ def parse_source(raw, max_bytes, parser_version, language, path):
                 'diagnostics': [{'code': 'text_fallback',
                                  'message': 'No structural grammar is applied; source is indexed as bounded text'}]}
     xml_result = parse_mybatis_xml(raw) if language == 'mybatis-xml' else None
-    chunk_language = 'java' if language == 'mybatis-xml' else language
-    parsed = pack.process(text, pack.ProcessConfig(
-        language=chunk_language, structure=language != 'mybatis-xml', symbols=language != 'mybatis-xml', diagnostics=language != 'mybatis-xml',
-        chunk_max_size=max_bytes, max_source_bytes=16 << 20, parse_timeout_ms=4000,
-    ))
     tree = None if language == 'mybatis-xml' else pack.get_parser(language).parse(raw)
     symbols = []
     java_declarations = {
@@ -1015,6 +1024,12 @@ def parse_source(raw, max_bytes, parser_version, language, path):
                         body = value.child_by_field_name('body')
                     elif value is not None and value.type == 'object' and name is not None and name.type in ('identifier', 'property_identifier', 'private_property_identifier'):
                         kind, body = 'object', value
+                    elif value is not None and value.type in ('new_expression', 'call_expression') and name is not None and name.type == 'identifier':
+                        arguments = value.child_by_field_name('arguments')
+                        aggregate = next((child for child in arguments.named_children
+                                          if child.type in ('object', 'array')), None) if arguments else None
+                        if aggregate is not None:
+                            kind, body = 'binding', aggregate
             if language != 'java' and kind and name is None and node.parent is not None and node.parent.type == 'export_statement':
                 inferred_name = 'default'
             if kind and (name is not None or node.type == 'program' or inferred_name):
@@ -1040,9 +1055,10 @@ def parse_source(raw, max_bytes, parser_version, language, path):
     facts.sort(key=lambda fact: (fact['range']['start_byte'], fact['range']['end_byte'], fact['kind'], fact.get('name', '')))
     chunks = []
     cursor = 0
-    chunk_ranges = [(chunk.start_byte, chunk.end_byte) for chunk in parsed.chunks]
-    expected_chunk_content = {(chunk.start_byte, chunk.end_byte): chunk.content for chunk in parsed.chunks}
-    expected_chunk_metadata = {(chunk.start_byte, chunk.end_byte): chunk.metadata for chunk in parsed.chunks}
+    if tree is not None:
+        chunk_ranges, partial_chunks = structural_ranges(raw, tree.root_node, max_bytes)
+    else:
+        chunk_ranges, partial_chunks = text_ranges(raw, max_bytes), set()
     oversized_xml_comments = []
     if xml_result is not None and xml_result['quality'] == 'structural':
         comment_cursor = 0
@@ -1112,16 +1128,19 @@ def parse_source(raw, max_bytes, parser_version, language, path):
                 append_bounded(region_start, region_end)
             region_cursor = region_end
         append_bounded(region_cursor, len(raw))
+        chunk_ranges = attach_whitespace(raw, chunk_ranges, max_bytes)
     else:
         oversized_mybatis_chunks = set()
+    oversized_mybatis_ranges = sorted(oversized_mybatis_chunks)
+    oversized_mybatis_starts = [a for a, _ in oversized_mybatis_ranges]
+    oversized_mybatis_ends = [b for _, b in oversized_mybatis_ranges]
 
     fact_starts = [fact['range']['start_byte'] for fact in facts]
     fact_ends = [fact['range']['end_byte'] for fact in facts]
     fact_cursor, active_facts, active_fact_ends = 0, set(), []
     partial_region, degraded, xml_comment_cursor = None, False, 0
     for start, end in chunk_ranges:
-        expected = raw[start:end].decode('utf-8') if xml_result is not None and xml_result['quality'] == 'structural' else expected_chunk_content.get((start, end))
-        if start != cursor or end <= start or end > len(raw) or expected is None or raw[start:end].decode('utf-8') != expected:
+        if start != cursor or end <= start or end > len(raw) or end - start > max_bytes:
             raise RuntimeError('chunker produced a non-verifiable source range')
         content = raw[start:end].decode('utf-8')
         cursor = end
@@ -1134,19 +1153,19 @@ def parse_source(raw, max_bytes, parser_version, language, path):
             _, expired = heapq.heappop(active_fact_ends)
             active_facts.discard(expired)
         overlapping_facts = [facts[index] for index in sorted(active_facts)]
-        chunk_metadata = expected_chunk_metadata.get((start, end))
         chunk_quality = quality
-        oversized_unstructured = (chunk_metadata is not None and not chunk_metadata.node_types
-                                  and end - start >= max_bytes)
+        oversized_unstructured = (start, end) in partial_chunks
         while (xml_comment_cursor < len(oversized_xml_comments)
                and oversized_xml_comments[xml_comment_cursor][1] <= start):
             xml_comment_cursor += 1
         oversized_xml_comment = (xml_comment_cursor < len(oversized_xml_comments)
                                  and oversized_xml_comments[xml_comment_cursor][0] < end
                                  and oversized_xml_comments[xml_comment_cursor][1] > start)
-        oversized_mybatis_region = (start, end) in oversized_mybatis_chunks
+        oversized_mybatis_region = (bisect_left(oversized_mybatis_starts, end) >
+                                    bisect_right(oversized_mybatis_ends, start))
         if oversized_unstructured or oversized_xml_comment or oversized_mybatis_region:
-            chunk_quality = 'partial'
+            if chunk_quality == 'structural':
+                chunk_quality = 'partial'
             degraded = True
         if oversized_unstructured:
             if partial_region is not None and partial_region['range']['end_byte'] == start:
@@ -1167,8 +1186,8 @@ def parse_source(raw, max_bytes, parser_version, language, path):
                         + [((fact.get('namespace', '') + '.') if fact.get('namespace') else '')
                            + fact.get('name', fact.get('statement_type', fact['kind']))
                            for fact in overlapping_facts]),
-            'context': [context(s) for s in symbols
-                        if s['range']['start_byte'] <= start and s['range']['end_byte'] >= end][-2:],
+            'context': [context(s) for s in symbols if s['signature'] and
+                        s['range']['start_byte'] < end and s['range']['end_byte'] > start][-2:],
         })
     if degraded and quality == 'structural':
         quality = 'partial'
